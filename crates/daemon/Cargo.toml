@@ -11,6 +11,16 @@ workspace = true
 portable-pty.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
+protocol.workspace = true
+app-core.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+interprocess.workspace = true
+directories.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
