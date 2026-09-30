@@ -1,5 +1,7 @@
 //! Plain-data view of the terminal screen, ready for a renderer to paint.
 
+use unicode_bidi::{BidiClass, bidi_class};
+
 /// An 8-bit-per-channel color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb {
@@ -95,9 +97,14 @@ pub struct Span {
     pub wide: bool,
 }
 
-/// Group a row into spans of identical style. Wide characters always get their own span; spacer cells are skipped.
+/// Group a row into spans of identical style. Spacer cells are skipped.
+///
+/// Wide characters and right-to-left characters always get their own span: the renderer pins each
+/// span to its cells, so a text shaper must never reorder glyphs across cells (bidi display is a
+/// separate step).
 pub fn row_spans(row: &[CellView]) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
+    let mut last_isolated = false;
     for (col, cell) in row.iter().enumerate() {
         if cell.spacer {
             continue;
@@ -106,9 +113,11 @@ pub fn row_spans(row: &[CellView]) -> Vec<Span> {
         if let Some(marks) = &cell.combining {
             text.extend(marks.iter());
         }
-        if !cell.wide
+        let isolated = cell.wide || is_rtl(cell.ch);
+        let merge_into_last = !isolated && !last_isolated;
+        last_isolated = isolated;
+        if merge_into_last
             && let Some(last) = spans.last_mut()
-            && !last.wide
             && last.style == cell.style
             && last.start_col + last.width_cols == col
         {
@@ -125,6 +134,10 @@ pub fn row_spans(row: &[CellView]) -> Vec<Span> {
         });
     }
     spans
+}
+
+fn is_rtl(ch: char) -> bool {
+    matches!(bidi_class(ch), BidiClass::R | BidiClass::AL)
 }
 
 #[cfg(test)]
@@ -168,6 +181,18 @@ mod tests {
         let summary: Vec<_> =
             spans.iter().map(|s| (s.start_col, s.width_cols, s.text.as_str(), s.wide)).collect();
         assert_eq!(summary, vec![(0, 1, "a", false), (1, 2, "漢", true), (3, 1, "b", false)]);
+    }
+
+    #[test]
+    fn rtl_chars_get_single_cell_spans() {
+        let row: Vec<_> = "aשלום b".chars().map(|c| cell(c, 1)).collect();
+        let summary: Vec<_> =
+            row_spans(&row).iter().map(|s| (s.start_col, s.width_cols, s.text.clone())).collect();
+        let expected: Vec<_> = [(0, 1, "a"), (1, 1, "ש"), (2, 1, "ל"), (3, 1, "ו"), (4, 1, "ם"), (5, 2, " b")]
+            .into_iter()
+            .map(|(c, w, t)| (c, w, t.to_string()))
+            .collect();
+        assert_eq!(summary, expected);
     }
 
     #[test]

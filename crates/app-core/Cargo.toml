@@ -10,3 +10,4 @@ workspace = true
 [dependencies]
 alacritty_terminal.workspace = true
 regex.workspace = true
+unicode-bidi.workspace = true

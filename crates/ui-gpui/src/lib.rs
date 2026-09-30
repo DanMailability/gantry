@@ -10,6 +10,7 @@ use crate::terminal_view::TerminalView;
 /// Start `spec` in a PTY, show it in a window, and run until the window closes.
 pub fn run(spec: SpawnSpec) {
     gpui_platform::application().run(move |cx: &mut App| {
+        terminal_view::bind_keys(cx);
         let (pty, reader) = match PtyProcess::spawn(&spec) {
             Ok(pair) => pair,
             Err(err) => {
