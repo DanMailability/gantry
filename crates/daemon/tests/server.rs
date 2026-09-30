@@ -160,3 +160,84 @@ async fn resize_reaches_the_program() {
     c.send(&ClientMessage::Resize { pane, cols: 100, rows: 30, cell_width: 8, cell_height: 18 }).await;
     c.output_until(pane, "30 100").await;
 }
+
+#[tokio::test]
+async fn reattach_replays_the_screen() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let pane = {
+        let mut first = TestClient::connect(&h.paths).await;
+        let pane = first.spawn("printf 'hello from before'; sleep 5").await;
+        first.output_until(pane, "hello from before").await;
+        pane
+    };
+    let mut second = TestClient::connect(&h.paths).await;
+    second.send(&ClientMessage::Attach { pane }).await;
+    assert!(matches!(second.control().await, DaemonMessage::Resync { pane: p, cols: 80, rows: 24 } if p == pane));
+    second.output_until(pane, "hello from before").await;
+}
+
+#[tokio::test]
+async fn a_second_client_takes_over() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut first = TestClient::connect(&h.paths).await;
+    let _second = TestClient::connect(&h.paths).await;
+    assert_eq!(first.control().await, DaemonMessage::TakenOver);
+    assert_eq!(first.frame().await, None, "first connection must be closed after takeover");
+}
+
+#[tokio::test]
+async fn lagging_client_gets_a_resync_instead_of_unbounded_buffering() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let pane = c.spawn("yes 'flood flood flood flood flood'").await;
+    tokio::time::sleep(Duration::from_secs(2)).await; // not reading: socket + outbox fill up
+    let mut saw_resync = false;
+    for _ in 0..20_000 {
+        if let Some(frame @ Frame::Control(_)) = c.frame().await
+            && let DaemonMessage::Resync { pane: p, .. } = frame.parse().unwrap().unwrap()
+        {
+            assert_eq!(p, pane);
+            saw_resync = true;
+            break;
+        }
+    }
+    assert!(saw_resync, "a client that fell behind must be resynced");
+    c.send(&ClientMessage::Kill { pane }).await;
+}
+
+#[tokio::test]
+async fn stop_all_ends_panes_and_the_server() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    c.spawn("sleep 30").await;
+    c.send(&ClientMessage::StopAll).await;
+    timeout(Duration::from_secs(5), h.server).await.expect("server did not stop").unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn server_stops_when_last_pane_exits_without_a_client() {
+    let h = start_server(Duration::from_secs(10)).await;
+    {
+        let mut c = TestClient::connect(&h.paths).await;
+        c.spawn("sleep 1").await;
+    }
+    timeout(Duration::from_secs(5), h.server).await.expect("server kept running").unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn server_stops_if_nobody_ever_connects() {
+    let h = start_server(Duration::from_millis(200)).await;
+    timeout(Duration::from_secs(3), h.server).await.expect("idle server kept running").unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn version_mismatch_still_accepts_stop_all() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let stream = Stream::connect(h.paths.socket_name().unwrap()).await.unwrap();
+    let (mut recv, mut send) = stream.split();
+    write_frame(&mut send, &Frame::control(&ClientMessage::Hello { protocol: 999 })).await.unwrap();
+    let reply: DaemonMessage = read_frame(&mut recv).await.unwrap().unwrap().parse().unwrap().unwrap();
+    assert_eq!(reply, DaemonMessage::VersionMismatch { daemon_protocol: PROTOCOL_VERSION });
+    write_frame(&mut send, &Frame::control(&ClientMessage::StopAll)).await.unwrap();
+    timeout(Duration::from_secs(5), h.server).await.expect("server did not stop").unwrap().unwrap();
+}

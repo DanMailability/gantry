@@ -346,14 +346,27 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
     tokio::spawn(async move {
         while let Ok(first) = output.recv().await {
             let bytes = drain_batch(&output, first, MAX_BATCH_BYTES);
-            let mut state = reader_shared.state.lock().unwrap();
-            let Some(pane) = state.panes.get_mut(&id) else { break };
-            pane.term.feed(&bytes);
-            let replies = pane.term.take_pty_writes();
-            if !replies.is_empty() {
-                let _ = pane.pty.write(&replies);
+            let pane_alive = {
+                let mut state = reader_shared.state.lock().unwrap();
+                match state.panes.get_mut(&id) {
+                    Some(pane) => {
+                        pane.term.feed(&bytes);
+                        let replies = pane.term.take_pty_writes();
+                        if !replies.is_empty() {
+                            let _ = pane.pty.write(&replies);
+                        }
+                        state.deliver(id, bytes);
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if !pane_alive {
+                break;
             }
-            state.deliver(id, bytes);
+            // A flooding pane keeps its channel full, so `recv` never waits; yield so connection
+            // writers and other panes still run.
+            tokio::task::yield_now().await;
         }
         reader_done.notify_one();
     });
