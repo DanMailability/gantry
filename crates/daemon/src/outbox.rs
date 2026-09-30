@@ -48,6 +48,15 @@ impl Outbox {
         true
     }
 
+    /// Queue a data frame even if over budget (used for resync replays, which must not be dropped).
+    pub fn force_push_data(&self, frame: Frame) {
+        let mut queue = self.queue.lock().unwrap();
+        queue.data_bytes += frame.encoded_len();
+        queue.frames.push_back(frame);
+        drop(queue);
+        self.ready.notify_one();
+    }
+
     /// Whether at most half the data budget is in use (safe to start a resync).
     pub fn has_room(&self) -> bool {
         self.queue.lock().unwrap().data_bytes <= self.data_budget / 2
