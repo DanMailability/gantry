@@ -50,7 +50,7 @@ enum Reply {
 }
 
 #[derive(Clone)]
-struct Listener {
+pub(crate) struct Listener {
     replies: Arc<Mutex<Vec<Reply>>>,
 }
 
@@ -85,7 +85,7 @@ impl Dimensions for GridSize {
 
 /// One pane's terminal: parser, grid, scrollback, modes, and selection.
 pub struct TermState {
-    term: Term<Listener>,
+    pub(crate) term: Term<Listener>,
     parser: Processor,
     replies: Arc<Mutex<Vec<Reply>>>,
     palette: Palette,

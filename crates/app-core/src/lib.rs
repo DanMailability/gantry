@@ -3,6 +3,7 @@
 pub mod input;
 pub mod layout;
 pub mod palette;
+pub mod replay;
 pub mod paste;
 pub mod scroll;
 pub mod snapshot;
