@@ -10,3 +10,7 @@ workspace = true
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+app-core.workspace = true
+daemon.workspace = true
+async-channel.workspace = true
+tracing.workspace = true
