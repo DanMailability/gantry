@@ -44,7 +44,7 @@ impl LaunchArgs {
         };
         let mut command = self.command.into_iter();
         let program = command.next().unwrap_or_else(default_shell);
-        Ok(SpawnSpec { program, args: command.collect(), cwd, env: Vec::new(), cols, rows })
+        Ok(SpawnSpec { program, args: command.collect(), cwd, env: Vec::new(), base_env: None, cols, rows })
     }
 }
 

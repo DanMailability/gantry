@@ -17,6 +17,8 @@ pub struct SpawnSpec {
     pub cwd: PathBuf,
     /// Extra environment variables, applied after the terminal defaults.
     pub env: Vec<(String, String)>,
+    /// Complete environment to start from; `None` inherits the current process environment.
+    pub base_env: Option<Vec<(String, String)>>,
     /// Initial terminal width in columns.
     pub cols: u16,
     /// Initial terminal height in rows.
@@ -49,6 +51,12 @@ impl PtyProcess {
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
+        if let Some(env) = &spec.base_env {
+            cmd.env_clear();
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         for (key, value) in &spec.env {
@@ -226,6 +234,7 @@ mod tests {
             args: vec!["-c".into(), script.into()],
             cwd: cwd.to_path_buf(),
             env: Vec::new(),
+            base_env: None,
             cols: 80,
             rows: 24,
         }
@@ -306,6 +315,20 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(Some(3)));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn base_env_replaces_the_inherited_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = sh("printf \"[$CCM_BASE][$HOME]\"", dir.path());
+        spec.base_env = Some(vec![
+            ("CCM_BASE".into(), "from-login-shell".into()),
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+        ]);
+        let (_pty, reader) = PtyProcess::spawn(&spec).unwrap();
+        let out = read_until(reader, "]", Duration::from_secs(5));
+        assert!(out.contains("[from-login-shell][]"), "got: {out:?}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn output_is_readable() {
@@ -315,6 +338,7 @@ mod tests {
             args: vec!["/C".into(), "echo hello-pty".into()],
             cwd: dir.path().to_path_buf(),
             env: Vec::new(),
+            base_env: None,
             cols: 80,
             rows: 24,
         };
