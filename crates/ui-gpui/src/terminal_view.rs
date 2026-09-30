@@ -1,6 +1,5 @@
 //! GPUI view that renders one terminal pane and exchanges bytes with its PTY.
 
-use std::io::Read;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -11,7 +10,8 @@ use app_core::scroll::{ScrollAction, scroll_action};
 use app_core::url::link_at;
 use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
 use app_core::term_state::TermState;
-use daemon::pty::{PtyProcess, drain_batch, spawn_output_reader};
+use daemon::client::{ClientEvent, DaemonClient, batch_events};
+use protocol::message::PaneId;
 use gpui::{
     App, BorderStyle, Bounds, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, Pixels,
     Point, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, canvas, div,
@@ -62,8 +62,6 @@ fn key_bindings() -> Vec<KeyBinding> {
 /// Font size used at startup and restored by "reset zoom".
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
-/// Output chunks buffered between the PTY reader thread and the UI.
-const OUTPUT_QUEUE_CHUNKS: usize = 32;
 /// Largest amount of output parsed per UI update, so input and rendering keep running during a flood.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 
@@ -80,11 +78,12 @@ struct CellMetrics {
     height: Pixels,
 }
 
-/// One terminal pane: owns the PTY process and the terminal state fed by its output.
+/// One terminal pane, attached to a daemon-owned session.
 pub struct TerminalView {
     focus_handle: FocusHandle,
     term: TermState,
-    pty: PtyProcess,
+    client: DaemonClient,
+    pane: PaneId,
     font: Font,
     font_size: Pixels,
     grid_origin: Point<Pixels>,
@@ -95,46 +94,39 @@ pub struct TerminalView {
     mouse_position: Option<Point<Pixels>>,
     hovered_link: Option<(u16, Range<usize>)>,
     exit_code: Option<u32>,
-    _reader: Task<()>,
-    _exit_watch: Task<()>,
+    disconnected: bool,
+    _events: Task<()>,
 }
 
 impl TerminalView {
-    /// Wrap a spawned PTY process. `cols`/`rows` must match the size the process was spawned with.
+    /// Show daemon pane `pane`, fed by `events`. `cols`/`rows` is the pane's size until the first resync or resize.
     pub fn new(
-        pty: PtyProcess,
-        reader: Box<dyn Read + Send>,
+        client: DaemonClient,
+        pane: PaneId,
+        events: async_channel::Receiver<ClientEvent>,
         cols: u16,
         rows: u16,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let rx = spawn_output_reader(reader, OUTPUT_QUEUE_CHUNKS);
-        let reader_task = cx.spawn(async move |this, cx| {
-            while let Ok(first) = rx.recv().await {
-                let bytes = drain_batch(&rx, first, MAX_BATCH_BYTES);
-                if this.update(cx, |view, cx| view.on_output(&bytes, cx)).is_err() {
+        let events_task = cx.spawn(async move |this, cx| {
+            while let Ok(first) = events.recv().await {
+                let batch = batch_events(first, &events, MAX_BATCH_BYTES);
+                if this.update(cx, |view, cx| view.on_events(batch, cx)).is_err() {
                     return;
                 }
                 // Yield to the event loop so keystrokes (e.g. Ctrl+C) are handled between batches.
                 cx.background_executor().timer(Duration::ZERO).await;
             }
-        });
-        let exit = pty.exit_signal();
-        let exit_watch = cx.spawn(async move |this, cx| {
-            if let Ok(code) = exit.recv().await {
-                let _ = this.update(cx, |view, cx| {
-                    view.exit_code = Some(code);
-                    cx.notify();
-                });
-            }
+            let _ = this.update(cx, |view, cx| view.on_events(vec![ClientEvent::Disconnected], cx));
         });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         TerminalView {
             focus_handle,
             term: TermState::new(cols, rows),
-            pty,
+            client,
+            pane,
             font: font(FONT_FAMILY),
             font_size: px(DEFAULT_FONT_SIZE),
             grid_origin: Point::default(),
@@ -145,24 +137,40 @@ impl TerminalView {
             mouse_position: None,
             hovered_link: None,
             exit_code: None,
-            _reader: reader_task,
-            _exit_watch: exit_watch,
+            disconnected: false,
+            _events: events_task,
         }
     }
 
-    fn on_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        self.term.feed(bytes);
-        let replies = self.term.take_pty_writes();
-        if !replies.is_empty() {
-            self.write_pty(&replies);
+    fn on_events(&mut self, events: Vec<ClientEvent>, cx: &mut Context<Self>) {
+        for event in events {
+            match event {
+                ClientEvent::Output { pane, bytes } if pane == self.pane => {
+                    self.term.feed(&bytes);
+                    // The daemon answers terminal queries; replies from this copy would be duplicates.
+                    self.term.take_pty_writes();
+                }
+                ClientEvent::Resync { pane, cols, rows } if pane == self.pane => {
+                    self.term = TermState::new(cols, rows);
+                    // The next layout pass resizes to the window if it differs.
+                    self.grid_size = (cols, rows);
+                }
+                ClientEvent::Exited { pane, code } if pane == self.pane => self.exit_code = Some(code),
+                ClientEvent::TakenOver => cx.quit(),
+                ClientEvent::Disconnected => self.disconnected = true,
+                _ => {}
+            }
         }
         cx.notify();
     }
 
+    /// Whether the pane can no longer be used (process exited or daemon connection lost).
+    pub fn is_finished(&self) -> bool {
+        self.exit_code.is_some() || self.disconnected
+    }
+
     fn write_pty(&mut self, bytes: &[u8]) {
-        if let Err(err) = self.pty.write(bytes) {
-            tracing::warn!("writing to pty failed: {err}");
-        }
+        self.client.input(self.pane, bytes);
     }
 
     fn cell_metrics(&self, window: &Window) -> CellMetrics {
@@ -178,10 +186,8 @@ impl TerminalView {
     fn layout(&mut self, bounds: Bounds<Pixels>, metrics: CellMetrics, cx: &mut Context<Self>) {
         self.grid_origin = bounds.origin;
         self.metrics = metrics;
-        self.term.set_cell_size(
-            f32::from(metrics.width).round() as u16,
-            f32::from(metrics.height).round() as u16,
-        );
+        let cell = (f32::from(metrics.width).round() as u16, f32::from(metrics.height).round() as u16);
+        self.term.set_cell_size(cell.0, cell.1);
         let dims = grid_dims(
             f32::from(bounds.size.width),
             f32::from(bounds.size.height),
@@ -191,9 +197,7 @@ impl TerminalView {
         if dims != self.grid_size {
             self.grid_size = dims;
             self.term.resize(dims.0, dims.1);
-            if let Err(err) = self.pty.resize(dims.0, dims.1) {
-                tracing::warn!("pty resize failed: {err:#}");
-            }
+            self.client.resize(self.pane, dims.0, dims.1, cell.0, cell.1);
             cx.notify();
         }
     }
@@ -206,7 +210,7 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.exit_code.is_some() {
+        if self.is_finished() {
             cx.quit();
             return;
         }
@@ -377,7 +381,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.exit_code.is_some() {
+        if self.is_finished() {
             cx.quit();
             return;
         }
@@ -481,6 +485,15 @@ impl Render for TerminalView {
                         .py_1()
                         .text_color(banner_color)
                         .child(format!("Process exited (code {code}) — press any key to close")),
+                )
+            })
+            .when(self.disconnected, |this| {
+                this.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_color(banner_color)
+                        .child("Lost connection to the ccm daemon — press any key to close"),
                 )
             })
     }
