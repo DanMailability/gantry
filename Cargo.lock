@@ -1297,6 +1297,7 @@ name = "daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "portable-pty",
  "tempfile",
 ]
@@ -5787,7 +5788,6 @@ name = "ui-gpui"
 version = "0.1.0"
 dependencies = [
  "app-core",
- "async-channel",
  "daemon",
  "gpui",
  "gpui_platform",

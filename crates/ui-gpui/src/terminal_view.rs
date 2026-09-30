@@ -2,6 +2,7 @@
 
 use std::io::Read;
 use std::ops::Range;
+use std::time::Duration;
 
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
@@ -10,7 +11,7 @@ use app_core::scroll::{ScrollAction, scroll_action};
 use app_core::url::link_at;
 use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
 use app_core::term_state::TermState;
-use daemon::pty::PtyProcess;
+use daemon::pty::{PtyProcess, drain_batch, spawn_output_reader};
 use gpui::{
     App, BorderStyle, Bounds, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, Pixels,
     Point, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, canvas, div,
@@ -61,6 +62,10 @@ fn key_bindings() -> Vec<KeyBinding> {
 /// Font size used at startup and restored by "reset zoom".
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
+/// Output chunks buffered between the PTY reader thread and the UI.
+const OUTPUT_QUEUE_CHUNKS: usize = 32;
+/// Largest amount of output parsed per UI update, so input and rendering keep running during a flood.
+const MAX_BATCH_BYTES: usize = 256 * 1024;
 
 #[cfg(target_os = "linux")]
 const FONT_FAMILY: &str = "Noto Sans Mono";
@@ -89,8 +94,9 @@ pub struct TerminalView {
     selecting: bool,
     mouse_position: Option<Point<Pixels>>,
     hovered_link: Option<(u16, Range<usize>)>,
-    exited: bool,
+    exit_code: Option<u32>,
     _reader: Task<()>,
+    _exit_watch: Task<()>,
 }
 
 impl TerminalView {
@@ -103,21 +109,25 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (tx, rx) = async_channel::unbounded::<Vec<u8>>();
-        std::thread::spawn(move || read_loop(reader, tx));
+        let rx = spawn_output_reader(reader, OUTPUT_QUEUE_CHUNKS);
         let reader_task = cx.spawn(async move |this, cx| {
-            while let Ok(mut bytes) = rx.recv().await {
-                while let Ok(more) = rx.try_recv() {
-                    bytes.extend_from_slice(&more);
-                }
+            while let Ok(first) = rx.recv().await {
+                let bytes = drain_batch(&rx, first, MAX_BATCH_BYTES);
                 if this.update(cx, |view, cx| view.on_output(&bytes, cx)).is_err() {
                     return;
                 }
+                // Yield to the event loop so keystrokes (e.g. Ctrl+C) are handled between batches.
+                cx.background_executor().timer(Duration::ZERO).await;
             }
-            let _ = this.update(cx, |view, cx| {
-                view.exited = true;
-                cx.notify();
-            });
+        });
+        let exit = pty.exit_signal();
+        let exit_watch = cx.spawn(async move |this, cx| {
+            if let Ok(code) = exit.recv().await {
+                let _ = this.update(cx, |view, cx| {
+                    view.exit_code = Some(code);
+                    cx.notify();
+                });
+            }
         });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -134,8 +144,9 @@ impl TerminalView {
             selecting: false,
             mouse_position: None,
             hovered_link: None,
-            exited: false,
+            exit_code: None,
             _reader: reader_task,
+            _exit_watch: exit_watch,
         }
     }
 
@@ -167,6 +178,10 @@ impl TerminalView {
     fn layout(&mut self, bounds: Bounds<Pixels>, metrics: CellMetrics, cx: &mut Context<Self>) {
         self.grid_origin = bounds.origin;
         self.metrics = metrics;
+        self.term.set_cell_size(
+            f32::from(metrics.width).round() as u16,
+            f32::from(metrics.height).round() as u16,
+        );
         let dims = grid_dims(
             f32::from(bounds.size.width),
             f32::from(bounds.size.height),
@@ -191,7 +206,7 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.exited {
+        if self.exit_code.is_some() {
             cx.quit();
             return;
         }
@@ -362,7 +377,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.exited {
+        if self.exit_code.is_some() {
             cx.quit();
             return;
         }
@@ -459,9 +474,13 @@ impl Render for TerminalView {
                 .flex_1()
                 .w_full(),
             )
-            .when(self.exited, |this| {
+            .when_some(self.exit_code, |this, code| {
                 this.child(
-                    div().px_2().py_1().text_color(banner_color).child("Process exited — press any key to close"),
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_color(banner_color)
+                        .child(format!("Process exited (code {code}) — press any key to close")),
                 )
             })
     }
@@ -469,20 +488,6 @@ impl Render for TerminalView {
 
 fn link_modifier(modifiers: Modifiers) -> bool {
     modifiers.control || modifiers.platform
-}
-
-fn read_loop(mut reader: Box<dyn Read + Send>, tx: async_channel::Sender<Vec<u8>>) {
-    let mut buf = [0u8; 8192];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if tx.send_blocking(buf[..n].to_vec()).is_err() {
-                    break;
-                }
-            }
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

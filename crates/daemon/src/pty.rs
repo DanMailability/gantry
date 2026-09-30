@@ -2,8 +2,9 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 /// Everything needed to start a process in a PTY.
 #[derive(Clone, Debug)]
@@ -34,8 +35,9 @@ pub fn default_shell() -> String {
 /// A running process attached to a PTY. Dropping it kills the process.
 pub struct PtyProcess {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    input: mpsc::Sender<Vec<u8>>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    exit: async_channel::Receiver<u32>,
 }
 
 impl PtyProcess {
@@ -52,17 +54,32 @@ impl PtyProcess {
         for (key, value) in &spec.env {
             cmd.env(key, value);
         }
-        let child = pair.slave.spawn_command(cmd)?;
+        let mut child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
+        let killer = child.clone_killer();
+        // The waiter reaps the child and reports its exit even when the output stream stays open
+        // (Windows ConPTY, or a background job still holding the terminal).
+        let (exit_tx, exit) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let code = child.wait().map(|status| status.exit_code()).unwrap_or(1);
+            let _ = exit_tx.send_blocking(code);
+        });
         let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
-        Ok((PtyProcess { master: pair.master, writer, child }, reader))
+        let input = spawn_input_writer(pair.master.take_writer()?);
+        Ok((PtyProcess { master: pair.master, input, killer, exit }, reader))
     }
 
-    /// Send bytes to the process's input.
+    /// Queue bytes for the process's input. Never blocks: a writer thread delivers them as the
+    /// process reads, so a program that is not reading cannot stall the caller.
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()
+        self.input
+            .send(bytes.to_vec())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty input closed"))
+    }
+
+    /// Receiver that yields the process's exit code once it exits.
+    pub fn exit_signal(&self) -> async_channel::Receiver<u32> {
+        self.exit.clone()
     }
 
     /// Tell the PTY (and so the process) about a new terminal size.
@@ -72,14 +89,59 @@ impl PtyProcess {
 
     /// Terminate the process.
     pub fn kill(&mut self) -> std::io::Result<()> {
-        self.child.kill()
+        self.killer.kill()
     }
 }
 
 impl Drop for PtyProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let _ = self.killer.kill();
     }
+}
+
+fn spawn_input_writer(mut writer: Box<dyn Write + Send>) -> mpsc::Sender<Vec<u8>> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        for bytes in rx {
+            if writer.write_all(&bytes).and_then(|()| writer.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    tx
+}
+
+/// Read PTY output on a background thread, delivering chunks through the returned channel.
+///
+/// At most `capacity` chunks are buffered. When the consumer falls behind, the thread stops
+/// reading, the kernel PTY buffer fills, and the program blocks on its own writes — so a flood
+/// of output cannot grow memory without limit.
+pub fn spawn_output_reader(mut reader: Box<dyn Read + Send>, capacity: usize) -> async_channel::Receiver<Vec<u8>> {
+    let (tx, rx) = async_channel::bounded(capacity);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send_blocking(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Append chunks already waiting in `rx` to `first`, stopping once the batch reaches `max_bytes`.
+pub fn drain_batch(rx: &async_channel::Receiver<Vec<u8>>, mut first: Vec<u8>, max_bytes: usize) -> Vec<u8> {
+    while first.len() < max_bytes
+        && let Ok(more) = rx.try_recv()
+    {
+        first.extend_from_slice(&more);
+    }
+    first
 }
 
 fn pty_size(cols: u16, rows: u16) -> PtySize {
@@ -89,6 +151,8 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::{Duration, Instant};
 
@@ -122,6 +186,37 @@ mod tests {
             }
         }
         out
+    }
+
+    /// An endless output source that counts how many times it was read.
+    struct Endless(Arc<AtomicUsize>);
+
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            buf.fill(b'y');
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn reader_stops_reading_while_consumer_lags() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let _rx = spawn_output_reader(Box::new(Endless(reads.clone())), 4);
+        std::thread::sleep(Duration::from_millis(200));
+        let count = reads.load(Ordering::SeqCst);
+        assert!(count <= 6, "reader kept going while nobody consumed: {count} reads");
+    }
+
+    #[test]
+    fn batches_are_capped() {
+        let (tx, rx) = async_channel::unbounded();
+        for _ in 0..10 {
+            tx.send_blocking(vec![0u8; 100_000]).unwrap();
+        }
+        let batch = drain_batch(&rx, vec![0u8; 100_000], 256_000);
+        assert_eq!(batch.len(), 300_000);
+        assert_eq!(rx.len(), 8);
     }
 
     #[cfg(unix)]
@@ -185,6 +280,30 @@ mod tests {
         pty.write(b"abc\r").unwrap();
         let out = read_until(reader, "got:abc", Duration::from_secs(5));
         assert!(out.contains("got:abc"), "got: {out:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writing_to_a_program_that_does_not_read_never_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut pty, _reader) = PtyProcess::spawn(&sh("stty raw -echo; sleep 3", dir.path())).unwrap();
+        std::thread::sleep(Duration::from_millis(300)); // let `stty raw` take effect
+        let started = Instant::now();
+        pty.write(&vec![b'x'; 1_000_000]).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500), "write blocked for {:?}", started.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_is_reported_while_a_background_job_holds_the_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pty, _reader) = PtyProcess::spawn(&sh("sleep 5 & exit 3", dir.path())).unwrap();
+        let exit = pty.exit_signal();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(exit.recv_blocking().ok());
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(Some(3)));
     }
 
     #[cfg(windows)]
