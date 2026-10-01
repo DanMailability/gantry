@@ -22,12 +22,11 @@ pub fn deliver(notice: Notice, clicked: async_channel::Sender<NodeId>) {
 }
 
 fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
-    let shown = notify_rust::Notification::new()
-        .appname("Gantry")
-        .summary(&notice.summary)
-        .body(&notice.body)
-        .action("default", "Show")
-        .show();
+    let mut notification = notify_rust::Notification::new();
+    notification.appname("Gantry").summary(&notice.summary).body(&notice.body).action("default", "Show");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    notification.hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()));
+    let shown = notification.show();
     let handle = match shown {
         Ok(handle) => handle,
         Err(err) => {

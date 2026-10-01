@@ -31,6 +31,9 @@ impl Render for Notice {
     }
 }
 
+/// Freedesktop app id: Wayland app id / X11 class, desktop file and icon name.
+pub const APP_ID: &str = "io.github.idogrf.Gantry";
+
 /// Connect to (or start) the daemon, restore the layout, and run until the app quits.
 pub fn run(launch: Launch) {
     gpui_platform::application().run(move |cx: &mut App| {
@@ -41,6 +44,7 @@ pub fn run(launch: Launch) {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions { title: Some("Gantry".into()), ..Default::default() }),
+            app_id: Some(APP_ID.into()),
             #[cfg(target_os = "linux")]
             window_decorations: Some(gpui::WindowDecorations::Client),
             ..Default::default()
@@ -108,4 +112,22 @@ fn install_quit_prompt(window: WindowHandle<WorkspaceView>, cx: &mut App) {
 /// Closing the window asks: Detach (sessions keep running) / Stop all sessions / Cancel.
 fn install_should_close(window: &mut Window, cx: &mut App, view: gpui::Entity<WorkspaceView>) {
     window.on_window_should_close(cx, move |window, cx| view.update(cx, |view, cx| view.request_quit(window, cx)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::APP_ID;
+
+    const DESKTOP: &str = include_str!("../../../packaging/linux/io.github.idogrf.Gantry.desktop");
+
+    #[test]
+    fn the_desktop_entry_matches_the_app_id() {
+        let field = |key: &str| {
+            DESKTOP.lines().find_map(|line| line.strip_prefix(&format!("{key}="))).unwrap_or_default().to_string()
+        };
+        assert_eq!(field("Icon"), APP_ID);
+        assert_eq!(field("StartupWMClass"), APP_ID);
+        assert_eq!(field("Name"), "Gantry");
+        assert_eq!(field("Exec"), "gantry");
+    }
 }

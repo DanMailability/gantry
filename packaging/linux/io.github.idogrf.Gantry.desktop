@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Gantry
+GenericName=Claude Code Session Manager
+Comment=Terminal for running and managing Claude Code sessions
+Exec=gantry
+Icon=io.github.idogrf.Gantry
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;claude;sessions;shell;
+StartupNotify=true
+StartupWMClass=io.github.idogrf.Gantry
