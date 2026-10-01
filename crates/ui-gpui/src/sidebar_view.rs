@@ -267,6 +267,8 @@ impl SidebarView {
             }));
         let muted = |text: String| div().flex_none().text_xs().text_color(rgb(MUTED)).child(text);
         let title = |text: String, color: u32| div().min_w_0().truncate().text_color(rgb(color)).child(text);
+        // Paths give way to titles: they shrink first and truncate.
+        let path_label = |text: String| div().min_w_0().flex_shrink(4.).truncate().text_xs().text_color(rgb(MUTED)).child(text);
         match &row.kind {
             RowKind::Host { name } => base.text_color(rgb(MUTED)).child(format!("▾ {name}")),
             RowKind::Group { label, count } => base.text_xs().text_color(rgb(MUTED)).child(format!("{} · {count}", label.to_uppercase())),
@@ -295,14 +297,14 @@ impl SidebarView {
                 let right = if closed && !session.cwd_exists { "dir missing".to_string() } else { age.clone() };
                 base.child(div().flex_none().text_color(rgb(color)).child(glyph))
                     .child(title(session_title(session).to_string(), if closed { MUTED } else { TEXT }))
-                    .when_some(path.clone(), |el, path| el.child(muted(path)))
+                    .when_some(path.clone(), |el, path| el.child(path_label(path)))
                     .child(div().flex_1())
                     .child(muted(right))
             }
             RowKind::Shell { entry, path } => base
                 .child(div().flex_none().text_color(rgb(MUTED)).child("○"))
                 .child(title(entry.title.clone(), TEXT))
-                .when_some(path.clone(), |el, path| el.child(muted(path))),
+                .when_some(path.clone(), |el, path| el.child(path_label(path))),
             RowKind::More { hidden, .. } => base.text_color(rgb(MUTED)).child(format!("… {hidden} more")),
             RowKind::Detail { text, .. } => base.text_xs().italic().text_color(rgb(MUTED)).child(text.clone()),
         }
@@ -385,6 +387,8 @@ impl Render for SidebarView {
                     anchored().position(position).child(
                         div()
                             .id("dir-menu")
+                            // A floating layer: clicks must not reach the rows beneath it.
+                            .occlude()
                             .py_1()
                             .text_sm()
                             .bg(rgb(PANEL))

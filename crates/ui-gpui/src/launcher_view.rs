@@ -109,6 +109,7 @@ impl LauncherView {
         };
         div()
             .id(index)
+            .w_full()
             .h(px(24.))
             .px_3()
             .flex()
