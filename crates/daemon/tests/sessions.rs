@@ -139,3 +139,38 @@ fn a_claude_pane_is_managed_by_its_session_id_until_it_exits() {
     s.conn.client.kill(pane);
     wait_for(&s.conn, "s4", |s| s.state == SessionState::Closed);
 }
+
+#[test]
+fn a_session_is_closed_as_soon_as_its_pane_exits() {
+    let s = start(|config, work| transcript(config, "s6", work, "first"));
+    wait_for(&s.conn, "s6", |s| s.state == SessionState::Closed);
+    let (pane, output) = spawn(&s.conn, "sh", &["-c", "echo PID:$$; sleep 30"], &s.work, "PID:");
+    let digits: String = output.split("PID:").nth(1).unwrap().chars().take_while(char::is_ascii_digit).collect();
+    let pid: u32 = digits.parse().unwrap();
+    let start = claude_index::host::process_start(pid).unwrap();
+    std::fs::create_dir_all(s.config.join("sessions")).unwrap();
+    let pid_file = serde_json::json!({"pid": pid, "sessionId": "s6", "cwd": s.work, "procStart": start, "status": "idle"});
+    std::fs::write(s.config.join("sessions").join(format!("{pid}.json")), pid_file.to_string()).unwrap();
+    wait_for(&s.conn, "s6", |s| s.state == SessionState::Managed { pane });
+    let killed = Instant::now();
+    s.conn.client.kill(pane);
+    // The pid file stays (sh never removes it) and the periodic rescan is 5 s away: without the daemon remembering
+    // the exit, s6 would show External (pid alive in the stale records) first.
+    loop {
+        assert!(killed.elapsed() < Duration::from_secs(2), "s6 did not turn Closed promptly");
+        let upserted = match s.conn.events.try_recv() {
+            Ok(ClientEvent::SessionsChanged { upserted, .. }) => upserted,
+            Ok(_) => continue,
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
+        let Some(s6) = upserted.into_iter().find(|s| s.id == "s6") else { continue };
+        assert_ne!(s6.state, SessionState::External { pid: Some(pid) }, "flashed External after its pane exited");
+        if s6.state == SessionState::Closed {
+            assert_eq!(s6.status, None);
+            break;
+        }
+    }
+}

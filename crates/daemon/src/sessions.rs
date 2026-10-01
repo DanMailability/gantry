@@ -26,15 +26,34 @@ pub struct PaneSession {
     pub session_arg: Option<String>,
 }
 
+/// A process the daemon saw exit (a pane's, or one it took over), identified by pid and start time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gone {
+    /// Its pid.
+    pub pid: u32,
+    /// Its start time, as `/proc` reported it while it ran.
+    pub start: Option<String>,
+}
+
+/// Whether the index still says `gone` runs (its pid file has not been re-checked yet).
+pub fn still_claimed(gone: &Gone, records: &[SessionRecord]) -> bool {
+    records.iter().any(|r| r.state == IndexState::Running { pid: gone.pid } && r.proc_start == gone.start)
+}
+
 /// Combine index records with panes. A running record whose process is a pane's process is managed by
 /// that pane. The session a pane was started with is managed by it while that pane has no running
 /// record of its own (Claude has not written its pid file yet); once it has one (e.g. after `/clear`),
-/// the start session is closed.
-pub fn resolve(records: &[SessionRecord], panes: &[PaneSession]) -> Vec<SessionInfo> {
+/// the start session is closed. A record whose process is `gone` counts as closed: the index has not
+/// noticed the exit yet.
+pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone]) -> Vec<SessionInfo> {
+    let index_state = |r: &SessionRecord| match r.state {
+        IndexState::Running { pid } if gone.iter().any(|g| g.pid == pid && g.start == r.proc_start) => IndexState::Closed,
+        state => state,
+    };
     let by_pid: HashMap<u32, PaneId> = panes.iter().filter_map(|p| Some((p.pid?, p.pane))).collect();
     let reporting: HashSet<PaneId> = records
         .iter()
-        .filter_map(|r| match r.state {
+        .filter_map(|r| match index_state(r) {
             IndexState::Running { pid } => by_pid.get(&pid).copied(),
             _ => None,
         })
@@ -47,7 +66,7 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession]) -> Vec<SessionI
     records
         .iter()
         .map(|r| {
-            let state = match r.state {
+            let state = match index_state(r) {
                 IndexState::Running { pid } => match by_pid.get(&pid) {
                     Some(pane) => SessionState::Managed { pane: *pane },
                     None => SessionState::External { pid: Some(pid) },
@@ -58,7 +77,8 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession]) -> Vec<SessionI
                     None => SessionState::Closed,
                 },
             };
-            let status = status(r, state);
+            // A gone process's last status is not the new pane's.
+            let status = if index_state(r) == r.state { status(r, state) } else { None };
             SessionInfo {
                 id: r.id.clone(),
                 cwd: r.cwd.clone(),
@@ -164,7 +184,7 @@ mod tests {
             record("boxed", IndexState::InContainer),
             record("old", IndexState::Closed),
         ];
-        let sessions = resolve(&records, &[pane(7, 100, None)]);
+        let sessions = resolve(&records, &[pane(7, 100, None)], &[]);
         assert_eq!(states(&sessions), vec![
             ("mine", SessionState::Managed { pane: 7 }),
             ("other", SessionState::External { pid: Some(200) }),
@@ -177,13 +197,13 @@ mod tests {
     #[test]
     fn a_pane_is_managed_by_its_launch_session_until_its_process_reports() {
         let records = [record("launched", IndexState::Closed)];
-        assert_eq!(states(&resolve(&records, &[pane(7, 100, Some("launched"))])), vec![("launched", SessionState::Managed { pane: 7 })]);
+        assert_eq!(states(&resolve(&records, &[pane(7, 100, Some("launched"))], &[])), vec![("launched", SessionState::Managed { pane: 7 })]);
     }
 
     #[test]
     fn after_clear_the_launch_session_is_closed() {
         let records = [record("launched", IndexState::Closed), record("after-clear", IndexState::Running { pid: 100 })];
-        assert_eq!(states(&resolve(&records, &[pane(7, 100, Some("launched"))])), vec![
+        assert_eq!(states(&resolve(&records, &[pane(7, 100, Some("launched"))], &[])), vec![
             ("launched", SessionState::Closed),
             ("after-clear", SessionState::Managed { pane: 7 }),
         ]);
@@ -197,7 +217,7 @@ mod tests {
         (asks.activity, asks.activity_since_ms) = (Some(Activity::Waiting { reason: Some("dialog open".into()) }), 60);
         let mut stale = record("old", IndexState::Closed);
         (stale.activity, stale.activity_since_ms) = (Some(Activity::Idle), 70);
-        let sessions = resolve(&[busy, asks, stale], &[pane(7, 100, None)]);
+        let sessions = resolve(&[busy, asks, stale], &[pane(7, 100, None)], &[]);
         let status: Vec<(&str, Option<SessionStatus>, u64)> =
             sessions.iter().map(|s| (s.id.as_str(), s.status.clone(), s.status_since_ms)).collect();
         assert_eq!(status, vec![
@@ -208,8 +228,32 @@ mod tests {
     }
 
     #[test]
+    fn a_process_seen_exiting_is_closed_until_the_index_catches_up() {
+        let mut running = record("s", IndexState::Running { pid: 100 });
+        running.proc_start = Some("5".into());
+        let records = [running];
+        let gone = |start: &str| vec![Gone { pid: 100, start: Some(start.into()) }];
+        assert_eq!(states(&resolve(&records, &[], &gone("5"))), vec![("s", SessionState::Closed)]);
+        // Same pid, other start time: a new process that reused the pid; not hidden.
+        assert_eq!(states(&resolve(&records, &[], &gone("6"))), vec![("s", SessionState::External { pid: Some(100) })]);
+        assert!(still_claimed(&gone("5")[0], &records));
+        assert!(!still_claimed(&gone("6")[0], &records));
+    }
+
+    #[test]
+    fn a_closed_by_exit_session_goes_to_a_pane_started_with_it() {
+        let mut old = record("s", IndexState::Running { pid: 100 });
+        old.proc_start = Some("5".into());
+        let gone = [Gone { pid: 100, start: Some("5".into()) }];
+        // After a take over, the new pane runs `claude --resume s` before Claude rewrites its pid file.
+        let sessions = resolve(&[old], &[pane(9, 300, Some("s"))], &gone);
+        assert_eq!(states(&sessions), vec![("s", SessionState::Managed { pane: 9 })]);
+        assert_eq!(sessions[0].status, None);
+    }
+
+    #[test]
     fn diff_reports_new_changed_and_removed_sessions() {
-        let infos = |records: &[SessionRecord]| resolve(records, &[]);
+        let infos = |records: &[SessionRecord]| resolve(records, &[], &[]);
         let old = infos(&[record("same", IndexState::Closed), record("changes", IndexState::Closed), record("goes", IndexState::Closed)]);
         let new = infos(&[record("same", IndexState::Closed), record("changes", IndexState::Running { pid: 5 }), record("arrives", IndexState::Closed)]);
         let (upserted, removed) = diff(&old, &new);

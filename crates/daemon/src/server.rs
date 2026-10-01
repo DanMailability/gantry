@@ -14,7 +14,7 @@ use tokio::sync::Notify;
 
 use crate::outbox::Outbox;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
-use crate::sessions::{PaneSession, diff, resolve, spawn_indexer};
+use crate::sessions::{Gone, PaneSession, diff, resolve, spawn_indexer, still_claimed};
 
 const OUTPUT_QUEUE_CHUNKS: usize = 32;
 const MAX_BATCH_BYTES: usize = 256 * 1024;
@@ -42,6 +42,8 @@ struct Pane {
     cwd: PathBuf,
     /// Session its command line names.
     session_arg: Option<String>,
+    /// Start time of its process (to recognise that process in the index after it exits).
+    start: Option<String>,
     last_focused: u64,
     needs_resync: bool,
 }
@@ -68,6 +70,8 @@ struct State {
     records: Option<Arc<Vec<SessionRecord>>>,
     /// Sessions as last sent to (or computed for) the client.
     sent: Vec<SessionInfo>,
+    /// Processes seen exiting that the index still lists as running.
+    gone: Vec<Gone>,
 }
 
 struct Shared {
@@ -134,7 +138,7 @@ impl State {
             .iter()
             .map(|(id, pane)| PaneSession { pane: *id, pid: pane.pty.pid(), session_arg: pane.session_arg.clone() })
             .collect();
-        let sessions = resolve(records, &panes);
+        let sessions = resolve(records, &panes, &self.gone);
         if full {
             self.control(&DaemonMessage::Sessions { sessions: sessions.clone() });
         } else {
@@ -204,6 +208,9 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
             while rx.changed().await.is_ok() {
                 let records = rx.borrow_and_update().clone();
                 let mut state = shared.lock();
+                if let Some(records) = &records {
+                    state.gone.retain(|gone| still_claimed(gone, records));
+                }
                 // The first scan is the first list a connected client gets.
                 let first = state.records.is_none();
                 state.records = records;
@@ -405,6 +412,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
     state.next_pane += 1;
     state.focus_seq += 1;
     let exit = pty.exit_signal();
+    let start = pty.pid().and_then(claude_index::host::process_start);
     let pane = Pane {
         pty,
         term: TermState::new(spec.cols, spec.rows),
@@ -412,6 +420,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         args: spec.args,
         cwd: cwd.clone(),
         session_arg,
+        start,
         last_focused: state.focus_seq,
         needs_resync: false,
     };
@@ -469,7 +478,11 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         if let (Some(outbox), Some(pane)) = (lagging_outbox, state.panes.get_mut(&id)) {
             State::send_resync(&outbox, id, pane);
         }
-        state.panes.remove(&id);
+        if let Some(pane) = state.panes.remove(&id)
+            && let Some(pid) = pane.pty.pid()
+        {
+            state.gone.push(Gone { pid, start: pane.start.clone() });
+        }
         state.control(&DaemonMessage::Exited { pane: id, code });
         state.publish_sessions(false);
         exit_shared.stop_if_idle(&state);

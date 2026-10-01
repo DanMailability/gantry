@@ -73,6 +73,20 @@ pub fn proc_start_time(stat: &str) -> Option<String> {
     stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(Into::into)
 }
 
+/// Start time of process `pid` in Claude's `procStart` format (`/proc/<pid>/stat` field 22); `None` when it is gone or
+/// the platform has no `/proc`.
+#[cfg(target_os = "linux")]
+pub fn process_start(pid: u32) -> Option<String> {
+    proc_start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Start time of process `pid`; this platform cannot tell.
+#[cfg(not(target_os = "linux"))]
+pub fn process_start(pid: u32) -> Option<String> {
+    let _ = pid;
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +112,15 @@ mod tests {
         let gone = child.id();
         child.wait().unwrap();
         assert_eq!(host.is_running(gone, None), Some(false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_start_reads_a_live_process_and_none_for_a_gone_one() {
+        let me = std::process::id();
+        let expected = proc_start_time(&std::fs::read_to_string("/proc/self/stat").unwrap());
+        assert_eq!(process_start(me), expected);
+        assert_eq!(process_start(u32::MAX), None);
     }
 
     #[cfg(target_os = "linux")]
