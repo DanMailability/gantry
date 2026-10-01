@@ -47,8 +47,8 @@ pub fn run(launch: Launch) {
                 let _ = window.update(cx, move |_, window, cx| {
                     let answer = window.prompt(
                         PromptLevel::Warning,
-                        "The running ccm daemon is from a different version.",
-                        Some("Restarting it stops all running sessions. Claude sessions can be resumed afterwards."),
+                        "ccm daemon version mismatch",
+                        Some("Restarting stops all sessions."),
                         &["Restart daemon", "Quit"],
                         cx,
                     );
@@ -100,7 +100,7 @@ fn install_quit_prompt(window: &mut Window, cx: &mut App, view: Entity<TerminalV
         let answer = window.prompt(
             PromptLevel::Info,
             "Quit ccm?",
-            Some("Detach keeps your sessions running in the background."),
+            Some("Sessions keep running after Detach."),
             &["Detach", "Stop all sessions", "Cancel"],
             cx,
         );
