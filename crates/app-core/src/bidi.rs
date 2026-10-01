@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use unicode_bidi::{BidiClass, BidiInfo, bidi_class};
 
-use crate::snapshot::CellView;
+use crate::snapshot::{CellView, ScreenSnapshot};
 
 /// Where each cell of one row is drawn.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +128,37 @@ fn mirrored(ch: char) -> char {
     }
 }
 
+/// Rearrange `snapshot` into display order and return each row's order, for mapping mouse positions back.
+///
+/// The cursor moves with its cell and shows that cell's displayed (possibly mirrored) character.
+pub fn to_display(snapshot: &mut ScreenSnapshot) -> Vec<Option<RowOrder>> {
+    let orders: Vec<Option<RowOrder>> = snapshot.rows.iter().map(|row| row_order(row)).collect();
+    for (row, order) in snapshot.rows.iter_mut().zip(&orders) {
+        if let Some(order) = order {
+            *row = reorder_row(row, order);
+        }
+    }
+    if let Some(cursor) = snapshot.cursor.as_mut()
+        && let Some(Some(order)) = orders.get(cursor.row)
+    {
+        cursor.col = order.visual(cursor.col);
+        cursor.ch = snapshot.rows[cursor.row][cursor.col].ch;
+    }
+    orders
+}
+
+/// The logical column under displayed column `col` of viewport row `row`, and whether the pointer is on that cell's
+/// logical right half (the halves swap inside right-to-left runs).
+pub fn logical_hit(orders: &[Option<RowOrder>], col: usize, row: usize, right_half: bool) -> (usize, bool) {
+    match orders.get(row) {
+        Some(Some(order)) => {
+            let logical = order.logical(col);
+            (logical, right_half != order.is_rtl(logical))
+        }
+        _ => (col, right_half),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +253,62 @@ mod tests {
         assert_eq!((order.visual(0), order.visual(5), order.visual(10)), (13, 4, 3));
         assert!(order.is_rtl(0));
         assert!(!order.is_rtl(5));
+    }
+
+    use crate::term_state::TermState;
+
+    fn displayed(snapshot: &ScreenSnapshot, row: usize) -> String {
+        snapshot.rows[row].iter().map(|cell| cell.ch).collect()
+    }
+
+    #[test]
+    fn a_snapshot_is_shown_in_display_order() {
+        let mut term = TermState::new(12, 2);
+        term.feed("hello\r\nשלום עולם".as_bytes());
+        let mut snapshot = term.snapshot();
+        let orders = to_display(&mut snapshot);
+        assert_eq!(orders.len(), 2);
+        assert!(orders[0].is_none());
+        assert_eq!(displayed(&snapshot, 0), "hello       ");
+        assert_eq!(displayed(&snapshot, 1), "   םלוע םולש");
+    }
+
+    #[test]
+    fn the_cursor_follows_its_cell_into_display_order() {
+        let mut term = TermState::new(8, 1);
+        term.feed("שלום".as_bytes());
+        let mut snapshot = term.snapshot();
+        to_display(&mut snapshot);
+        let cursor = snapshot.cursor.expect("cursor is visible");
+        assert_eq!((cursor.col, cursor.ch), (3, ' '));
+
+        let mut term = TermState::new(8, 1);
+        term.feed("(שלום)\r".as_bytes());
+        let mut snapshot = term.snapshot();
+        to_display(&mut snapshot);
+        let cursor = snapshot.cursor.unwrap();
+        // The cursor is on logical column 0, '(' — displayed at the right edge, mirrored.
+        assert_eq!((cursor.col, cursor.ch), (7, ')'));
+    }
+
+    #[test]
+    fn dragging_across_a_displayed_hebrew_word_copies_it() {
+        let mut term = TermState::new(12, 1);
+        term.feed("שלום עולם".as_bytes());
+        let mut snapshot = term.snapshot();
+        let orders = to_display(&mut snapshot);
+        // "םולש" is displayed in columns 8..=11: press on the right half of 11, release on the left half of 8.
+        let (col, right_half) = logical_hit(&orders, 11, 0, true);
+        term.start_selection(col as u16, 0, right_half);
+        let (col, right_half) = logical_hit(&orders, 8, 0, false);
+        term.update_selection(col as u16, 0, right_half);
+        assert_eq!(term.selection_text().as_deref(), Some("שלום"));
+    }
+
+    #[test]
+    fn hits_outside_reordered_rows_pass_through() {
+        let orders = vec![None];
+        assert_eq!(logical_hit(&orders, 5, 0, true), (5, true));
+        assert_eq!(logical_hit(&orders, 5, 3, false), (5, false));
     }
 }
