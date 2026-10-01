@@ -75,8 +75,9 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("layout.json");
-        save(&path, &sample()).unwrap();
-        assert_eq!(load(&path).unwrap(), Some(sample()));
+        let workspace = sample();
+        save(&path, &workspace).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(workspace));
         assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "no temp file left behind");
     }
 
@@ -110,5 +111,16 @@ mod tests {
         clear(&path).unwrap();
         assert!(!path.exists());
         clear(&path).unwrap();
+    }
+
+    #[test]
+    fn layouts_saved_before_m4_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        std::fs::write(&path, r#"{"version":1,"workspace":{"instance":"i","tabs":[{"root":{"Leaf":1},"focused":1}],"active":0,
+            "leaves":{"1":{"pane":null,"launch":{"program":"claude","args":[],"cwd":"/r"}}},"next_id":1}}"#).unwrap();
+        let workspace = load(&path).unwrap().unwrap();
+        assert_eq!(workspace.leaves[&1].session, None);
+        assert_eq!(workspace.sidebar, crate::workspace::SidebarState::default());
     }
 }

@@ -206,6 +206,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "unicode-bidi",
+ "uuid",
 ]
 
 [[package]]

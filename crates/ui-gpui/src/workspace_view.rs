@@ -231,7 +231,7 @@ impl WorkspaceView {
             PaneEvent::Focused => self.focus_leaf(leaf, window, cx),
             PaneEvent::Rerun => {
                 let Some(entry) = self.workspace.leaves.get_mut(&leaf) else { return };
-                entry.launch = entry.launch.rerun();
+                entry.launch = entry.rerun(false);
                 let launch = entry.launch.clone();
                 self.slots[&leaf].view.update(cx, |view, cx| view.restarting(launch, cx));
                 self.spawn_leaf(leaf, None, cx);

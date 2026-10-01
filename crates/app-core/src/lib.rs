@@ -7,6 +7,7 @@ pub mod palette;
 pub mod replay;
 pub mod paste;
 pub mod scroll;
+pub mod sessions;
 pub mod snapshot;
 pub mod split_tree;
 pub mod term_state;

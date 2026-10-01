@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use protocol::message::{PaneId, PaneInfo, SpawnRequest};
+use protocol::message::{PaneId, PaneInfo, SpawnRequest, claude_session};
 use serde::{Deserialize, Serialize};
 
 use crate::split_tree::{Axis, Direction, Node, NodeId};
@@ -24,23 +24,24 @@ pub struct PaneLaunch {
 }
 
 impl PaneLaunch {
-    /// Claude Code in `cwd`.
+    /// A new Claude Code session, with its own `--session-id`, in `cwd`.
     pub fn claude(cwd: PathBuf) -> PaneLaunch {
-        PaneLaunch { program: CLAUDE.into(), args: Vec::new(), cwd }
+        PaneLaunch { program: CLAUDE.into(), args: vec!["--session-id".into(), uuid::Uuid::new_v4().to_string()], cwd }
+    }
+
+    /// Claude Code resuming `session` in `cwd`.
+    pub fn resume(session: &str, cwd: PathBuf) -> PaneLaunch {
+        PaneLaunch { program: CLAUDE.into(), args: vec!["--resume".into(), session.into()], cwd }
+    }
+
+    /// The Claude session this command line names (`--session-id`, `--resume`, `-r`).
+    pub fn session(&self) -> Option<&str> {
+        claude_session(&self.program, &self.args)
     }
 
     /// Whether this runs Claude Code.
     pub fn is_claude(&self) -> bool {
         Path::new(&self.program).file_stem().is_some_and(|stem| stem == CLAUDE)
-    }
-
-    /// What re-running a finished pane starts: `claude --continue` for Claude, otherwise the same command.
-    pub fn rerun(&self) -> PaneLaunch {
-        if self.is_claude() {
-            PaneLaunch { program: self.program.clone(), args: vec!["--continue".into()], cwd: self.cwd.clone() }
-        } else {
-            self.clone()
-        }
     }
 
     /// Short label: program and directory names, e.g. `claude · repo`.
@@ -75,6 +76,33 @@ pub struct Leaf {
     pub pane: Option<PaneId>,
     /// What it runs.
     pub launch: PaneLaunch,
+    /// Claude session it last ran (followed across `/clear`); `None` for other programs.
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+impl Leaf {
+    /// A leaf about to run `launch`.
+    pub fn new(launch: PaneLaunch) -> Leaf {
+        let session = launch.session().map(String::from);
+        Leaf { pane: None, launch, session }
+    }
+
+    /// What re-running this finished leaf starts. Claude: `--resume` its session when the daemon knows
+    /// it (it has a transcript), else the same `--session-id` afresh; without a session (layouts from
+    /// before session tracking) `--continue`. Other programs: the same command.
+    pub fn rerun(&self, resumable: bool) -> PaneLaunch {
+        let launch = &self.launch;
+        if !launch.is_claude() {
+            return launch.clone();
+        }
+        let args = match &self.session {
+            Some(id) if resumable => vec!["--resume".into(), id.clone()],
+            Some(id) => vec!["--session-id".into(), id.clone()],
+            None => vec!["--continue".into()],
+        };
+        PaneLaunch { program: launch.program.clone(), args, cwd: launch.cwd.clone() }
+    }
 }
 
 /// One tab.
@@ -84,6 +112,36 @@ pub struct Tab {
     pub root: Node,
     /// The leaf with focus inside this tab.
     pub focused: NodeId,
+}
+
+/// Which sidebar view is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TreeView {
+    /// Directories with their sessions.
+    #[default]
+    Folders,
+    /// Sessions grouped by state.
+    Status,
+}
+
+/// Default sidebar width, in pixels.
+pub const SIDEBAR_WIDTH: f32 = 280.0;
+
+/// How the sidebar is shown (saved with the layout).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SidebarState {
+    /// Shown at all.
+    pub visible: bool,
+    /// Width in pixels.
+    pub width: f32,
+    /// Folders or Status.
+    pub view: TreeView,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        SidebarState { visible: true, width: SIDEBAR_WIDTH, view: TreeView::Folders }
+    }
 }
 
 /// All tabs of the window.
@@ -97,6 +155,9 @@ pub struct Workspace {
     pub active: usize,
     /// Every leaf by id.
     pub leaves: BTreeMap<NodeId, Leaf>,
+    /// Sidebar visibility, width and view.
+    #[serde(default)]
+    pub sidebar: SidebarState,
     next_id: NodeId,
 }
 
@@ -109,7 +170,7 @@ impl Workspace {
     /// Open `launch` in a new last tab and focus it. Returns the new leaf.
     pub fn new_tab(&mut self, launch: PaneLaunch) -> NodeId {
         let leaf = self.alloc();
-        self.leaves.insert(leaf, Leaf { pane: None, launch });
+        self.leaves.insert(leaf, Leaf::new(launch));
         self.tabs.push(Tab { root: Node::Leaf(leaf), focused: leaf });
         self.active = self.tabs.len() - 1;
         leaf
@@ -122,7 +183,7 @@ impl Workspace {
         let tab = &mut self.tabs[self.active];
         tab.root.split(target, axis, split_id, leaf);
         tab.focused = leaf;
-        self.leaves.insert(leaf, Leaf { pane: None, launch });
+        self.leaves.insert(leaf, Leaf::new(launch));
         Some(leaf)
     }
 
@@ -233,6 +294,16 @@ impl Workspace {
         let leaf = self.leaf_for_pane(pane)?;
         self.leaves.get_mut(&leaf)?.pane = None;
         Some(leaf)
+    }
+
+    /// The daemon reports that `pane` runs `session`; returns whether the leaf's session changed.
+    pub fn session_seen(&mut self, pane: PaneId, session: &str) -> bool {
+        let Some(leaf) = self.leaf_for_pane(pane).and_then(|leaf| self.leaves.get_mut(&leaf)) else { return false };
+        if leaf.session.as_deref() == Some(session) {
+            return false;
+        }
+        leaf.session = Some(session.into());
+        true
     }
 
     /// Whether every tab's leaves exist, each tab's focus is one of its leaves, ids are unique and
@@ -415,16 +486,65 @@ mod tests {
         assert_eq!(ws.pane_exited(42), None);
     }
 
+    fn claude_leaf(session: Option<&str>) -> Leaf {
+        Leaf { pane: None, launch: PaneLaunch { program: "claude".into(), args: vec![], cwd: "/r".into() }, session: session.map(Into::into) }
+    }
+
     #[test]
-    fn rerun_continues_claude_and_repeats_other_commands() {
-        let claude = PaneLaunch { program: "/usr/bin/claude".into(), args: vec!["--resume".into(), "x".into()], cwd: "/r".into() };
-        assert!(claude.is_claude());
-        assert_eq!(claude.rerun().args, vec!["--continue".to_string()]);
-        assert_eq!(claude.rerun().cwd, PathBuf::from("/r"));
-        let sh = shell("/s");
-        assert!(!sh.is_claude());
-        assert_eq!(sh.rerun(), sh);
+    fn new_claude_launches_get_a_fresh_session_id() {
+        let (a, b) = (PaneLaunch::claude("/r".into()), PaneLaunch::claude("/r".into()));
+        assert_eq!(a.args[0], "--session-id");
+        assert_ne!(a.session(), b.session());
+        assert!(uuid::Uuid::parse_str(a.session().unwrap()).is_ok());
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(a.clone());
+        assert_eq!(ws.leaves[&leaf].session.as_deref(), a.session());
         assert_eq!(PaneLaunch::claude("/home/me/repo".into()).label(), "claude · repo");
+    }
+
+    #[test]
+    fn resume_launches_name_their_session() {
+        let launch = PaneLaunch::resume("abc", "/r".into());
+        assert_eq!((launch.args.clone(), launch.session()), (vec!["--resume".to_string(), "abc".to_string()], Some("abc")));
+        assert_eq!(shell("/r").session(), None);
+    }
+
+    #[test]
+    fn rerun_resumes_the_leafs_session() {
+        assert_eq!(claude_leaf(Some("abc")).rerun(true).args, vec!["--resume".to_string(), "abc".to_string()]);
+        // No transcript (nothing was said): start the same session id afresh.
+        assert_eq!(claude_leaf(Some("abc")).rerun(false).args, vec!["--session-id".to_string(), "abc".to_string()]);
+        // Layouts from before session tracking.
+        assert_eq!(claude_leaf(None).rerun(true).args, vec!["--continue".to_string()]);
+        assert_eq!(claude_leaf(None).rerun(true).cwd, PathBuf::from("/r"));
+        let sh = Leaf::new(shell("/r"));
+        assert_eq!(sh.rerun(true), sh.launch);
+    }
+
+    #[test]
+    fn leaves_follow_the_session_their_pane_reports() {
+        let mut ws = Workspace::default();
+        let leaf = ws.new_tab(PaneLaunch::claude("/r".into()));
+        ws.pane_started(leaf, 5, "/r".into());
+        assert!(ws.session_seen(5, "after-clear"));
+        assert!(!ws.session_seen(5, "after-clear"));
+        assert!(!ws.session_seen(99, "x"));
+        assert_eq!(ws.leaves[&leaf].session.as_deref(), Some("after-clear"));
+        assert_eq!(ws.leaves[&leaf].rerun(true).args, vec!["--resume".to_string(), "after-clear".to_string()]);
+    }
+
+    #[test]
+    fn restore_adopted_claude_panes_know_their_session() {
+        let live = [PaneInfo { pane: 4, program: "claude".into(), args: vec!["--resume".into(), "xyz".into()], cwd: "/srv".into(), last_focused: 1 }];
+        let restored = restore(None, "i", &live, &launch());
+        let leaf = restored.attach[0].0;
+        assert_eq!(restored.workspace.leaves[&leaf].session.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn the_sidebar_defaults_to_a_visible_folder_view() {
+        let state = Workspace::default().sidebar;
+        assert_eq!((state.visible, state.width, state.view), (true, SIDEBAR_WIDTH, TreeView::Folders));
     }
 
     #[test]
