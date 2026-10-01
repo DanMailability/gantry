@@ -15,8 +15,11 @@ use gpui::{
     Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
     PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
 };
-use protocol::message::PaneId;
+use protocol::message::{PaneId, SessionInfo, SessionState};
 
+use app_core::session_tree::{Activation, ShellEntry};
+
+use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
 use crate::window_frame;
 
@@ -25,10 +28,13 @@ pub(crate) const BORDER: u32 = 0x2a2f3a;
 pub(crate) const ACCENT: u32 = 0x6cb6ff;
 pub(crate) const TEXT: u32 = 0xd6dde6;
 pub(crate) const MUTED: u32 = 0x8b949e;
+pub(crate) const SELECTED: u32 = 0x24324a;
 const BACKGROUND: u32 = 0x11141a;
 pub(crate) const TAB_BAR_HEIGHT: f32 = 34.0;
 /// Largest amount of output routed per UI update, so input and rendering keep running during a flood.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
+const SIDEBAR_MIN: f32 = 160.0;
+const SIDEBAR_MAX: f32 = 600.0;
 
 #[allow(missing_docs)]
 mod workspace_actions {
@@ -38,7 +44,7 @@ mod workspace_actions {
             NewClaudeTab, NewShellTab, SplitRightClaude, SplitRightShell, SplitDownClaude, SplitDownShell, ClosePane,
             FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
             ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
-            ActivateTab8, ActivateTab9
+            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession
         ]
     );
 }
@@ -81,6 +87,8 @@ fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new(&format!("{tab_n}-7"), ActivateTab7, context),
         KeyBinding::new(&format!("{tab_n}-8"), ActivateTab8, context),
         KeyBinding::new(&format!("{tab_n}-9"), ActivateTab9, context),
+        KeyBinding::new(&format!("{m}-b"), ToggleSidebar, context),
+        KeyBinding::new(&format!("{m}-f"), FindSession, context),
     ]
 }
 
@@ -105,6 +113,12 @@ pub struct WorkspaceView {
     dragging: Option<Divider>,
     /// Window bounds of the visible tab's pane area (for divider drags).
     content_bounds: Bounds<Pixels>,
+    sidebar: Entity<SidebarView>,
+    /// Window bounds of the sidebar (for width drags).
+    sidebar_bounds: Bounds<Pixels>,
+    /// The sidebar's edge is being dragged.
+    resizing_sidebar: bool,
+    _sidebar_events: Subscription,
     _events: Task<()>,
 }
 
@@ -130,6 +144,10 @@ impl WorkspaceView {
             }
             let _ = this.update(cx, |view, cx| view.on_events(vec![ClientEvent::Disconnected], cx));
         });
+        let sidebar = cx.new(|cx| SidebarView::new(restored.workspace.sidebar.view, cx));
+        let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
+            this.on_sidebar_event(event.clone(), window, cx)
+        });
         let mut this = WorkspaceView {
             workspace: restored.workspace,
             slots: HashMap::new(),
@@ -142,6 +160,10 @@ impl WorkspaceView {
             prompting: Rc::new(Cell::new(false)),
             dragging: None,
             content_bounds: Bounds::default(),
+            sidebar,
+            sidebar_bounds: Bounds::default(),
+            resizing_sidebar: false,
+            _sidebar_events: sidebar_events,
             _events: events_task,
         };
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
@@ -162,7 +184,7 @@ impl WorkspaceView {
             this.spawn_leaf(leaf, None, cx);
         }
         this.focus_current(window, cx);
-        this.save();
+        this.save(cx);
         this
     }
 
@@ -193,7 +215,7 @@ impl WorkspaceView {
                 ClientEvent::Exited { pane, code } => {
                     if let Some(leaf) = self.workspace.pane_exited(*pane) {
                         self.slots[&leaf].view.update(cx, |view, cx| view.exited(Some(*code), cx));
-                        self.save();
+                        self.save(cx);
                     }
                 }
                 ClientEvent::Spawned { request, pane, cwd } => match self.pending.remove(request) {
@@ -204,7 +226,7 @@ impl WorkspaceView {
                         if self.workspace.focused() == Some(leaf) {
                             self.client.focus(*pane);
                         }
-                        self.save();
+                        self.save(cx);
                     }
                     // The leaf was closed while its process was starting.
                     None => self.client.kill(*pane),
@@ -214,7 +236,16 @@ impl WorkspaceView {
                         self.slots[&leaf].view.update(cx, |view, cx| view.failed(error.clone(), cx));
                     }
                 }
-                ClientEvent::Sessions { .. } | ClientEvent::SessionsChanged { .. } => {}
+                ClientEvent::Sessions { sessions } => {
+                    self.track_sessions(sessions, cx);
+                    let sessions = sessions.clone();
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(sessions, cx));
+                }
+                ClientEvent::SessionsChanged { upserted, removed } => {
+                    self.track_sessions(upserted, cx);
+                    let upserted = upserted.clone();
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.apply(upserted, removed, cx));
+                }
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
                     for slot in self.slots.values() {
@@ -226,19 +257,37 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Leaves follow the session their pane runs (it changes on `/clear`).
+    fn track_sessions(&mut self, sessions: &[SessionInfo], cx: &mut Context<Self>) {
+        let mut changed = false;
+        for session in sessions {
+            if let SessionState::Managed { pane } = session.state {
+                changed |= self.workspace.session_seen(pane, &session.id);
+            }
+        }
+        if changed {
+            self.save(cx);
+        }
+    }
+
     fn on_pane_event(&mut self, leaf: NodeId, event: PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Focused => self.focus_leaf(leaf, window, cx),
             PaneEvent::Rerun => {
+                let session = self.workspace.leaves.get(&leaf).and_then(|entry| entry.session.clone());
+                let resumable = session.is_some_and(|id| self.sidebar.read(cx).sessions().get(&id).is_some());
                 let Some(entry) = self.workspace.leaves.get_mut(&leaf) else { return };
-                entry.launch = entry.rerun(false);
+                entry.launch = entry.rerun(resumable);
                 let launch = entry.launch.clone();
                 self.slots[&leaf].view.update(cx, |view, cx| view.restarting(launch, cx));
                 self.spawn_leaf(leaf, None, cx);
-                self.save();
+                self.save(cx);
             }
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
-            PaneEvent::TitleChanged => cx.notify(),
+            PaneEvent::TitleChanged => {
+                self.sync_shells(cx);
+                cx.notify()
+            }
         }
     }
 
@@ -248,7 +297,18 @@ impl WorkspaceView {
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.pane);
-        let launch = if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd } };
+        self.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx);
+    }
+
+    /// Start `launch` in a new tab, or splitting the focused pane along `axis`.
+    pub(crate) fn open_launch(
+        &mut self,
+        launch: PaneLaunch,
+        axis: Option<Axis>,
+        cwd_from: Option<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let leaf = match axis.and_then(|axis| self.workspace.split(axis, launch.clone())) {
             Some(leaf) => leaf,
             None => self.workspace.new_tab(launch),
@@ -256,7 +316,7 @@ impl WorkspaceView {
         self.add_slot(leaf, window, cx);
         self.spawn_leaf(leaf, cwd_from, cx);
         self.focus_current(window, cx);
-        self.save();
+        self.save(cx);
     }
 
     fn close_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
@@ -266,20 +326,20 @@ impl WorkspaceView {
         self.slots.remove(&leaf);
         self.pending.retain(|_, waiting| *waiting != leaf);
         self.focus_current(window, cx);
-        self.save();
+        self.save(cx);
     }
 
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.select_tab(index) {
             self.focus_current(window, cx);
-            self.save();
+            self.save(cx);
         }
     }
 
     fn focus_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.focus(leaf) {
             self.focus_current(window, cx);
-            self.save();
+            self.save(cx);
         }
     }
 
@@ -297,10 +357,82 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn save(&self) {
+    /// Write the layout (atomically) and refresh the sidebar's shell entries.
+    fn save(&self, cx: &mut Context<Self>) {
         if let Err(err) = layout_store::save(&self.layout_file, &self.workspace) {
             tracing::warn!("saving the layout failed: {err}");
         }
+        self.sync_shells(cx);
+    }
+
+    fn sync_shells(&self, cx: &mut Context<Self>) {
+        let shells: Vec<ShellEntry> = self
+            .workspace
+            .leaves
+            .iter()
+            .filter(|(_, leaf)| leaf.pane.is_some() && !leaf.launch.is_claude())
+            .map(|(id, leaf)| ShellEntry {
+                leaf: *id,
+                cwd: leaf.launch.cwd.clone(),
+                title: self.slots.get(id).map_or_else(|| leaf.launch.label(), |slot| slot.view.read(cx).title()),
+            })
+            .collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_shells(shells, cx));
+    }
+
+    fn on_sidebar_event(&mut self, event: SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            SidebarEvent::Activate { activation, split } => match activation {
+                Activation::FocusPane(pane) => {
+                    if let Some(leaf) = self.workspace.leaf_for_pane(pane) {
+                        self.focus_leaf(leaf, window, cx);
+                    }
+                }
+                Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
+                Activation::Resume { session, cwd } => {
+                    let axis = split.then_some(Axis::Horizontal);
+                    self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
+                }
+                Activation::ToggleDetails(_) | Activation::ToggleDir(_) | Activation::ShowAll(_) | Activation::Nothing => {}
+            },
+            SidebarEvent::NewHere { dir, claude } => self.open_launch(new_launch(claude, dir), None, None, window, cx),
+            SidebarEvent::ViewChanged(view) => {
+                self.workspace.sidebar.view = view;
+                self.save(cx);
+            }
+            SidebarEvent::Dismiss => self.focus_current(window, cx),
+        }
+    }
+
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        let state = &mut self.workspace.sidebar;
+        state.visible = !state.visible;
+        if !state.visible {
+            self.focus_current(window, cx);
+        }
+        self.save(cx);
+        cx.notify();
+    }
+
+    fn find_session(&mut self, _: &FindSession, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.sidebar.visible = true;
+        self.sidebar.focus_handle(cx).focus(window, cx);
+        self.save(cx);
+        cx.notify();
+    }
+
+    fn drag_sidebar(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.resizing_sidebar {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.resizing_sidebar = false;
+            self.save(cx);
+            return;
+        }
+        let width = f32::from(event.position.x - self.sidebar_bounds.origin.x);
+        self.workspace.sidebar.width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        cx.notify();
     }
 
     fn running_panes(&self, leaves: &[NodeId], cx: &Context<Self>) -> usize {
@@ -353,7 +485,7 @@ impl WorkspaceView {
     fn focus_dir(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.focus_direction(direction).is_some() {
             self.focus_current(window, cx);
-            self.save();
+            self.save(cx);
         }
     }
     fn focus_left(&mut self, _: &FocusLeft, window: &mut Window, cx: &mut Context<Self>) {
@@ -371,7 +503,7 @@ impl WorkspaceView {
     fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace.cycle_tab(delta);
         self.focus_current(window, cx);
-        self.save();
+        self.save(cx);
     }
     fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle(-1, window, cx)
@@ -381,12 +513,12 @@ impl WorkspaceView {
     }
     fn move_tab_left(&mut self, _: &MoveTabLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.workspace.move_tab(-1);
-        self.save();
+        self.save(cx);
         cx.notify();
     }
     fn move_tab_right(&mut self, _: &MoveTabRight, _: &mut Window, cx: &mut Context<Self>) {
         self.workspace.move_tab(1);
-        self.save();
+        self.save(cx);
         cx.notify();
     }
     fn activate_tab_1(&mut self, _: &ActivateTab1, window: &mut Window, cx: &mut Context<Self>) {
@@ -448,7 +580,7 @@ impl WorkspaceView {
         let Some(divider) = self.dragging else { return };
         if event.pressed_button != Some(MouseButton::Left) {
             self.dragging = None;
-            self.save();
+            self.save(cx);
             return;
         }
         let bounds = self.content_bounds;
@@ -625,13 +757,18 @@ impl WorkspaceView {
                 }))
             }))
             .on_mouse_move(cx.listener(Self::drag_divider))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if this.dragging.take().is_some() {
-                    this.save();
+                    this.save(cx);
                 }
             }))
             .into_any_element()
     }
+}
+
+/// A new Claude session (or the user's shell) in `cwd`.
+pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
+    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd } }
 }
 
 fn pane_header(title: String, focused: bool) -> impl IntoElement {
@@ -667,6 +804,15 @@ pub(crate) fn tab_bar_button(
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar = self.workspace.sidebar.clone();
+        let main = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(self.render_tab_bar(window, cx))
+            .child(self.render_active_tab(cx));
         let root = div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
@@ -694,12 +840,49 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::activate_tab_7))
             .on_action(cx.listener(Self::activate_tab_8))
             .on_action(cx.listener(Self::activate_tab_9))
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::find_session))
+            .on_mouse_move(cx.listener(Self::drag_sidebar))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                if std::mem::take(&mut this.resizing_sidebar) {
+                    this.save(cx);
+                }
+            }))
+            .relative()
             .size_full()
             .flex()
-            .flex_col()
+            .flex_row()
             .bg(rgb(BACKGROUND))
-            .child(self.render_tab_bar(window, cx))
-            .child(self.render_active_tab(cx));
+            .when(sidebar.visible, |root| {
+                root.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .h_full()
+                        .w(px(sidebar.width))
+                        .child({
+                            let view = cx.entity();
+                            canvas(move |bounds, _, cx| view.update(cx, |this, _| this.sidebar_bounds = bounds), |_, _, _, _| {})
+                                .absolute()
+                                .size_full()
+                        })
+                        .child(self.sidebar.clone()),
+                )
+                .child(
+                    div()
+                        .id("sidebar-edge")
+                        .flex_none()
+                        .w(px(4.))
+                        .h_full()
+                        .bg(rgb(BORDER))
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.resizing_sidebar = true;
+                            cx.stop_propagation();
+                        })),
+                )
+            })
+            .child(main);
         window_frame::frame(window, root)
     }
 }
@@ -735,6 +918,8 @@ mod tests {
             ("ctrl-shift-pagedown", "workspace::MoveTabRight"),
             ("alt-1", "workspace::ActivateTab1"),
             ("alt-9", "workspace::ActivateTab9"),
+            ("ctrl-shift-b", "workspace::ToggleSidebar"),
+            ("ctrl-shift-f", "workspace::FindSession"),
         ] {
             assert_eq!(action_for(keys), Some(action), "{keys}");
         }

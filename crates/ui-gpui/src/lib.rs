@@ -1,5 +1,7 @@
 //! GPUI user interface for ccm. The only crate in the workspace that depends on GPUI.
 
+mod field;
+pub mod sidebar_view;
 pub mod terminal_view;
 pub mod workspace_view;
 mod window_frame;
