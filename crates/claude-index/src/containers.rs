@@ -46,13 +46,6 @@ pub struct Container {
     pub config_dir: Option<String>,
 }
 
-impl Container {
-    /// The first 6 characters of the id, for display.
-    pub fn short_id(&self) -> &str {
-        self.id.get(..6).unwrap_or(&self.id)
-    }
-}
-
 fn map(mounts: &[Mount], path: &Path, from: impl Fn(&Mount) -> &Path, to: impl Fn(&Mount) -> &Path) -> Option<PathBuf> {
     mounts
         .iter()
@@ -229,7 +222,7 @@ mod tests {
     #[test]
     fn inspect_lines_parse_with_the_last_metadata_entry_winning() {
         let c = parse_inspect(LINE).unwrap();
-        assert_eq!((c.id.as_str(), c.name.as_str(), c.running, c.short_id()), ("abc123def4567890", "lucid_carver", true, "abc123"));
+        assert_eq!((c.id.as_str(), c.name.as_str(), c.running), ("abc123def4567890", "lucid_carver", true));
         assert_eq!(c.host_folder, PathBuf::from("/home/u/code/app"));
         assert_eq!((c.remote_user.as_deref(), c.config_dir.as_deref()), (Some("u"), Some("/home/u/.claude")));
         // Only bind mounts map paths.

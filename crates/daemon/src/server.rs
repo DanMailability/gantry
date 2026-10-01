@@ -588,7 +588,6 @@ fn find_container(shared: &Arc<Shared>, request: u64, dir: PathBuf) {
         let container = refreshed.ok().and_then(|()| containers::for_dir(state.registry.containers(), &dir)).map(|c| ContainerChoice {
             host_folder: c.host_folder.clone(),
             name: c.name.clone(),
-            short_id: c.short_id().into(),
             running: c.running,
         });
         state.control(&DaemonMessage::ContainerFound { request, container });

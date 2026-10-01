@@ -68,8 +68,6 @@ pub struct ContainerChoice {
     pub host_folder: PathBuf,
     /// Container name.
     pub name: String,
-    /// Short container id, for display.
-    pub short_id: String,
     /// Whether it runs (a stopped one is started on launch).
     pub running: bool,
 }

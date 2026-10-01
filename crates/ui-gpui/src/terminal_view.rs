@@ -733,7 +733,8 @@ impl Render for TerminalView {
                         .gap_3()
                         .items_center()
                         .text_color(banner_color)
-                        .child(text)
+                        // Long messages (e.g. Docker's) wrap; the buttons stay visible.
+                        .child(div().flex_1().min_w_0().child(text))
                         .when(actions, |row| {
                             row.child(banner_button("rerun", rerun, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun))))
                                 .child(banner_button("close", "Close", cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close))))
@@ -756,6 +757,7 @@ fn banner_button(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .flex_none()
         .px_3()
         .py(px(2.))
         .rounded_full()

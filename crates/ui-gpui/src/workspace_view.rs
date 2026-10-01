@@ -523,8 +523,8 @@ impl WorkspaceView {
         };
         let folder = &container.host_folder;
         let project = folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
-        let state = if container.running { "running" } else { "stopped (will start)" };
-        let detail = format!("Dev container {}: {state} · {}", container.name, container.short_id);
+        let state = if container.running { "running" } else { "stopped, starts on open" };
+        let detail = format!("{} · {state}", container.name);
         let answer = window.prompt(
             PromptLevel::Info,
             &format!("Open {project} in"),
