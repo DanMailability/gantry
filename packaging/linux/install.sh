@@ -22,5 +22,11 @@ case "${1:-}" in
     echo "usage: install.sh [--uninstall]" >&2
     exit 2 ;;
 esac
-if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q "$data/applications" || true; fi
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -t "$data/icons/hicolor" || true; fi
+# Refresh caches only where they already exist: a user-level cache that nothing else updates would hide icons and
+# entries other apps install later. GNOME picks up new files without them.
+if [ -f "$data/applications/mimeinfo.cache" ] && command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q "$data/applications" || true
+fi
+if [ -f "$data/icons/hicolor/icon-theme.cache" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -t "$data/icons/hicolor" || true
+fi

@@ -127,6 +127,42 @@ fn input_fate(state: &PaneState) -> InputFate {
     }
 }
 
+/// Whether mouse reports can reach the pane's program. Unlike keys they are never held: a click made while the
+/// pane restarts would arrive in the new program as escape bytes.
+fn mouse_reaches_program(state: &PaneState) -> bool {
+    input_fate(state) == InputFate::Send
+}
+
+/// What the pressed mouse button is doing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Drag {
+    /// A local selection is being dragged.
+    selecting: bool,
+    /// Button whose press was reported to the program (its release goes there too).
+    reporting: Option<mouse::Button>,
+    /// Last cell a mouse report named.
+    reported_cell: Option<(u16, u16)>,
+}
+
+impl Drag {
+    /// A press went to the program; any selection drag whose release was missed ends.
+    fn reported_press(&mut self, button: mouse::Button, cell: (u16, u16)) {
+        *self = Drag { selecting: false, reporting: Some(button), reported_cell: Some(cell) };
+    }
+
+    /// A local selection drag begins.
+    fn selection_press(&mut self) {
+        *self = Drag { selecting: true, ..Drag::default() };
+    }
+
+    /// The button came up, inside the pane or not: the reported press to release and the last cell reported.
+    fn release(&mut self) -> Option<(mouse::Button, Option<(u16, u16)>)> {
+        let released = self.reporting.map(|button| (button, self.reported_cell));
+        *self = Drag::default();
+        released
+    }
+}
+
 /// Something the workspace should react to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneEvent {
@@ -156,17 +192,13 @@ pub struct TerminalView {
     grid_size: (u16, u16),
     metrics: CellMetrics,
     scroll_accum: f32,
-    selecting: bool,
+    drag: Drag,
     mouse_position: Option<Point<Pixels>>,
     hovered_link: Option<(u16, Range<usize>)>,
     /// Display order of each viewport row in the last frame (`None`: drawn as stored).
     row_orders: Vec<Option<RowOrder>>,
     /// Input typed while Starting, sent on attach.
     held_input: Vec<u8>,
-    /// Button whose press was reported to the program (its release goes there too).
-    reporting: Option<mouse::Button>,
-    /// Last cell a mouse report named.
-    reported_cell: Option<(u16, u16)>,
 }
 
 impl EventEmitter<PaneEvent> for TerminalView {}
@@ -195,13 +227,11 @@ impl TerminalView {
             grid_size: (80, 24),
             metrics: CellMetrics { width: px(8.), height: px(18.) },
             scroll_accum: 0.0,
-            selecting: false,
+            drag: Drag::default(),
             mouse_position: None,
             hovered_link: None,
             row_orders: Vec::new(),
             held_input: Vec::new(),
-            reporting: None,
-            reported_cell: None,
         }
     }
 
@@ -442,23 +472,22 @@ impl TerminalView {
         if let Some(button) = report_button(event.button)
             && self.report(MouseAction::Press(button), event.modifiers, Some((col, row)))
         {
-            self.reporting = Some(button);
-            self.reported_cell = Some((col, row));
+            self.drag.reported_press(button, (col, row));
             return;
         }
-        self.reporting = None;
+        self.drag = Drag::default();
         if event.button != MouseButton::Left {
             return;
         }
         self.term.start_selection(col, row, right_half);
-        self.selecting = true;
+        self.drag.selection_press();
         cx.notify();
     }
 
     /// Send `action` at `cell` to the program when its mouse mode asks for it. Shift keeps the mouse for selecting,
     /// except for the release of a press that was already reported.
     fn report(&mut self, action: MouseAction, modifiers: Modifiers, cell: Option<(u16, u16)>) -> bool {
-        if modifiers.shift && !matches!(action, MouseAction::Release(_)) {
+        if !mouse_reaches_program(&self.state) || modifiers.shift && !matches!(action, MouseAction::Release(_)) {
             return false;
         }
         let Some((col, row)) = cell else { return false };
@@ -493,15 +522,15 @@ impl TerminalView {
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.mouse_position = Some(event.position);
         self.update_hovered_link(event.modifiers, cx);
-        if self.term.scroll_modes().mouse_report && !event.modifiers.shift && !self.selecting {
+        if self.term.scroll_modes().mouse_report && !event.modifiers.shift && !self.drag.selecting {
             let cell = self.logical_cell_at(event.position).map(|(col, row, _)| (col, row));
-            if cell.is_some() && cell != self.reported_cell {
+            if cell.is_some() && cell != self.drag.reported_cell {
                 self.report(MouseAction::Motion(event.pressed_button.and_then(report_button)), event.modifiers, cell);
-                self.reported_cell = cell;
+                self.drag.reported_cell = cell;
             }
             return;
         }
-        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+        if !self.drag.selecting || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
         if let Some((col, row, right_half)) = self.logical_cell_at(event.position) {
@@ -511,14 +540,22 @@ impl TerminalView {
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(button) = self.reporting.take() {
-            // Released outside the grid: report it at the last cell the program heard about.
-            let cell = self.logical_cell_at(event.position).map(|(col, row, _)| (col, row)).or(self.reported_cell);
-            self.report(MouseAction::Release(button), event.modifiers, cell);
-            self.reported_cell = None;
+        let cell = self.logical_cell_at(event.position).map(|(col, row, _)| (col, row));
+        self.end_drag(event.modifiers, cell, cx);
+    }
+
+    /// The button came up over another element: a drag that left the pane still ends here.
+    fn mouse_up_out(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.end_drag(event.modifiers, None, cx);
+    }
+
+    /// Finish the current drag: report the release of a reported press (at `cell`, else the last cell the program
+    /// heard about), or end a selection drag.
+    fn end_drag(&mut self, modifiers: Modifiers, cell: Option<(u16, u16)>, cx: &mut Context<Self>) {
+        if let Some((button, reported_cell)) = self.drag.release() {
+            self.report(MouseAction::Release(button), modifiers, cell.or(reported_cell));
             return;
         }
-        self.selecting = false;
         if self.term.selection_text().is_none() {
             self.term.clear_selection();
         }
@@ -534,7 +571,9 @@ impl TerminalView {
         }
         self.scroll_accum -= lines as f32;
         let (col, row) = self.logical_cell_at(event.position).map_or((0, 0), |(col, row, _)| (col, row));
-        match scroll_action(self.term.scroll_modes(), lines, col, row) {
+        // A program that ended or is restarting cannot read wheel reports; scroll the history instead.
+        let modes = if mouse_reaches_program(&self.state) { self.term.scroll_modes() } else { Default::default() };
+        match scroll_action(modes, lines, col, row) {
             ScrollAction::Viewport(n) => self.term.scroll_viewport(n),
             ScrollAction::Send(bytes) => self.write_pty(&bytes),
         }
@@ -657,6 +696,9 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up_out))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up_out))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up_out))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .when(hovering_link, |this| this.cursor_pointer())
@@ -858,6 +900,34 @@ mod tests {
     fn held_input_is_dropped_when_the_pane_fails() {
         for state in [PaneState::Exited(Some(1)), PaneState::Failed("x".into()), PaneState::Disconnected] {
             assert_eq!(input_fate(&state), InputFate::Drop);
+        }
+    }
+
+    #[test]
+    fn a_reported_press_ends_a_stale_selection_drag() {
+        // A drag released outside the pane never sees its mouse-up; the next press must not inherit it.
+        let mut drag = Drag { selecting: true, ..Drag::default() };
+        drag.reported_press(mouse::Button::Left, (1, 2));
+        assert!(!drag.selecting);
+        assert_eq!(drag.reporting, Some(mouse::Button::Left));
+    }
+
+    #[test]
+    fn a_release_anywhere_ends_the_drag_and_names_the_reported_cell() {
+        let mut drag = Drag::default();
+        drag.reported_press(mouse::Button::Right, (3, 4));
+        assert_eq!(drag.release(), Some((mouse::Button::Right, Some((3, 4)))));
+        assert_eq!(drag, Drag::default());
+        drag.selection_press();
+        assert_eq!(drag.release(), None);
+        assert!(!drag.selecting);
+    }
+
+    #[test]
+    fn mouse_reports_only_reach_a_live_process() {
+        assert!(mouse_reaches_program(&PaneState::Live));
+        for state in [PaneState::Starting, PaneState::Exited(None), PaneState::Disconnected] {
+            assert!(!mouse_reaches_program(&state), "{state:?}");
         }
     }
 
