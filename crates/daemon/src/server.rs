@@ -34,6 +34,7 @@ struct Pane {
     pty: PtyProcess,
     term: TermState,
     program: String,
+    args: Vec<String>,
     cwd: PathBuf,
     last_focused: u64,
     needs_resync: bool,
@@ -62,6 +63,8 @@ struct Shared {
     shutdown: Notify,
     base_env: Vec<(String, String)>,
     owner_uid: Option<u32>,
+    /// Identifies this daemon process (sent in `Welcome`).
+    instance: String,
 }
 
 impl Shared {
@@ -129,6 +132,11 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         shutdown: Notify::new(),
         base_env: options.base_env,
         owner_uid: options.owner_uid,
+        instance: format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ),
     });
     let idle = {
         let shared = shared.clone();
@@ -208,7 +216,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             old.outbox.close();
             old.kicked.notify_one();
         }
-        outbox.push_control(Frame::control(&DaemonMessage::Welcome { protocol: PROTOCOL_VERSION }));
+        outbox.push_control(Frame::control(&DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: shared.instance.clone() }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id
     };
@@ -266,7 +274,13 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             let mut panes: Vec<PaneInfo> = state
                 .panes
                 .iter()
-                .map(|(id, pane)| PaneInfo { pane: *id, program: pane.program.clone(), cwd: pane.cwd.clone(), last_focused: pane.last_focused })
+                .map(|(id, pane)| PaneInfo {
+                    pane: *id,
+                    program: pane.program.clone(),
+                    args: pane.args.clone(),
+                    cwd: pane.cwd.clone(),
+                    last_focused: pane.last_focused,
+                })
                 .collect();
             panes.sort_by(|a, b| b.last_focused.cmp(&a.last_focused).then(b.pane.cmp(&a.pane)));
             state.control(&DaemonMessage::Panes { panes });
@@ -310,10 +324,14 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
 }
 
 fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnRequest) {
+    let cwd = spec
+        .cwd_from
+        .and_then(|from| shared.lock().panes.get(&from).and_then(|pane| pane.pty.current_dir()))
+        .unwrap_or_else(|| spec.cwd.clone());
     let pty_spec = SpawnSpec {
         program: spec.program.clone(),
         args: spec.args.clone(),
-        cwd: spec.cwd.clone(),
+        cwd: cwd.clone(),
         env: Vec::new(),
         base_env: Some(shared.base_env.clone()),
         cols: spec.cols,
@@ -335,7 +353,8 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         pty,
         term: TermState::new(spec.cols, spec.rows),
         program: spec.program,
-        cwd: spec.cwd,
+        args: spec.args,
+        cwd: cwd.clone(),
         last_focused: state.focus_seq,
         needs_resync: false,
     };
@@ -343,7 +362,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
     if let Some(client) = state.client.as_mut().filter(|client| client.id == client_id) {
         client.attached.insert(id);
     }
-    state.control(&DaemonMessage::Spawned { request, pane: id });
+    state.control(&DaemonMessage::Spawned { request, pane: id, cwd });
     drop(state);
 
     let output_done = Arc::new(Notify::new());
@@ -409,6 +428,7 @@ mod tests {
             shutdown: Notify::new(),
             base_env: Vec::new(),
             owner_uid: None,
+            instance: String::new(),
         });
         let poisoner = shared.clone();
         let _ = std::thread::spawn(move || {

@@ -259,7 +259,7 @@ where
             write_frame(send, &Frame::control(&ClientMessage::Spawn { request: 1, spec })).await.map_err(io)?;
             loop {
                 match next_message(recv).await? {
-                    DaemonMessage::Spawned { request: 1, pane } => break pane,
+                    DaemonMessage::Spawned { request: 1, pane, .. } => break pane,
                     DaemonMessage::SpawnFailed { error, .. } => return Err(StartError::SpawnFailed(error)),
                     _ => {}
                 }
@@ -328,11 +328,11 @@ mod tests {
     use super::*;
 
     fn request(program: &str) -> SpawnRequest {
-        SpawnRequest { program: program.into(), args: vec![], cwd: "/".into(), cols: 80, rows: 24 }
+        SpawnRequest { program: program.into(), args: vec![], cwd: "/".into(), cols: 80, rows: 24, cwd_from: None }
     }
 
     fn info(pane: PaneId, last_focused: u64) -> PaneInfo {
-        PaneInfo { pane, program: "sh".into(), cwd: "/".into(), last_focused }
+        PaneInfo { pane, program: "sh".into(), args: vec![], cwd: "/".into(), last_focused }
     }
 
     #[test]

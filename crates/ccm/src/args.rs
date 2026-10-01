@@ -41,7 +41,7 @@ impl LaunchArgs {
     /// Turn the arguments into a launch request with the given initial grid size.
     pub fn into_launch(self, cols: u16, rows: u16) -> std::io::Result<Launch> {
         let current = std::env::current_dir()?;
-        let default = SpawnRequest { program: default_shell(), args: Vec::new(), cwd: current.clone(), cols, rows };
+        let default = SpawnRequest { program: default_shell(), args: Vec::new(), cwd: current.clone(), cols, rows, cwd_from: None };
         let explicit = (self.cwd.is_some() || !self.command.is_empty()).then(|| {
             let mut command = self.command.into_iter();
             SpawnRequest {
@@ -50,6 +50,7 @@ impl LaunchArgs {
                 cwd: self.cwd.unwrap_or(current),
                 cols,
                 rows,
+                cwd_from: None,
             }
         });
         Ok(Launch { explicit, default })

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -26,6 +26,9 @@ pub struct SpawnRequest {
     pub cols: u16,
     /// Initial rows.
     pub rows: u16,
+    /// Start in this live pane's current directory instead of `cwd`, when the daemon can tell.
+    #[serde(default)]
+    pub cwd_from: Option<PaneId>,
 }
 
 /// A live pane as listed by the daemon.
@@ -35,6 +38,8 @@ pub struct PaneInfo {
     pub pane: PaneId,
     /// Program the pane was started with.
     pub program: String,
+    /// Arguments the program was started with.
+    pub args: Vec<String>,
     /// Working directory it was started in.
     pub cwd: PathBuf,
     /// Focus sequence number; higher = focused more recently (0 = never).
@@ -99,6 +104,8 @@ pub enum DaemonMessage {
     Welcome {
         /// Daemon protocol version.
         protocol: u32,
+        /// Identifies this daemon process; pane ids are only meaningful within one instance.
+        instance: String,
     },
     /// Handshake rejected; only `StopAll` is accepted afterwards.
     VersionMismatch {
@@ -116,6 +123,8 @@ pub enum DaemonMessage {
         request: u64,
         /// New pane.
         pane: PaneId,
+        /// Directory the program started in.
+        cwd: PathBuf,
     },
     /// A `Spawn` failed.
     SpawnFailed {
@@ -163,12 +172,23 @@ mod tests {
     fn messages_round_trip() {
         let msg = ClientMessage::Spawn {
             request: 3,
-            spec: SpawnRequest { program: "claude".into(), args: vec!["--resume".into()], cwd: "/tmp".into(), cols: 80, rows: 24 },
+            spec: SpawnRequest { program: "claude".into(), args: vec!["--resume".into()], cwd: "/tmp".into(), cols: 80, rows: 24, cwd_from: Some(4) },
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
-        let reply = DaemonMessage::Resync { pane: 9, cols: 100, rows: 30 };
-        let json = serde_json::to_string(&reply).unwrap();
-        assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
+        for reply in [
+            DaemonMessage::Resync { pane: 9, cols: 100, rows: 30 },
+            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "123-456".into() },
+            DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
+        ] {
+            let json = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
+        }
+    }
+
+    #[test]
+    fn cwd_from_is_optional_on_the_wire() {
+        let json = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
+        assert_eq!(serde_json::from_str::<SpawnRequest>(json).unwrap().cwd_from, None);
     }
 }

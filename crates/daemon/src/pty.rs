@@ -40,6 +40,7 @@ pub struct PtyProcess {
     input: mpsc::Sender<Vec<u8>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     exit: async_channel::Receiver<u32>,
+    pid: Option<u32>,
 }
 
 impl PtyProcess {
@@ -63,6 +64,7 @@ impl PtyProcess {
             cmd.env(key, value);
         }
         let mut child = pair.slave.spawn_command(cmd)?;
+        let pid = child.process_id();
         drop(pair.slave);
         let killer = child.clone_killer();
         // The waiter reaps the child and reports its exit even when the output stream stays open
@@ -74,7 +76,7 @@ impl PtyProcess {
         });
         let reader = pair.master.try_clone_reader()?;
         let input = spawn_input_writer(pair.master.take_writer()?);
-        Ok((PtyProcess { master: pair.master, input, killer, exit }, reader))
+        Ok((PtyProcess { master: pair.master, input, killer, exit, pid }, reader))
     }
 
     /// Queue bytes for the process's input. Never blocks: a writer thread delivers them as the
@@ -93,6 +95,12 @@ impl PtyProcess {
     /// Tell the PTY (and so the process) about a new terminal size.
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
         self.master.resize(pty_size(cols, rows))
+    }
+
+    /// Current working directory of the process, where the platform exposes it (Linux).
+    pub fn current_dir(&self) -> Option<PathBuf> {
+        let pid = self.pid?;
+        if cfg!(target_os = "linux") { std::fs::read_link(format!("/proc/{pid}/cwd")).ok() } else { None }
     }
 
     /// Terminate the process.
@@ -344,5 +352,19 @@ mod tests {
         };
         let (_pty, reader) = PtyProcess::spawn(&spec).unwrap();
         assert!(read_until(reader, "hello-pty", Duration::from_secs(10)).contains("hello-pty"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn current_dir_follows_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().canonicalize().unwrap();
+        let script = format!("cd '{}' && sleep 5", target.display());
+        let (pty, _reader) = PtyProcess::spawn(&sh(&script, &std::env::temp_dir())).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pty.current_dir().as_deref() != Some(target.as_path()) {
+            assert!(Instant::now() < deadline, "cwd never followed: {:?}", pty.current_dir());
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

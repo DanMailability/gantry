@@ -30,15 +30,19 @@ async fn start_server(idle_timeout: Duration) -> Harness {
 struct TestClient {
     recv: RecvHalf,
     send: SendHalf,
+    instance: String,
 }
 
 impl TestClient {
     async fn connect(paths: &Paths) -> TestClient {
         let stream = Stream::connect(paths.socket_name().unwrap()).await.unwrap();
         let (recv, send) = stream.split();
-        let mut client = TestClient { recv, send };
+        let mut client = TestClient { recv, send, instance: String::new() };
         client.send(&ClientMessage::Hello { protocol: PROTOCOL_VERSION }).await;
-        assert_eq!(client.control().await, DaemonMessage::Welcome { protocol: PROTOCOL_VERSION });
+        match client.control().await {
+            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance } => client.instance = instance,
+            other => panic!("unexpected handshake reply {other:?}"),
+        }
         client
     }
 
@@ -76,22 +80,30 @@ impl TestClient {
         text
     }
 
-    async fn spawn(&mut self, script: &str) -> PaneId {
-        let spec = SpawnRequest {
-            program: "sh".into(),
-            args: vec!["-c".into(), script.into()],
-            cwd: std::env::temp_dir(),
-            cols: 80,
-            rows: 24,
-        };
+    async fn spawn_request(&mut self, spec: SpawnRequest) -> (PaneId, std::path::PathBuf) {
         self.send(&ClientMessage::Spawn { request: 1, spec }).await;
         loop {
             match self.control().await {
-                DaemonMessage::Spawned { request: 1, pane } => return pane,
+                DaemonMessage::Spawned { request: 1, pane, cwd } => return (pane, cwd),
                 DaemonMessage::SpawnFailed { error, .. } => panic!("spawn failed: {error}"),
                 _ => {}
             }
         }
+    }
+
+    async fn spawn(&mut self, script: &str) -> PaneId {
+        self.spawn_request(sh(script, None)).await.0
+    }
+}
+
+fn sh(script: &str, cwd_from: Option<PaneId>) -> SpawnRequest {
+    SpawnRequest {
+        program: "sh".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: std::env::temp_dir(),
+        cols: 80,
+        rows: 24,
+        cwd_from,
     }
 }
 
@@ -115,6 +127,7 @@ async fn panes_are_listed() {
         if let DaemonMessage::Panes { panes } = c.control().await {
             assert_eq!(panes.len(), 1);
             assert_eq!((panes[0].pane, panes[0].program.as_str()), (pane, "sh"));
+            assert_eq!(panes[0].args, vec!["-c".to_string(), "sleep 5".to_string()]);
             break;
         }
     }
@@ -261,4 +274,35 @@ async fn final_output_survives_exit_while_the_client_lags() {
         }
     }
     assert!(since_resync.contains("FINAL-MARKER"), "the program's last output never reached the client");
+}
+
+#[tokio::test]
+async fn each_daemon_has_its_own_instance_id() {
+    let (h1, h2) = (start_server(Duration::from_secs(10)).await, start_server(Duration::from_secs(10)).await);
+    let (a, b) = (TestClient::connect(&h1.paths).await, TestClient::connect(&h2.paths).await);
+    assert!(!a.instance.is_empty());
+    assert_ne!(a.instance, b.instance);
+    assert_eq!(TestClient::connect(&h1.paths).await.instance, a.instance);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn spawn_can_start_in_another_panes_current_directory() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().canonicalize().unwrap();
+    let first = c.spawn(&format!("cd '{}'; printf moved; sleep 5", target.display())).await;
+    c.output_until(first, "moved").await;
+    let (second, cwd) = c.spawn_request(sh("pwd; sleep 5", Some(first))).await;
+    assert_eq!(cwd, target);
+    c.output_until(second, &target.display().to_string()).await;
+}
+
+#[tokio::test]
+async fn spawn_from_an_unknown_pane_falls_back_to_cwd() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let (_, cwd) = c.spawn_request(sh("sleep 5", Some(999))).await;
+    assert_eq!(cwd, std::env::temp_dir());
 }
