@@ -2,6 +2,7 @@
 
 pub mod fuzzy;
 pub mod input;
+pub mod launcher;
 pub mod layout_store;
 pub mod layout;
 pub mod palette;
@@ -13,5 +14,6 @@ pub mod sessions;
 pub mod snapshot;
 pub mod split_tree;
 pub mod term_state;
+pub mod text_field;
 pub mod url;
 pub mod workspace;
