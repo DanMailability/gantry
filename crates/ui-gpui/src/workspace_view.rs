@@ -251,6 +251,8 @@ impl WorkspaceView {
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(upserted, removed, cx));
                 }
+                // Handled by the take-over flow (M5 Task 9).
+                ClientEvent::TakeOverResult { .. } => {}
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
                     for slot in self.slots.values() {

@@ -36,6 +36,10 @@ impl Host for LocalHost {
         #[cfg(target_os = "linux")]
         {
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return Some(false) };
+            // A zombie has exited; only its parent has not collected it yet.
+            if proc_state(&stat) == Some("Z") {
+                return Some(false);
+            }
             Some(start.is_none_or(|start| proc_start_time(&stat).as_deref() == Some(start)))
         }
         #[cfg(not(target_os = "linux"))]
@@ -71,6 +75,12 @@ fn local_pid_domain() -> Option<String> {
 pub fn proc_start_time(stat: &str) -> Option<String> {
     // After the command name come fields 3, 4, …; field 22 is the 20th of them.
     stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(Into::into)
+}
+
+/// Field 3 (state: `R`, `S`, `Z`, …) of a `/proc/<pid>/stat` line.
+#[cfg(target_os = "linux")]
+fn proc_state(stat: &str) -> Option<&str> {
+    stat.rsplit_once(')')?.1.split_whitespace().next()
 }
 
 /// Start time of process `pid` in Claude's `procStart` format (`/proc/<pid>/stat` field 22); `None` when it is gone or
@@ -121,6 +131,22 @@ mod tests {
         let expected = proc_start_time(&std::fs::read_to_string("/proc/self/stat").unwrap());
         assert_eq!(process_start(me), expected);
         assert_eq!(process_start(u32::MAX), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_but_unreaped_process_is_not_running() {
+        let host = LocalHost::new();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Not waited for yet: it stays a zombie (state Z) in /proc.
+        while !std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap().contains(") Z ") {
+            assert!(std::time::Instant::now() < deadline, "the child never exited");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(host.is_running(pid, None), Some(false));
+        child.wait().unwrap();
     }
 
     #[cfg(target_os = "linux")]

@@ -8,3 +8,4 @@ pub mod pty;
 pub mod server;
 pub mod sessions;
 pub mod shell_env;
+pub mod take_over;

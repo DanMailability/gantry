@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest};
+use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome};
 use tokio::sync::mpsc;
 
 use crate::launch::{connect_or_spawn, connect_trusted};
@@ -70,6 +70,13 @@ pub enum ClientEvent {
         upserted: Vec<SessionInfo>,
         /// Ids no longer known.
         removed: Vec<String>,
+    },
+    /// How a `take_over` request ended.
+    TakeOverResult {
+        /// Session id.
+        session: String,
+        /// What happened.
+        outcome: TakeOverOutcome,
     },
     /// Another GUI took over the daemon.
     TakenOver,
@@ -161,6 +168,11 @@ impl DaemonClient {
         self.send(&ClientMessage::Kill { pane });
     }
 
+    /// Stop the process running `session` outside ccm (SIGKILL when `force`); answered by `TakeOverResult`.
+    pub fn take_over(&self, session: &str, force: bool) {
+        self.send(&ClientMessage::TakeOver { session: session.into(), force });
+    }
+
     /// Send keyboard/paste input to a pane.
     pub fn input(&self, pane: PaneId, bytes: &[u8]) {
         let _ = self.outgoing.send(Outgoing::Frame(Frame::Data { pane, bytes: bytes.to_vec() }));
@@ -238,6 +250,7 @@ async fn run_connection(
                 Some(Ok(DaemonMessage::SpawnFailed { request, error })) => ClientEvent::SpawnFailed { request, error },
                 Some(Ok(DaemonMessage::Sessions { sessions })) => ClientEvent::Sessions { sessions },
                 Some(Ok(DaemonMessage::SessionsChanged { upserted, removed })) => ClientEvent::SessionsChanged { upserted, removed },
+                Some(Ok(DaemonMessage::TakeOverResult { session, outcome })) => ClientEvent::TakeOverResult { session, outcome },
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");

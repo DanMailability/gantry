@@ -9,12 +9,16 @@ use app_core::term_state::TermState;
 use claude_index::index::SessionRecord;
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, claude_session};
+use claude_index::host::LocalHost;
+use protocol::message::{
+    ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome, claude_session,
+};
 use tokio::sync::Notify;
 
 use crate::outbox::Outbox;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
 use crate::sessions::{Gone, PaneSession, diff, resolve, spawn_indexer, still_claimed};
+use crate::take_over::{self, FORCE_WAIT, GRACE};
 
 const OUTPUT_QUEUE_CHUNKS: usize = 32;
 const MAX_BATCH_BYTES: usize = 256 * 1024;
@@ -324,6 +328,36 @@ fn stop_all(shared: &Shared) {
     shared.shutdown.notify_one();
 }
 
+/// Stop the outside process running `session`, then report. On success, the session is published as closed first
+/// (its exit is remembered until the index notices), so the GUI's resume finds it closed.
+fn take_over_session(shared: &Arc<Shared>, session: String, force: bool) {
+    let target = {
+        let state = shared.lock();
+        let records = state.records.as_deref().map_or(&[][..], Vec::as_slice);
+        take_over::target(&state.sent, records, &session)
+    };
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let host = LocalHost::new();
+        let outcome = match target.and_then(|target| take_over::signal(&target, force, &host).map(|_| target)) {
+            Err(error) => TakeOverOutcome::Failed { error },
+            Ok(target) => {
+                if take_over::wait_for_exit(&target, &host, if force { FORCE_WAIT } else { GRACE }).await {
+                    let mut state = shared.lock();
+                    state.gone.push(Gone { pid: target.pid, start: Some(target.start) });
+                    state.publish_sessions(false);
+                    TakeOverOutcome::Exited
+                } else if force {
+                    TakeOverOutcome::Failed { error: "the process did not exit after SIGKILL".into() }
+                } else {
+                    TakeOverOutcome::StillRunning
+                }
+            }
+        };
+        shared.lock().control(&DaemonMessage::TakeOverResult { session, outcome });
+    });
+}
+
 fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) {
     match message {
         ClientMessage::Hello { .. } => {}
@@ -374,8 +408,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
                 p.last_focused = seq;
             }
         }
-        // Handled with the take-over flow (M5 Task 4).
-        ClientMessage::TakeOver { .. } => {}
+        ClientMessage::TakeOver { session, force } => take_over_session(shared, session, force),
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             if let Some(p) = state.panes.get_mut(&pane) {

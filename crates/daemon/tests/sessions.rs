@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use daemon::client::{ClientEvent, Connection, DaemonClient};
 use daemon::launch::{DaemonOptions, run_daemon};
 use daemon::paths::Paths;
-use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus, SpawnRequest};
+use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus, SpawnRequest, TakeOverOutcome};
+use std::process::{Child, Command};
 
 struct Setup {
     _dir: tempfile::TempDir,
@@ -173,4 +174,67 @@ fn a_session_is_closed_as_soon_as_its_pane_exits() {
             break;
         }
     }
+}
+
+/// Start `program args` as a process outside ccm and register it as running session `id`.
+fn outside(s: &Setup, id: &str, program: &str, args: &[&str]) -> Child {
+    let child = Command::new(program).args(args).spawn().unwrap();
+    let pid = child.id();
+    let start = claude_index::host::process_start(pid).unwrap();
+    std::fs::create_dir_all(s.config.join("sessions")).unwrap();
+    let pid_file = serde_json::json!({"pid": pid, "sessionId": id, "cwd": s.work, "procStart": start, "status": "idle"});
+    std::fs::write(s.config.join("sessions").join(format!("{pid}.json")), pid_file.to_string()).unwrap();
+    child
+}
+
+/// Wait for the take-over result for `id`; returns it and the session states seen on the way.
+fn take_over_result(conn: &Connection, id: &str) -> (TakeOverOutcome, Vec<SessionState>) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut seen = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "no take-over result for {id}");
+        match conn.events.try_recv() {
+            Ok(ClientEvent::TakeOverResult { session, outcome }) if session == id => return (outcome, seen),
+            Ok(ClientEvent::SessionsChanged { upserted, .. }) => seen.extend(upserted.into_iter().filter(|s| s.id == id).map(|s| s.state)),
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+#[test]
+fn take_over_stops_the_outside_process_and_closes_its_session() {
+    use std::os::unix::process::ExitStatusExt;
+    let s = start(|config, work| transcript(config, "s7", work, "outside"));
+    let mut child = outside(&s, "s7", "sleep", &["30"]);
+    let pid = child.id();
+    wait_for(&s.conn, "s7", |s| s.state == SessionState::External { pid: Some(pid) });
+    s.conn.client.take_over("s7", false);
+    let (outcome, seen) = take_over_result(&s.conn, "s7");
+    assert_eq!(outcome, TakeOverOutcome::Exited);
+    // Closed is published before the result, so the GUI's resume sees a closed session.
+    assert_eq!(seen.last(), Some(&SessionState::Closed), "{seen:?}");
+    assert_eq!(child.wait().unwrap().signal(), Some(15), "stopped with SIGTERM");
+}
+
+#[test]
+fn a_process_ignoring_sigterm_is_still_running_until_forced() {
+    use std::os::unix::process::ExitStatusExt;
+    let s = start(|config, work| transcript(config, "s8", work, "stubborn"));
+    let mut child = outside(&s, "s8", "sh", &["-c", "trap '' TERM; while :; do sleep 1; done"]);
+    let pid = child.id();
+    wait_for(&s.conn, "s8", |s| s.state == SessionState::External { pid: Some(pid) });
+    s.conn.client.take_over("s8", false);
+    assert_eq!(take_over_result(&s.conn, "s8").0, TakeOverOutcome::StillRunning);
+    s.conn.client.take_over("s8", true);
+    assert_eq!(take_over_result(&s.conn, "s8").0, TakeOverOutcome::Exited);
+    assert_eq!(child.wait().unwrap().signal(), Some(9), "killed with SIGKILL");
+}
+
+#[test]
+fn take_over_of_a_closed_session_is_refused() {
+    let s = start(|config, work| transcript(config, "s9", work, "mine"));
+    wait_for(&s.conn, "s9", |s| s.state == SessionState::Closed);
+    s.conn.client.take_over("s9", false);
+    assert!(matches!(take_over_result(&s.conn, "s9").0, TakeOverOutcome::Failed { .. }));
 }
