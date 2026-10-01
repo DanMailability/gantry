@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use app_core::session_tree::Tone;
-use gpui::App;
+use gpui::{App, Div, FontWeight, ParentElement, Styled, div, px, rgba};
 
 /// Behind everything: the window and the gaps between panes.
 pub(crate) const GROUND: u32 = 0x171b24;
@@ -63,6 +63,19 @@ pub(crate) fn tone_colors(tone: Tone) -> ToneColors {
         Tone::Closed => (None, MUTED, 0x555e70),
     };
     ToneColors { fill, ink, dot }
+}
+
+/// The small "container" tag on dev container sessions, tabs and pane headers, drawn in `ink`.
+pub(crate) fn container_chip(ink: u32) -> Div {
+    div()
+        .flex_none()
+        .px(px(5.))
+        .rounded(px(RADIUS_SMALL - 3.))
+        .border_1()
+        .border_color(rgba((ink << 8) | 0x66))
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .child("container")
 }
 
 /// Make the embedded interface font available.

@@ -441,6 +441,7 @@ fn keep(fuzzy: &mut Option<Fuzzy>, title: &str, cwd: &Path, home: Option<&Path>)
 
 fn detail_text(session: &SessionInfo) -> Option<String> {
     match session.state {
+        SessionState::External { .. } if session.container.is_some() => Some("Running in a dev container".into()),
         SessionState::External { pid: Some(pid) } => Some(format!("Running outside Gantry (pid {pid})")),
         SessionState::External { pid: None } => Some("Running in a container".into()),
         _ => None,
@@ -500,7 +501,7 @@ impl Emitter<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::message::SessionStatus;
+    use protocol::message::{ContainerPlace, SessionStatus};
 
     const NOW: u64 = 100 * DAY_MS;
     const HOUR_MS: u64 = 60 * 60 * 1000;
@@ -737,6 +738,15 @@ mod tests {
         ]);
         fixture.details = Some("box".into());
         assert_eq!(fixture.outline(status)[2..], ["  box @p".to_string(), "    (Running in a container)".to_string()]);
+    }
+
+    #[test]
+    fn dev_container_sessions_running_elsewhere_say_so_and_offer_take_over() {
+        let mut boxed = external("box", "/p", 1);
+        boxed.container = Some(ContainerPlace { host_folder: Some("/p".into()), path: "/workspaces/p".into() });
+        let mut fixture = Fixture::of(vec![boxed]);
+        fixture.details = Some("box".into());
+        assert_eq!(fixture.outline(projects), vec!["▾ p", "  box", "    (Running in a dev container)", "    Take over…"]);
     }
 
     #[test]
