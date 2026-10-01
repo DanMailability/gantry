@@ -487,7 +487,17 @@ mod tests {
         // A client connects (ListPanes) before the index has scanned: an empty list would claim no
         // session exists, so nothing is sent yet.
         state.publish_sessions(true);
-        let record = SessionRecord { id: "s".into(), cwd: "/".into(), title: "t".into(), last_active_ms: 1, state: IndexState::Closed, cwd_exists: true };
+        let record = SessionRecord {
+            id: "s".into(),
+            cwd: "/".into(),
+            title: "t".into(),
+            last_active_ms: 1,
+            state: IndexState::Closed,
+            cwd_exists: true,
+            activity: None,
+            activity_since_ms: 0,
+            proc_start: None,
+        };
         state.records = Some(Arc::new(vec![record]));
         state.publish_sessions(true);
         outbox.close();

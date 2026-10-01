@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::host::Host;
-use crate::live::{self, LiveRecord};
+use crate::live::{self, Activity, LiveRecord};
 use crate::transcript::{TranscriptSummary, summarize};
 
 /// Whether a session runs, as far as the index can tell (the daemon adds which pane runs it).
@@ -38,6 +38,12 @@ pub struct SessionRecord {
     pub state: IndexState,
     /// Whether `cwd` exists (resume needs it).
     pub cwd_exists: bool,
+    /// What the running Claude reports doing; `None` when closed or unknown.
+    pub activity: Option<Activity>,
+    /// When `activity` was last written, ms since the Unix epoch (0 = unknown).
+    pub activity_since_ms: u64,
+    /// Start time of the process running it (from its pid file), for verifying that process later.
+    pub proc_start: Option<String>,
 }
 
 struct Cached {
@@ -81,6 +87,9 @@ impl<H: Host> Index<H> {
                 last_active_ms: millis(modified),
                 state: IndexState::Closed,
                 cwd_exists: false,
+                activity: None,
+                activity_since_ms: 0,
+                proc_start: None,
             };
             // The same id in two folders: keep the newer.
             if records.get(&record.id).is_none_or(|old| old.last_active_ms < record.last_active_ms) {
@@ -100,10 +109,16 @@ impl<H: Host> Index<H> {
                 last_active_ms: live.updated_at_ms.unwrap_or(0),
                 state: IndexState::Closed,
                 cwd_exists: false,
+                activity: None,
+                activity_since_ms: 0,
+                proc_start: None,
             });
             // A host process beats a container entry for the same session.
             if !matches!(record.state, IndexState::Running { .. }) {
                 record.state = state;
+                record.activity = live.activity;
+                record.activity_since_ms = live.activity_since_ms.unwrap_or(0);
+                record.proc_start = live.proc_start;
             }
         }
         let mut exists: HashMap<PathBuf, bool> = HashMap::new();
@@ -158,6 +173,7 @@ fn millis(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live::Activity;
     use std::time::Duration;
 
     #[derive(Default)]
@@ -228,6 +244,28 @@ mod tests {
         pid_file(dir.path(), 42, "s1", "/a", "777", None);
         let host = FakeHost { running: HashMap::from([(42, "777".to_string())]), ..FakeHost::default() };
         assert_eq!(Index::new(dir.path().into(), host).scan()[0].state, IndexState::Running { pid: 42 });
+    }
+
+    #[test]
+    fn a_running_pid_file_carries_its_status_and_start_time() {
+        let dir = tempfile::tempdir().unwrap();
+        transcript(dir.path(), "-a", "s1", "/a", "hi", 5);
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        let json = serde_json::json!({"pid": 42, "sessionId": "s1", "cwd": "/a", "procStart": "777",
+            "status": "waiting", "waitingFor": "dialog open", "statusUpdatedAt": 1234, "updatedAt": 1300});
+        std::fs::write(dir.path().join("sessions/42.json"), json.to_string()).unwrap();
+        let host = FakeHost { running: HashMap::from([(42, "777".to_string())]), ..FakeHost::default() };
+        let record = Index::new(dir.path().into(), host).scan().remove(0);
+        assert_eq!(record.activity, Some(Activity::Waiting { reason: Some("dialog open".into()) }));
+        assert_eq!((record.activity_since_ms, record.proc_start.as_deref()), (1234, Some("777")));
+    }
+
+    #[test]
+    fn closed_sessions_have_no_status() {
+        let dir = tempfile::tempdir().unwrap();
+        transcript(dir.path(), "-a", "s1", "/a", "hi", 5);
+        let record = Index::new(dir.path().into(), FakeHost::default()).scan().remove(0);
+        assert_eq!((record.activity, record.activity_since_ms, record.proc_start), (None, 0, None));
     }
 
     #[test]

@@ -5,6 +5,20 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
+/// What a live Claude reports doing (`status` in its pid file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Activity {
+    /// Working on a turn.
+    Busy,
+    /// Waiting for the next prompt.
+    Idle,
+    /// Blocked on the user: a permission prompt, a dialog, a question.
+    Waiting {
+        /// Claude's `waitingFor`, e.g. `input needed`, `dialog open`.
+        reason: Option<String>,
+    },
+}
+
 /// One running Claude, as its pid file describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveRecord {
@@ -20,6 +34,10 @@ pub struct LiveRecord {
     pub pid_domain: Option<String>,
     /// Last update, milliseconds since the Unix epoch.
     pub updated_at_ms: Option<u64>,
+    /// What it reports doing; `None` when the file has no (known) status.
+    pub activity: Option<Activity>,
+    /// When the status was last written (`statusUpdatedAt`, else `updatedAt`), ms since the Unix epoch.
+    pub activity_since_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -31,6 +49,9 @@ struct PidFile {
     proc_start: Option<Value>,
     pid_domain: Option<String>,
     updated_at: Option<u64>,
+    status: Option<Value>,
+    waiting_for: Option<Value>,
+    status_updated_at: Option<u64>,
 }
 
 /// Parse one pid file; `None` unless it names a pid, a session and a directory.
@@ -41,6 +62,12 @@ pub fn parse(text: &str) -> Option<LiveRecord> {
         Value::Number(number) => Some(number.to_string()),
         _ => None,
     });
+    let activity = match file.status.as_ref().and_then(Value::as_str) {
+        Some("busy") => Some(Activity::Busy),
+        Some("idle") => Some(Activity::Idle),
+        Some("waiting") => Some(Activity::Waiting { reason: file.waiting_for.as_ref().and_then(Value::as_str).map(String::from) }),
+        _ => None,
+    };
     Some(LiveRecord {
         pid: file.pid?,
         session_id: file.session_id.filter(|id| !id.is_empty())?,
@@ -48,6 +75,8 @@ pub fn parse(text: &str) -> Option<LiveRecord> {
         proc_start,
         pid_domain: file.pid_domain,
         updated_at_ms: file.updated_at,
+        activity,
+        activity_since_ms: file.status_updated_at.or(file.updated_at),
     })
 }
 
@@ -85,7 +114,30 @@ mod tests {
             proc_start: Some("64344299".into()),
             pid_domain: Some("linux:9dec:pid:[4026531836]".into()),
             updated_at_ms: Some(1790840985757),
+            activity: Some(Activity::Busy),
+            // No `statusUpdatedAt` in this shape: `updatedAt` stands in.
+            activity_since_ms: Some(1790840985757),
         });
+    }
+
+    #[test]
+    fn status_values_map_to_activities() {
+        let with = |extra: &str| parse(&format!(r#"{{"pid":1,"sessionId":"s","cwd":"/",{extra}}}"#)).unwrap();
+        let idle = with(r#""status":"idle","statusUpdatedAt":5,"updatedAt":9"#);
+        assert_eq!((idle.activity, idle.activity_since_ms), (Some(Activity::Idle), Some(5)));
+        let waiting = with(r#""status":"waiting","waitingFor":"input needed""#);
+        assert_eq!(waiting.activity, Some(Activity::Waiting { reason: Some("input needed".into()) }));
+        assert_eq!(with(r#""status":"waiting""#).activity, Some(Activity::Waiting { reason: None }));
+    }
+
+    #[test]
+    fn odd_status_values_mean_unknown() {
+        let with = |extra: &str| parse(&format!(r#"{{"pid":1,"sessionId":"s","cwd":"/"{extra}}}"#));
+        for extra in ["", r#","status":"paused""#, r#","status":7"#, r#","status":"waiting","waitingFor":3"#] {
+            let record = with(extra).unwrap_or_else(|| panic!("dropped a pid file with {extra:?}"));
+            let expected = if extra.contains("waiting") { Some(Activity::Waiting { reason: None }) } else { None };
+            assert_eq!(record.activity, expected, "{extra}");
+        }
     }
 
     #[test]

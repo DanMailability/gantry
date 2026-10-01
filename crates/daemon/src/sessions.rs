@@ -119,7 +119,17 @@ mod tests {
     use super::*;
 
     fn record(id: &str, state: IndexState) -> SessionRecord {
-        SessionRecord { id: id.into(), cwd: "/r".into(), title: id.into(), last_active_ms: 1, state, cwd_exists: true }
+        SessionRecord {
+            id: id.into(),
+            cwd: "/r".into(),
+            title: id.into(),
+            last_active_ms: 1,
+            state,
+            cwd_exists: true,
+            activity: None,
+            activity_since_ms: 0,
+            proc_start: None,
+        }
     }
 
     fn pane(pane: PaneId, pid: u32, session_arg: Option<&str>) -> PaneSession {
