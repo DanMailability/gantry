@@ -278,7 +278,7 @@ impl SidebarView {
         match &row.kind {
             RowKind::Host { name } => base.text_color(rgb(MUTED)).child(format!("▾ {name}")),
             RowKind::Group { label, count } => base.text_xs().text_color(rgb(MUTED)).child(format!("{} · {count}", label.to_uppercase())),
-            RowKind::Dir { path, label, expanded, live, closed } => {
+            RowKind::Dir { path, label, expanded, live, closed, .. } => {
                 let path = path.clone();
                 base.child(div().flex_none().text_color(rgb(MUTED)).child(if *expanded { "▾" } else { "▸" }))
                     .child(title(label.clone(), TEXT))
@@ -313,6 +313,7 @@ impl SidebarView {
                 .when_some(path.clone(), |el, path| el.child(path_label(path))),
             RowKind::More { hidden, .. } => base.text_color(rgb(MUTED)).child(format!("… {hidden} more")),
             RowKind::Detail { text, .. } => base.text_xs().italic().text_color(rgb(MUTED)).child(text.clone()),
+            RowKind::TakeOver { .. } => base.text_color(rgb(ACCENT)).child("Take over…"),
         }
     }
 }

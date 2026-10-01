@@ -424,7 +424,11 @@ impl WorkspaceView {
                         self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
                     }
                 },
-                Activation::ToggleDetails(_) | Activation::ToggleDir(_) | Activation::ShowAll(_) | Activation::Nothing => {}
+                Activation::ToggleDetails(_)
+                | Activation::TakeOver { .. }
+                | Activation::ToggleDir(_)
+                | Activation::ShowAll(_)
+                | Activation::Nothing => {}
             },
             SidebarEvent::NewHere { dir, claude } => self.open_launch(new_launch(claude, dir), None, None, window, cx),
             SidebarEvent::ViewChanged(view) => {

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
-use protocol::message::{PaneId, SessionInfo, SessionState};
+use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
 
 use crate::fuzzy::Fuzzy;
 use crate::split_tree::NodeId;
@@ -79,6 +79,10 @@ pub enum RowKind {
         label: String,
         /// Children shown.
         expanded: bool,
+        /// Sessions in its subtree that need input.
+        needs_input: usize,
+        /// Busy sessions in its subtree.
+        busy: usize,
         /// Live sessions and shells in its subtree.
         live: usize,
         /// Closed sessions in its subtree.
@@ -114,6 +118,13 @@ pub enum RowKind {
         /// Text.
         text: String,
     },
+    /// "Take over…" under an outside session's details.
+    TakeOver {
+        /// Session id.
+        session: String,
+        /// Its directory (where it is resumed).
+        cwd: PathBuf,
+    },
 }
 
 /// Identifies a row across rebuilds (for keeping the selection).
@@ -133,6 +144,8 @@ pub enum RowKey {
     More(PathBuf),
     /// Details of a session.
     Detail(String),
+    /// "Take over…" of a session.
+    TakeOver(String),
 }
 
 /// What activating (click / Enter) a row does.
@@ -151,6 +164,13 @@ pub enum Activation {
     },
     /// Show or hide an external session's details.
     ToggleDetails(String),
+    /// Stop the outside process running a session and resume it here.
+    TakeOver {
+        /// Session id.
+        session: String,
+        /// Its directory.
+        cwd: PathBuf,
+    },
     /// Expand or collapse a directory.
     ToggleDir(PathBuf),
     /// Show all closed sessions of a directory.
@@ -170,6 +190,7 @@ impl Row {
             RowKind::Shell { entry, .. } => RowKey::Shell(entry.leaf),
             RowKind::More { dir, .. } => RowKey::More(dir.clone()),
             RowKind::Detail { session, .. } => RowKey::Detail(session.clone()),
+            RowKind::TakeOver { session, .. } => RowKey::TakeOver(session.clone()),
         }
     }
 
@@ -192,6 +213,7 @@ impl Row {
                 }
                 SessionState::Closed => Activation::Nothing,
             },
+            RowKind::TakeOver { session, cwd } => Activation::TakeOver { session: session.clone(), cwd: cwd.clone() },
             RowKind::Host { .. } | RowKind::Group { .. } | RowKind::Detail { .. } => Activation::Nothing,
         }
     }
@@ -266,31 +288,34 @@ pub fn status(input: &TreeInput<'_>) -> Vec<Row> {
     sessions.sort_by(newest_first);
     let shells: Vec<&ShellEntry> = input.shells.iter().filter(|s| keep(&mut fuzzy, &s.title, &s.cwd, input.home)).collect();
     let cutoff = input.now_ms.saturating_sub(CLOSED_DAYS * DAY_MS);
-    let in_state = |pick: fn(&SessionInfo) -> bool| sessions.iter().copied().filter(|s| pick(s)).collect::<Vec<_>>();
-    let in_ccm = in_state(|s| matches!(s.state, SessionState::Managed { .. }));
-    let external = in_state(|s| matches!(s.state, SessionState::External { .. }));
+    let pick = |wanted: fn(&SessionInfo) -> bool| sessions.iter().copied().filter(|s| wanted(s)).collect::<Vec<_>>();
+    let groups = [
+        ("Needs input", pick(|s| matches!(s.state, SessionState::Managed { .. }) && matches!(s.status, Some(SessionStatus::NeedsInput { .. })))),
+        ("Busy", pick(|s| matches!(s.state, SessionState::Managed { .. }) && s.status == Some(SessionStatus::Busy))),
+        (
+            "Idle",
+            pick(|s| {
+                matches!(s.state, SessionState::Managed { .. })
+                    && !matches!(s.status, Some(SessionStatus::NeedsInput { .. } | SessionStatus::Busy))
+            }),
+        ),
+    ];
+    let external = pick(|s| matches!(s.state, SessionState::External { .. }));
     let closed: Vec<&SessionInfo> =
-        in_state(|s| s.state == SessionState::Closed).into_iter().filter(|s| s.last_active_ms >= cutoff).collect();
+        pick(|s| s.state == SessionState::Closed).into_iter().filter(|s| s.last_active_ms >= cutoff).collect();
     let mut emitter = Emitter { input, filtering: true, rows: Vec::new() };
-    if !in_ccm.is_empty() || !shells.is_empty() {
-        emitter.rows.push(Row { depth: 0, kind: RowKind::Group { label: "In ccm", count: in_ccm.len() + shells.len() } });
-        for session in in_ccm {
-            emitter.session(session, 1, true);
-        }
+    for (label, group) in groups {
+        emitter.group(label, &group);
+    }
+    if !shells.is_empty() {
+        emitter.rows.push(Row { depth: 0, kind: RowKind::Group { label: "Shells", count: shells.len() } });
         for shell in shells {
             let path = Some(display_path(&shell.cwd, input.home));
             emitter.rows.push(Row { depth: 1, kind: RowKind::Shell { entry: shell.clone(), path } });
         }
     }
-    for (label, group) in [("External", external), ("Closed (last 30 days)", closed)] {
-        if group.is_empty() {
-            continue;
-        }
-        emitter.rows.push(Row { depth: 0, kind: RowKind::Group { label, count: group.len() } });
-        for session in group {
-            emitter.session(session, 1, true);
-        }
-    }
+    emitter.group("External", &external);
+    emitter.group("Closed (last 30 days)", &closed);
     emitter.rows
 }
 
@@ -312,6 +337,26 @@ fn detail_text(session: &SessionInfo) -> Option<String> {
         SessionState::External { pid: Some(pid) } => Some(format!("Running outside ccm (pid {pid})")),
         SessionState::External { pid: None } => Some("Running in a container".into()),
         _ => None,
+    }
+}
+
+/// Entries of a directory or subtree, by kind.
+#[derive(Clone, Copy, Default)]
+struct Counts {
+    needs_input: usize,
+    busy: usize,
+    live: usize,
+    closed: usize,
+}
+
+impl Counts {
+    fn plus(self, other: Counts) -> Counts {
+        Counts {
+            needs_input: self.needs_input + other.needs_input,
+            busy: self.busy + other.busy,
+            live: self.live + other.live,
+            closed: self.closed + other.closed,
+        }
     }
 }
 
@@ -344,15 +389,27 @@ impl<'a> DirNode<'a> {
         !self.sessions.is_empty() || !self.shells.is_empty()
     }
 
-    /// (live, closed) entries of this directory itself.
-    fn own_counts(&self) -> (usize, usize) {
-        let live = self.sessions.iter().filter(|s| is_live(s)).count() + self.shells.len();
-        (live, self.sessions.iter().filter(|s| !is_live(s)).count())
+    /// Entries of this directory itself.
+    fn own_counts(&self) -> Counts {
+        let mut counts = Counts { live: self.shells.len(), ..Counts::default() };
+        for session in &self.sessions {
+            if !is_live(session) {
+                counts.closed += 1;
+                continue;
+            }
+            counts.live += 1;
+            match session.status {
+                Some(SessionStatus::NeedsInput { .. }) => counts.needs_input += 1,
+                Some(SessionStatus::Busy) => counts.busy += 1,
+                _ => {}
+            }
+        }
+        counts
     }
 
-    /// (live, closed) entries of this subtree.
-    fn counts(&self) -> (usize, usize) {
-        self.children.values().map(DirNode::counts).fold(self.own_counts(), |(l, c), (cl, cc)| (l + cl, c + cc))
+    /// Entries of this subtree.
+    fn counts(&self) -> Counts {
+        self.children.values().map(DirNode::counts).fold(self.own_counts(), Counts::plus)
     }
 
     /// Follow directories that have no entries and a single child (path compression).
@@ -392,10 +449,21 @@ impl Emitter<'_, '_> {
             Some(relative) => relative.display().to_string(),
             None => display_path(&node.path, self.input.home),
         };
-        let (live, closed) = if with_children { node.counts() } else { node.own_counts() };
-        let default_open = live > 0 || !node.has_entries();
+        let counts = if with_children { node.counts() } else { node.own_counts() };
+        let default_open = counts.live > 0 || !node.has_entries();
         let expanded = self.filtering || default_open != self.input.toggled.contains(&node.path);
-        self.rows.push(Row { depth, kind: RowKind::Dir { path: node.path.clone(), label, expanded, live, closed } });
+        self.rows.push(Row {
+            depth,
+            kind: RowKind::Dir {
+                path: node.path.clone(),
+                label,
+                expanded,
+                needs_input: counts.needs_input,
+                busy: counts.busy,
+                live: counts.live,
+                closed: counts.closed,
+            },
+        });
         if !expanded {
             return;
         }
@@ -424,6 +492,17 @@ impl Emitter<'_, '_> {
         }
     }
 
+    /// A Status-view group heading and its sessions (nothing when empty).
+    fn group(&mut self, label: &'static str, sessions: &[&SessionInfo]) {
+        if sessions.is_empty() {
+            return;
+        }
+        self.rows.push(Row { depth: 0, kind: RowKind::Group { label, count: sessions.len() } });
+        for session in sessions {
+            self.session(session, 1, true);
+        }
+    }
+
     fn session(&mut self, session: &SessionInfo, depth: usize, with_path: bool) {
         let path = with_path.then(|| display_path(&session.cwd, self.input.home));
         let age = age(self.input.now_ms, session.last_active_ms);
@@ -432,6 +511,12 @@ impl Emitter<'_, '_> {
             && let Some(text) = detail_text(session)
         {
             self.rows.push(Row { depth: depth + 1, kind: RowKind::Detail { session: session.id.clone(), text } });
+            if matches!(session.state, SessionState::External { pid: Some(_) }) && session.cwd_exists {
+                self.rows.push(Row {
+                    depth: depth + 1,
+                    kind: RowKind::TakeOver { session: session.id.clone(), cwd: session.cwd.clone() },
+                });
+            }
         }
     }
 }
@@ -439,6 +524,7 @@ impl Emitter<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::message::SessionStatus;
 
     const NOW: u64 = 100 * DAY_MS;
 
@@ -510,6 +596,7 @@ mod tests {
                     RowKind::Shell { entry, .. } => format!("shell {}", entry.leaf),
                     RowKind::More { hidden, .. } => format!("… {hidden} more"),
                     RowKind::Detail { text, .. } => format!("({text})"),
+                    RowKind::TakeOver { .. } => "Take over…".into(),
                 };
                 format!("{}{text}", "  ".repeat(row.depth))
             })
@@ -585,18 +672,56 @@ mod tests {
     }
 
     #[test]
-    fn status_view_groups_live_external_and_recent_closed() {
+    fn status_view_groups_by_status_then_shells_external_and_recent_closed() {
+        let with = |mut session: SessionInfo, status: SessionStatus| {
+            session.status = Some(status);
+            session
+        };
         let mut fixture = Fixture::of(vec![
-            managed("m", "/a", NOW - 50),
-            session("e", "/b", SessionState::External { pid: Some(42) }, NOW - 60),
+            with(managed("waits", "/a", NOW - 10), SessionStatus::NeedsInput { reason: None }),
+            with(managed("works", "/a", NOW - 20), SessionStatus::Busy),
+            with(managed("rests", "/a", NOW - 30), SessionStatus::Idle),
+            managed("starts", "/a", NOW - 40),
+            with(session("e", "/b", SessionState::External { pid: Some(42) }, NOW - 60), SessionStatus::Busy),
             closed("c", "/home/me/c", NOW - 2 * DAY_MS),
             closed("old", "/c", NOW - 40 * DAY_MS),
         ]);
         fixture.shells.push(ShellEntry { leaf: 4, cwd: "/a".into(), title: "zsh".into() });
         let rows = fixture.rows(status);
-        assert_eq!(outline(&rows), vec!["In ccm (2)", "  m", "  shell 4", "External (1)", "  e", "Closed (last 30 days) (1)", "  c"]);
-        let RowKind::Session { path, age, .. } = &rows[6].kind else { panic!("{rows:?}") };
+        assert_eq!(outline(&rows), vec![
+            "Needs input (1)", "  waits", "Busy (1)", "  works", "Idle (2)", "  rests", "  starts",
+            "Shells (1)", "  shell 4", "External (1)", "  e", "Closed (last 30 days) (1)", "  c",
+        ]);
+        let RowKind::Session { path, age, .. } = &rows[12].kind else { panic!("{rows:?}") };
         assert_eq!((path.as_deref(), age.as_str()), (Some("~/c"), "2d"));
+    }
+
+    #[test]
+    fn directories_count_sessions_needing_input_and_busy() {
+        let mut asking = managed("a", "/p", 3);
+        asking.status = Some(SessionStatus::NeedsInput { reason: None });
+        let mut working = session("b", "/p/q", SessionState::External { pid: Some(7) }, 2);
+        working.status = Some(SessionStatus::Busy);
+        let mut fixture = Fixture::of(vec![asking, working, managed("c", "/p", 1), closed("d", "/p", 0)]);
+        fixture.shells.push(ShellEntry { leaf: 5, cwd: "/p".into(), title: "zsh".into() });
+        let rows = fixture.rows(folders);
+        let RowKind::Dir { needs_input, busy, live, closed, .. } = &rows[1].kind else { panic!("{rows:?}") };
+        assert_eq!((*needs_input, *busy, *live, *closed), (1, 1, 4, 1));
+    }
+
+    #[test]
+    fn take_over_is_offered_for_outside_host_sessions_whose_directory_exists() {
+        let mut fixture = Fixture::of(vec![
+            session("e", "/p", SessionState::External { pid: Some(42) }, 3),
+            SessionInfo { cwd_exists: false, ..session("gone", "/p", SessionState::External { pid: Some(43) }, 2) },
+        ]);
+        fixture.details = Some("gone".into());
+        assert!(!fixture.outline(folders).contains(&"      Take over…".to_string()));
+        fixture.details = Some("e".into());
+        let rows = fixture.rows(folders);
+        let index = find(&rows, &RowKey::TakeOver("e".into())).unwrap();
+        assert!(rows[index].selectable());
+        assert_eq!(rows[index].activation(), Activation::TakeOver { session: "e".into(), cwd: "/p".into() });
     }
 
     #[test]
@@ -610,7 +735,7 @@ mod tests {
         assert_eq!(row(missing).activation(), Activation::Nothing);
         let shell = Row { depth: 1, kind: RowKind::Shell { entry: ShellEntry { leaf: 9, cwd: "/".into(), title: "sh".into() }, path: None } };
         assert_eq!(shell.activation(), Activation::FocusLeaf(9));
-        let dir = Row { depth: 1, kind: RowKind::Dir { path: "/a".into(), label: "/a".into(), expanded: true, live: 0, closed: 1 } };
+        let dir = Row { depth: 1, kind: RowKind::Dir { path: "/a".into(), label: "/a".into(), expanded: true, needs_input: 0, busy: 0, live: 0, closed: 1 } };
         assert_eq!((dir.activation(), dir.selectable()), (Activation::ToggleDir("/a".into()), true));
         let more = Row { depth: 2, kind: RowKind::More { dir: "/a".into(), hidden: 3 } };
         assert_eq!(more.activation(), Activation::ShowAll("/a".into()));
@@ -625,7 +750,9 @@ mod tests {
             session("box", "/p", SessionState::External { pid: None }, 1),
         ]);
         fixture.details = Some("e".into());
-        assert_eq!(fixture.outline(folders), vec!["Local", "  ▾ /p [2/0]", "    e", "      (Running outside ccm (pid 42))", "    box"]);
+        assert_eq!(fixture.outline(folders), vec![
+            "Local", "  ▾ /p [2/0]", "    e", "      (Running outside ccm (pid 42))", "      Take over…", "    box",
+        ]);
         fixture.details = Some("box".into());
         assert_eq!(fixture.outline(status)[2..], ["  box".to_string(), "    (Running in a container)".to_string()]);
     }
