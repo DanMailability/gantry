@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 
+use app_core::bidi::{RowOrder, logical_hit, to_display};
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
 use app_core::paste::encode_paste;
@@ -123,6 +124,8 @@ pub struct TerminalView {
     selecting: bool,
     mouse_position: Option<Point<Pixels>>,
     hovered_link: Option<(u16, Range<usize>)>,
+    /// Display order of each viewport row in the last frame (`None`: drawn as stored).
+    row_orders: Vec<Option<RowOrder>>,
 }
 
 impl EventEmitter<PaneEvent> for TerminalView {}
@@ -154,6 +157,7 @@ impl TerminalView {
             selecting: false,
             mouse_position: None,
             hovered_link: None,
+            row_orders: Vec::new(),
         }
     }
 
@@ -362,10 +366,17 @@ impl TerminalView {
         Some((col, row, x - col as f32 * w > w / 2.0))
     }
 
+    /// The logical cell under a window position: `cell_at` mapped through the last frame's display order.
+    fn logical_cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16, bool)> {
+        let (col, row, right_half) = self.cell_at(position)?;
+        let (col, right_half) = logical_hit(&self.row_orders, col as usize, row as usize, right_half);
+        Some((col as u16, row, right_half))
+    }
+
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
         cx.emit(PaneEvent::Focused);
-        let Some((col, row, right_half)) = self.cell_at(event.position) else { return };
+        let Some((col, row, right_half)) = self.logical_cell_at(event.position) else { return };
         if link_modifier(event.modifiers)
             && let Some(link) = link_at(&self.term.row_text(row), col as usize)
         {
@@ -382,7 +393,7 @@ impl TerminalView {
         let hovered = self
             .mouse_position
             .filter(|_| link_modifier(modifiers))
-            .and_then(|position| self.cell_at(position))
+            .and_then(|position| self.logical_cell_at(position))
             .and_then(|(col, row, _)| {
                 link_at(&self.term.row_text(row), col as usize).map(|link| (row, link.cols))
             });
@@ -402,7 +413,7 @@ impl TerminalView {
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
-        if let Some((col, row, right_half)) = self.cell_at(event.position) {
+        if let Some((col, row, right_half)) = self.logical_cell_at(event.position) {
             self.term.update_selection(col, row, right_half);
             cx.notify();
         }
@@ -424,7 +435,7 @@ impl TerminalView {
             return;
         }
         self.scroll_accum -= lines as f32;
-        let (col, row) = self.cell_at(event.position).map_or((0, 0), |(col, row, _)| (col, row));
+        let (col, row) = self.logical_cell_at(event.position).map_or((0, 0), |(col, row, _)| (col, row));
         match scroll_action(self.term.scroll_modes(), lines, col, row) {
             ScrollAction::Viewport(n) => self.term.scroll_viewport(n),
             ScrollAction::Send(bytes) => self.write_pty(&bytes),
@@ -491,6 +502,7 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let (col, row) = self.term.cursor_cell()?;
+        let col = self.row_orders.get(row).and_then(Option::as_ref).map_or(col, |order| order.visual(col));
         Some(Bounds::new(
             point(
                 element_bounds.origin.x + self.metrics.width * col as f32,
@@ -521,6 +533,7 @@ impl Render for TerminalView {
                 cell.style.underline = true;
             }
         }
+        self.row_orders = to_display(&mut snapshot);
         let hovering_link = self.hovered_link.is_some();
         let focused = self.focus_handle.is_focused(window);
         let font = self.font.clone();
@@ -623,8 +636,9 @@ fn paint_grid(
             if span.text.trim().is_empty() {
                 continue;
             }
-            let force_width = (!span.wide).then_some(m.width);
-            paint_text(&span.text, &span.style, point(x, y), force_width, m, base_font, font_size, window, cx);
+            let single = span.width_cols == 1 && !span.text.is_ascii();
+            let force_width = (!span.wide && !single).then_some(m.width);
+            paint_text(&span.text, &span.style, point(x, y), force_width, single, m, base_font, font_size, window, cx);
         }
     }
     if let Some(cursor) = &snapshot.cursor {
@@ -638,8 +652,9 @@ fn paint_grid(
             window.paint_quad(fill(bounds, color));
             if cursor.ch != ' ' {
                 let style = CellStyle { fg: snapshot.background, ..cursor.style };
-                let force_width = (!cursor.wide).then_some(m.width);
-                paint_text(&cursor.ch.to_string(), &style, bounds.origin, force_width, m, base_font, font_size, window, cx);
+                let single = !cursor.wide && !cursor.ch.is_ascii();
+                let force_width = (!cursor.wide && !single).then_some(m.width);
+                paint_text(&cursor.ch.to_string(), &style, bounds.origin, force_width, single, m, base_font, font_size, window, cx);
             }
         } else {
             window.paint_quad(outline(bounds, color, BorderStyle::Solid));
@@ -647,12 +662,14 @@ fn paint_grid(
     }
 }
 
+/// `center`: draw a glyph narrower than one cell in the middle of that cell.
 #[allow(clippy::too_many_arguments)]
 fn paint_text(
     text: &str,
     style: &CellStyle,
     origin: Point<Pixels>,
     force_width: Option<Pixels>,
+    center: bool,
     m: CellMetrics,
     base_font: &Font,
     font_size: Pixels,
@@ -676,7 +693,8 @@ fn paint_text(
         strikethrough: style.strikethrough.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
     };
     let line = window.text_system().shape_line(text.to_string().into(), font_size, &[run], force_width);
-    if let Err(err) = line.paint(origin, m.height, TextAlign::Left, None, window, cx) {
+    let inset = if center { ((m.width - line.width) / 2.).max(px(0.)) } else { px(0.) };
+    if let Err(err) = line.paint(point(origin.x + inset, origin.y), m.height, TextAlign::Left, None, window, cx) {
         tracing::warn!("painting text failed: {err:#}");
     }
 }
