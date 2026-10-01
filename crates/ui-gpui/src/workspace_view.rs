@@ -493,16 +493,20 @@ impl WorkspaceView {
                     .h_full()
                     .px_3()
                     .max_w(px(220.))
+                    // Tabs shrink (titles truncate) so the buttons and window controls stay visible.
+                    .min_w(px(48.))
+                    .flex_shrink(1.)
                     .flex()
                     .items_center()
                     .border_r_1()
                     .border_color(rgb(BORDER))
                     .text_color(rgb(if active { TEXT } else { MUTED }))
                     .when(active, |tab| tab.bg(rgb(BACKGROUND)).border_t_2().border_color(rgb(ACCENT)))
-                    .child(div().truncate().child(title))
+                    .child(div().min_w_0().truncate().child(title))
                     .child(
                         div()
                             .id(("close-tab", index))
+                            .flex_none()
                             .ml_2()
                             .text_color(rgb(MUTED))
                             .hover(|style| style.text_color(rgb(ACCENT)))
@@ -523,6 +527,7 @@ impl WorkspaceView {
                     div()
                         .id("drag-area")
                         .flex_1()
+                        .min_w(px(40.))
                         .h_full()
                         .on_mouse_down(MouseButton::Left, |event, window, _| {
                             if event.click_count >= 2 {
@@ -647,6 +652,7 @@ pub(crate) fn tab_bar_button(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .flex_none()
         .h_full()
         .px_3()
         .flex()

@@ -119,6 +119,7 @@ pub fn window_controls(window: &Window, on_close: impl Fn(&gpui::ClickEvent, &mu
             .child(glyph)
     };
     div()
+        .flex_none()
         .h_full()
         .flex()
         .flex_row()
