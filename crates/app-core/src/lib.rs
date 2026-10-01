@@ -1,5 +1,6 @@
 //! GPUI-free application logic for ccm: terminal state, render snapshots, and input encoding.
 
+pub mod attention;
 pub mod fuzzy;
 pub mod input;
 pub mod launcher;

@@ -4,9 +4,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use protocol::message::{PaneId, PaneInfo, SessionState, SpawnRequest, claude_session};
+use protocol::message::{PaneId, PaneInfo, SessionState, SessionStatus, SpawnRequest, claude_session};
 use serde::{Deserialize, Serialize};
 
+use crate::attention::most_urgent;
 use crate::sessions::SessionStore;
 use crate::split_tree::{Axis, Direction, Node, NodeId};
 
@@ -305,6 +306,28 @@ impl Workspace {
         self.leaves.iter().find(|(_, leaf)| leaf.session.as_deref() == Some(session)).map(|(id, _)| *id)
     }
 
+    /// Whether `leaf` is in the visible tab.
+    pub fn is_visible(&self, leaf: NodeId) -> bool {
+        self.active_tab().is_some_and(|tab| tab.root.contains(leaf))
+    }
+
+    /// What `leaf`'s Claude session is doing, while its pane runs that session.
+    pub fn leaf_status<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s SessionStatus> {
+        let leaf = self.leaves.get(&leaf)?;
+        let pane = leaf.pane?;
+        let session = sessions.get(leaf.session.as_deref()?)?;
+        if session.state != (SessionState::Managed { pane }) {
+            return None;
+        }
+        session.status.as_ref()
+    }
+
+    /// The most urgent status among tab `index`'s leaves.
+    pub fn tab_status<'s>(&self, index: usize, sessions: &'s SessionStore) -> Option<&'s SessionStatus> {
+        let tab = self.tabs.get(index)?;
+        most_urgent(tab.root.leaves().into_iter().filter_map(|leaf| self.leaf_status(leaf, sessions)))
+    }
+
     /// Index of the tab containing `leaf`.
     pub fn tab_of(&self, leaf: NodeId) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.root.contains(leaf))
@@ -580,6 +603,28 @@ mod tests {
         assert_eq!(leaf.rerun_with(&store), Rerun::Busy);
         let sh = Leaf::new(shell("/r"));
         assert_eq!(sh.rerun_with(&store), Rerun::Start(sh.launch.clone()));
+    }
+
+    #[test]
+    fn leaves_and_tabs_show_the_status_of_the_session_their_pane_runs() {
+        use protocol::message::{SessionInfo, SessionState, SessionStatus};
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(PaneLaunch::resume("a", "/r".into()));
+        ws.pane_started(a, 1, "/r".into());
+        let b = ws.split(Axis::Horizontal, PaneLaunch::resume("b", "/r".into())).unwrap();
+        ws.pane_started(b, 2, "/r".into());
+        let other = ws.new_tab(shell("/r"));
+        let mut store = SessionStore::default();
+        let with = |id: &str, pane, status| SessionInfo { status: Some(status), ..session_info(id, SessionState::Managed { pane }) };
+        store.replace(vec![with("a", 1, SessionStatus::Idle), with("b", 2, SessionStatus::NeedsInput { reason: None })]);
+        assert_eq!(ws.leaf_status(a, &store), Some(&SessionStatus::Idle));
+        assert_eq!(ws.tab_status(0, &store), Some(&SessionStatus::NeedsInput { reason: None }));
+        assert_eq!((ws.leaf_status(other, &store), ws.tab_status(1, &store)), (None, None));
+        // A stale entry for another pane (the leaf's process ended, the session moved) is not this leaf's status.
+        store.replace(vec![with("a", 9, SessionStatus::Busy)]);
+        assert_eq!(ws.leaf_status(a, &store), None);
+        // The visible tab is the second one (opened last).
+        assert_eq!((ws.is_visible(other), ws.is_visible(a)), (true, false));
     }
 
     #[test]
