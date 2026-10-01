@@ -48,10 +48,10 @@ struct PidFile {
     cwd: Option<String>,
     proc_start: Option<Value>,
     pid_domain: Option<String>,
-    updated_at: Option<u64>,
+    updated_at: Option<Value>,
     status: Option<Value>,
     waiting_for: Option<Value>,
-    status_updated_at: Option<u64>,
+    status_updated_at: Option<Value>,
 }
 
 /// Parse one pid file; `None` unless it names a pid, a session and a directory.
@@ -68,15 +68,17 @@ pub fn parse(text: &str) -> Option<LiveRecord> {
         Some("waiting") => Some(Activity::Waiting { reason: file.waiting_for.as_ref().and_then(Value::as_str).map(String::from) }),
         _ => None,
     };
+    // Timestamps of another type mean unknown; they never drop the file.
+    let updated_at = file.updated_at.as_ref().and_then(Value::as_u64);
     Some(LiveRecord {
         pid: file.pid?,
         session_id: file.session_id.filter(|id| !id.is_empty())?,
         cwd: PathBuf::from(file.cwd?),
         proc_start,
         pid_domain: file.pid_domain,
-        updated_at_ms: file.updated_at,
+        updated_at_ms: updated_at,
         activity,
-        activity_since_ms: file.status_updated_at.or(file.updated_at),
+        activity_since_ms: file.status_updated_at.as_ref().and_then(Value::as_u64).or(updated_at),
     })
 }
 
@@ -133,7 +135,14 @@ mod tests {
     #[test]
     fn odd_status_values_mean_unknown() {
         let with = |extra: &str| parse(&format!(r#"{{"pid":1,"sessionId":"s","cwd":"/"{extra}}}"#));
-        for extra in ["", r#","status":"paused""#, r#","status":7"#, r#","status":"waiting","waitingFor":3"#] {
+        for extra in [
+            "",
+            r#","status":"paused""#,
+            r#","status":7"#,
+            r#","status":"waiting","waitingFor":3"#,
+            r#","statusUpdatedAt":"2026-10-01T10:00:00Z""#,
+            r#","updatedAt":1.5,"statusUpdatedAt":-3"#,
+        ] {
             let record = with(extra).unwrap_or_else(|| panic!("dropped a pid file with {extra:?}"));
             let expected = if extra.contains("waiting") { Some(Activity::Waiting { reason: None }) } else { None };
             assert_eq!(record.activity, expected, "{extra}");
