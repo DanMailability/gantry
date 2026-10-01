@@ -367,6 +367,8 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
                 p.last_focused = seq;
             }
         }
+        // Handled with the take-over flow (M5 Task 4).
+        ClientMessage::TakeOver { .. } => {}
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             if let Some(p) = state.panes.get_mut(&pane) {

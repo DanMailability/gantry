@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use claude_index::host::LocalHost;
 use claude_index::index::{Index, IndexState, SessionRecord};
-use protocol::message::{PaneId, SessionInfo, SessionState};
+use claude_index::live::Activity;
+use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
 
 /// Full rescan interval (also catches processes that died without removing their pid file).
 const RESCAN: Duration = Duration::from_secs(5);
@@ -57,6 +58,7 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession]) -> Vec<SessionI
                     None => SessionState::Closed,
                 },
             };
+            let status = status(r, state);
             SessionInfo {
                 id: r.id.clone(),
                 cwd: r.cwd.clone(),
@@ -64,9 +66,23 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession]) -> Vec<SessionI
                 last_active_ms: r.last_active_ms,
                 state,
                 cwd_exists: r.cwd_exists,
+                status_since_ms: if status.is_some() { r.activity_since_ms } else { 0 },
+                status,
             }
         })
         .collect()
+}
+
+/// The status a session shows: what its process reports, while something runs it.
+fn status(record: &SessionRecord, state: SessionState) -> Option<SessionStatus> {
+    if state == SessionState::Closed {
+        return None;
+    }
+    record.activity.as_ref().map(|activity| match activity {
+        Activity::Busy => SessionStatus::Busy,
+        Activity::Idle => SessionStatus::Idle,
+        Activity::Waiting { reason } => SessionStatus::NeedsInput { reason: reason.clone() },
+    })
 }
 
 /// What changed from `old` to `new`: sessions added or changed, and ids that disappeared.
@@ -170,6 +186,24 @@ mod tests {
         assert_eq!(states(&resolve(&records, &[pane(7, 100, Some("launched"))])), vec![
             ("launched", SessionState::Closed),
             ("after-clear", SessionState::Managed { pane: 7 }),
+        ]);
+    }
+
+    #[test]
+    fn live_sessions_carry_their_status_and_closed_ones_none() {
+        let mut busy = record("busy", IndexState::Running { pid: 100 });
+        (busy.activity, busy.activity_since_ms) = (Some(Activity::Busy), 50);
+        let mut asks = record("asks", IndexState::InContainer);
+        (asks.activity, asks.activity_since_ms) = (Some(Activity::Waiting { reason: Some("dialog open".into()) }), 60);
+        let mut stale = record("old", IndexState::Closed);
+        (stale.activity, stale.activity_since_ms) = (Some(Activity::Idle), 70);
+        let sessions = resolve(&[busy, asks, stale], &[pane(7, 100, None)]);
+        let status: Vec<(&str, Option<SessionStatus>, u64)> =
+            sessions.iter().map(|s| (s.id.as_str(), s.status.clone(), s.status_since_ms)).collect();
+        assert_eq!(status, vec![
+            ("busy", Some(SessionStatus::Busy), 50),
+            ("asks", Some(SessionStatus::NeedsInput { reason: Some("dialog open".into()) }), 60),
+            ("old", None, 0),
         ]);
     }
 

@@ -551,7 +551,16 @@ mod tests {
     }
 
     fn session_info(id: &str, state: protocol::message::SessionState) -> protocol::message::SessionInfo {
-        protocol::message::SessionInfo { id: id.into(), cwd: "/r".into(), title: String::new(), last_active_ms: 0, state, cwd_exists: true }
+        protocol::message::SessionInfo {
+            id: id.into(),
+            cwd: "/r".into(),
+            title: String::new(),
+            last_active_ms: 0,
+            state,
+            cwd_exists: true,
+            status: None,
+            status_since_ms: 0,
+        }
     }
 
     #[test]

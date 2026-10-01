@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use daemon::client::{ClientEvent, Connection, DaemonClient};
 use daemon::launch::{DaemonOptions, run_daemon};
 use daemon::paths::Paths;
-use protocol::message::{PaneId, SessionInfo, SessionState, SpawnRequest};
+use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus, SpawnRequest};
 
 struct Setup {
     _dir: tempfile::TempDir,
@@ -115,9 +115,11 @@ fn a_pane_whose_process_wrote_a_pid_file_is_managed() {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     let start = claude_index::host::proc_start_time(&stat).unwrap();
     std::fs::create_dir_all(s.config.join("sessions")).unwrap();
-    let pid_file = serde_json::json!({"pid": pid, "sessionId": "s3", "cwd": s.work, "procStart": start, "updatedAt": 1});
+    let pid_file = serde_json::json!({"pid": pid, "sessionId": "s3", "cwd": s.work, "procStart": start, "updatedAt": 1,
+        "status": "waiting", "waitingFor": "input needed", "statusUpdatedAt": 7});
     std::fs::write(s.config.join("sessions").join(format!("{pid}.json")), pid_file.to_string()).unwrap();
-    wait_for(&s.conn, "s3", |s| s.state == SessionState::Managed { pane });
+    let found = wait_for(&s.conn, "s3", |s| s.state == SessionState::Managed { pane });
+    assert_eq!((found.status, found.status_since_ms), (Some(SessionStatus::NeedsInput { reason: Some("input needed".into()) }), 7));
 }
 
 #[test]

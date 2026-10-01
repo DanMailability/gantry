@@ -46,7 +46,16 @@ mod tests {
     use protocol::message::SessionState;
 
     fn info(cwd: &str, last_active_ms: u64, cwd_exists: bool) -> SessionInfo {
-        SessionInfo { id: format!("{cwd}{last_active_ms}"), cwd: cwd.into(), title: String::new(), last_active_ms, state: SessionState::Closed, cwd_exists }
+        SessionInfo {
+            id: format!("{cwd}{last_active_ms}"),
+            cwd: cwd.into(),
+            title: String::new(),
+            last_active_ms,
+            state: SessionState::Closed,
+            cwd_exists,
+            status: None,
+            status_since_ms: 0,
+        }
     }
 
     fn dirs(items: &[LauncherItem]) -> Vec<String> {

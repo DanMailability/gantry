@@ -443,7 +443,16 @@ mod tests {
     const NOW: u64 = 100 * DAY_MS;
 
     fn session(id: &str, cwd: &str, state: SessionState, last_active_ms: u64) -> SessionInfo {
-        SessionInfo { id: id.into(), cwd: cwd.into(), title: format!("title {id}"), last_active_ms, state, cwd_exists: true }
+        SessionInfo {
+            id: id.into(),
+            cwd: cwd.into(),
+            title: format!("title {id}"),
+            last_active_ms,
+            state,
+            cwd_exists: true,
+            status: None,
+            status_since_ms: 0,
+        }
     }
 
     fn managed(id: &str, cwd: &str, last: u64) -> SessionInfo {

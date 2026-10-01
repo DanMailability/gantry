@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -64,6 +64,36 @@ pub enum SessionState {
     Closed,
 }
 
+/// What a live Claude session is doing (from its pid file).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionStatus {
+    /// Working on a turn.
+    Busy,
+    /// Waiting for the next prompt.
+    Idle,
+    /// Blocked on the user (a permission prompt, a dialog, a question).
+    NeedsInput {
+        /// Claude's reason, e.g. `input needed`, `dialog open`.
+        reason: Option<String>,
+    },
+}
+
+/// How a `TakeOver` ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TakeOverOutcome {
+    /// The process is gone; the session can be resumed.
+    Exited,
+    /// It was asked to stop but still runs after the grace period (offer Force quit).
+    StillRunning,
+    /// Nothing was signalled (it cannot or must not be stopped), or a forced stop failed.
+    Failed {
+        /// Human-readable reason.
+        error: String,
+    },
+}
+
 /// One Claude session, from the daemon's index.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -79,6 +109,10 @@ pub struct SessionInfo {
     pub state: SessionState,
     /// Whether `cwd` still exists.
     pub cwd_exists: bool,
+    /// What it is doing; `None` when closed, or when Claude has not said.
+    pub status: Option<SessionStatus>,
+    /// When `status` was last written, ms since the Unix epoch (0 = unknown).
+    pub status_since_ms: u64,
 }
 
 /// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`, when
@@ -135,6 +169,13 @@ pub enum ClientMessage {
     Kill {
         /// Pane.
         pane: PaneId,
+    },
+    /// Stop the process that runs `session` outside ccm (SIGTERM, or SIGKILL when `force`), after verifying it.
+    TakeOver {
+        /// Session id.
+        session: String,
+        /// Kill immediately instead of asking it to stop.
+        force: bool,
     },
     /// Terminate every pane and stop the daemon (frozen).
     StopAll,
@@ -205,6 +246,13 @@ pub enum DaemonMessage {
         /// Ids no longer known.
         removed: Vec<String>,
     },
+    /// How a `TakeOver` request ended.
+    TakeOverResult {
+        /// Session id from the request.
+        session: String,
+        /// What happened.
+        outcome: TakeOverOutcome,
+    },
     /// Another GUI connected; this connection is closed next.
     TakenOver,
     /// A request could not be handled.
@@ -249,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn session_messages_round_trip_with_a_tagged_state() {
+    fn session_messages_round_trip_with_a_tagged_state_and_status() {
         let session = SessionInfo {
             id: "9835b878".into(),
             cwd: "/home/me/repo".into(),
@@ -257,17 +305,32 @@ mod tests {
             last_active_ms: 1_790_840_985_757,
             state: SessionState::Managed { pane: 3 },
             cwd_exists: true,
+            status: Some(SessionStatus::NeedsInput { reason: Some("dialog open".into()) }),
+            status_since_ms: 1_790_840_985_000,
         };
-        assert!(serde_json::to_string(&session).unwrap().contains(r#""state":{"kind":"managed","pane":3}"#));
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains(r#""state":{"kind":"managed","pane":3}"#), "{json}");
+        assert!(json.contains(r#""status":{"kind":"needs_input","reason":"dialog open"}"#), "{json}");
         for message in [
             DaemonMessage::Sessions { sessions: vec![session.clone()] },
             DaemonMessage::SessionsChanged {
-                upserted: vec![SessionInfo { state: SessionState::External { pid: None }, ..session.clone() }],
+                upserted: vec![SessionInfo { state: SessionState::External { pid: None }, status: None, ..session.clone() }],
                 removed: vec!["gone".into()],
             },
         ] {
             let json = serde_json::to_string(&message).unwrap();
             assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn take_over_messages_round_trip() {
+        let request = ClientMessage::TakeOver { session: "s".into(), force: true };
+        assert_eq!(serde_json::to_string(&request).unwrap(), r#"{"type":"take_over","session":"s","force":true}"#);
+        for outcome in [TakeOverOutcome::Exited, TakeOverOutcome::StillRunning, TakeOverOutcome::Failed { error: "no".into() }] {
+            let reply = DaemonMessage::TakeOverResult { session: "s".into(), outcome };
+            let json = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
         }
     }
 

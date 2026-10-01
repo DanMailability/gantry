@@ -50,7 +50,16 @@ mod tests {
     use protocol::message::SessionState;
 
     fn info(id: &str, title: &str) -> SessionInfo {
-        SessionInfo { id: id.into(), cwd: "/".into(), title: title.into(), last_active_ms: 0, state: SessionState::Closed, cwd_exists: true }
+        SessionInfo {
+            id: id.into(),
+            cwd: "/".into(),
+            title: title.into(),
+            last_active_ms: 0,
+            state: SessionState::Closed,
+            cwd_exists: true,
+            status: None,
+            status_since_ms: 0,
+        }
     }
 
     #[test]
