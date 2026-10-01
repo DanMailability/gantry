@@ -127,16 +127,38 @@ pub fn detach_from_terminal() -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Refuse a server whose process does not run as `expected_uid`.
+#[cfg(unix)]
+fn check_peer_uid(peer: Option<u32>, expected_uid: u32) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    match peer {
+        Some(uid) if uid == expected_uid => Ok(()),
+        Some(uid) => Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("the daemon socket is served by uid {uid}, not by this user ({expected_uid})"),
+        )),
+        None => Err(Error::new(ErrorKind::PermissionDenied, "cannot verify who serves the daemon socket")),
+    }
+}
+
+/// Connect to the profile's daemon socket, refusing a server run by another user (Unix).
+pub async fn connect_trusted(paths: &Paths) -> std::io::Result<Stream> {
+    let stream = Stream::connect(paths.socket_name()?).await?;
+    #[cfg(unix)]
+    check_peer_uid(stream.peer_creds()?.euid(), rustix::process::geteuid().as_raw())?;
+    Ok(stream)
+}
+
 /// Connect to the profile's daemon, starting it with `spawn` if none is running.
 pub async fn connect_or_spawn(paths: &Paths, spawn: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<Stream> {
-    if let Ok(stream) = Stream::connect(paths.socket_name()?).await {
+    if let Ok(stream) = connect_trusted(paths).await {
         return Ok(stream);
     }
     spawn()?;
     let mut last_error = None;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        match Stream::connect(paths.socket_name()?).await {
+        match connect_trusted(paths).await {
             Ok(stream) => return Ok(stream),
             Err(err) => last_error = Some(err),
         }
@@ -147,6 +169,14 @@ pub async fn connect_or_spawn(paths: &Paths, spawn: impl FnOnce() -> std::io::Re
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_daemon_of_the_same_user_is_trusted() {
+        assert!(check_peer_uid(Some(1000), 1000).is_ok());
+        let other = check_peer_uid(Some(0), 1000).unwrap_err();
+        assert_eq!(other.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(check_peer_uid(None, 1000).is_err());
+    }
 
     fn options(dir: &std::path::Path, idle: Duration) -> DaemonOptions {
         DaemonOptions { paths: Paths::in_dir(dir, "t"), base_env: Some(std::env::vars().collect()), idle_timeout: idle }

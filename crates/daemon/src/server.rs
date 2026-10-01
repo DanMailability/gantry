@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use app_core::term_state::TermState;
@@ -65,6 +65,12 @@ struct Shared {
 }
 
 impl Shared {
+    /// Lock the daemon state, recovering from poisoning: a panic in one pane's task must not
+    /// wedge every other session (spec §6).
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn stop_if_idle(&self, state: &State) {
         if state.client.is_none() && state.panes.is_empty() {
             self.shutdown.notify_one();
@@ -128,7 +134,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         let shared = shared.clone();
         tokio::spawn(async move {
             tokio::time::sleep(options.idle_timeout).await;
-            let state = shared.state.lock().unwrap();
+            let state = shared.lock();
             if !state.ever_connected {
                 shared.stop_if_idle(&state);
             }
@@ -139,7 +145,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(RESYNC_TICK).await;
-                let mut state = shared.state.lock().unwrap();
+                let mut state = shared.lock();
                 let lagging: Vec<PaneId> =
                     state.panes.iter().filter(|(_, pane)| pane.needs_resync).map(|(id, _)| *id).collect();
                 for pane in lagging {
@@ -159,7 +165,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     }
     idle.abort();
     ticker.abort();
-    let mut state = shared.state.lock().unwrap();
+    let mut state = shared.lock();
     if let Some(client) = state.client.take() {
         client.outbox.close();
         client.kicked.notify_one();
@@ -193,7 +199,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
     let outbox = Outbox::new(CLIENT_DATA_BUDGET);
     let kicked = Arc::new(Notify::new());
     let client_id = {
-        let mut state = shared.state.lock().unwrap();
+        let mut state = shared.lock();
         state.next_client += 1;
         state.ever_connected = true;
         let id = state.next_client;
@@ -223,7 +229,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
         };
         match frame {
             Frame::Data { pane, bytes } => {
-                let mut state = shared.state.lock().unwrap();
+                let mut state = shared.lock();
                 if let Some(pane) = state.panes.get_mut(&pane) {
                     let _ = pane.pty.write(&bytes);
                 }
@@ -235,7 +241,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
         }
     }
     {
-        let mut state = shared.state.lock().unwrap();
+        let mut state = shared.lock();
         if state.client.as_ref().is_some_and(|client| client.id == client_id) {
             if let Some(client) = state.client.take() {
                 client.outbox.close();
@@ -247,7 +253,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
 }
 
 fn stop_all(shared: &Shared) {
-    shared.state.lock().unwrap().panes.clear();
+    shared.lock().panes.clear();
     shared.shutdown.notify_one();
 }
 
@@ -256,7 +262,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         ClientMessage::Hello { .. } => {}
         ClientMessage::StopAll => stop_all(shared),
         ClientMessage::ListPanes => {
-            let state = shared.state.lock().unwrap();
+            let state = shared.lock();
             let mut panes: Vec<PaneInfo> = state
                 .panes
                 .iter()
@@ -267,7 +273,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         }
         ClientMessage::Spawn { request, spec } => spawn_pane(shared, client_id, request, spec),
         ClientMessage::Attach { pane } => {
-            let mut state = shared.state.lock().unwrap();
+            let mut state = shared.lock();
             let Some(client) = state.client.as_mut() else { return };
             client.attached.insert(pane);
             let outbox = client.outbox.clone();
@@ -277,7 +283,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             }
         }
         ClientMessage::Resize { pane, cols, rows, cell_width, cell_height } => {
-            let mut state = shared.state.lock().unwrap();
+            let mut state = shared.lock();
             if let Some(p) = state.panes.get_mut(&pane) {
                 p.term.resize(cols, rows);
                 p.term.set_cell_size(cell_width, cell_height);
@@ -287,7 +293,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             }
         }
         ClientMessage::Focus { pane } => {
-            let mut state = shared.state.lock().unwrap();
+            let mut state = shared.lock();
             state.focus_seq += 1;
             let seq = state.focus_seq;
             if let Some(p) = state.panes.get_mut(&pane) {
@@ -295,7 +301,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             }
         }
         ClientMessage::Kill { pane } => {
-            let mut state = shared.state.lock().unwrap();
+            let mut state = shared.lock();
             if let Some(p) = state.panes.get_mut(&pane) {
                 let _ = p.pty.kill();
             }
@@ -313,7 +319,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         cols: spec.cols,
         rows: spec.rows,
     };
-    let mut state = shared.state.lock().unwrap();
+    let mut state = shared.lock();
     let (pty, reader) = match PtyProcess::spawn(&pty_spec) {
         Ok(pair) => pair,
         Err(err) => {
@@ -347,7 +353,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         while let Ok(first) = output.recv().await {
             let bytes = drain_batch(&output, first, MAX_BATCH_BYTES);
             let pane_alive = {
-                let mut state = reader_shared.state.lock().unwrap();
+                let mut state = reader_shared.lock();
                 match state.panes.get_mut(&id) {
                     Some(pane) => {
                         pane.term.feed(&bytes);
@@ -375,9 +381,43 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         let code = exit.recv().await.unwrap_or(1);
         // Let the reader deliver the program's last output before announcing the exit.
         let _ = tokio::time::timeout(EXIT_DRAIN, output_done.notified()).await;
-        let mut state = exit_shared.state.lock().unwrap();
+        let mut state = exit_shared.lock();
+        // A lagging client would otherwise never see the final screen: send it before `Exited`.
+        let lagging_outbox = state
+            .client
+            .as_ref()
+            .filter(|client| client.attached.contains(&id))
+            .map(|client| client.outbox.clone())
+            .filter(|_| state.panes.get(&id).is_some_and(|pane| pane.needs_resync));
+        if let (Some(outbox), Some(pane)) = (lagging_outbox, state.panes.get_mut(&id)) {
+            State::send_resync(&outbox, id, pane);
+        }
         state.panes.remove(&id);
         state.control(&DaemonMessage::Exited { pane: id, code });
         exit_shared.stop_if_idle(&state);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_while_holding_the_state_lock_does_not_wedge_the_daemon() {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            shutdown: Notify::new(),
+            base_env: Vec::new(),
+            owner_uid: None,
+        });
+        let poisoner = shared.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock();
+            panic!("simulated pane bug");
+        })
+        .join();
+        assert!(shared.state.is_poisoned());
+        shared.lock().next_pane = 7;
+        assert_eq!(shared.lock().next_pane, 7);
+    }
 }

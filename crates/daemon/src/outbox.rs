@@ -2,7 +2,7 @@
 //! client cannot make the daemon buffer output without limit.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use protocol::frame::Frame;
 use tokio::sync::Notify;
@@ -28,15 +28,19 @@ impl Outbox {
         Outbox { queue: Arc::default(), ready: Arc::new(Notify::new()), data_budget }
     }
 
+    fn lock_queue(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Queue a control frame; always accepted.
     pub fn push_control(&self, frame: Frame) {
-        self.queue.lock().unwrap().frames.push_back(frame);
+        self.lock_queue().frames.push_back(frame);
         self.ready.notify_one();
     }
 
     /// Queue a data frame unless that would exceed the data budget.
     pub fn try_push_data(&self, frame: Frame) -> bool {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.lock_queue();
         let len = frame.encoded_len();
         if queue.data_bytes + len > self.data_budget {
             return false;
@@ -50,7 +54,7 @@ impl Outbox {
 
     /// Queue a data frame even if over budget (used for resync replays, which must not be dropped).
     pub fn force_push_data(&self, frame: Frame) {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.lock_queue();
         queue.data_bytes += frame.encoded_len();
         queue.frames.push_back(frame);
         drop(queue);
@@ -59,12 +63,12 @@ impl Outbox {
 
     /// Whether at most half the data budget is in use (safe to start a resync).
     pub fn has_room(&self) -> bool {
-        self.queue.lock().unwrap().data_bytes <= self.data_budget / 2
+        self.lock_queue().data_bytes <= self.data_budget / 2
     }
 
     /// Stop accepting new frames after the queued ones are delivered.
     pub fn close(&self) {
-        self.queue.lock().unwrap().closed = true;
+        self.lock_queue().closed = true;
         self.ready.notify_one();
     }
 
@@ -72,7 +76,7 @@ impl Outbox {
     pub async fn next(&self) -> Option<Frame> {
         loop {
             {
-                let mut queue = self.queue.lock().unwrap();
+                let mut queue = self.lock_queue();
                 if let Some(frame) = queue.frames.pop_front() {
                     if matches!(frame, Frame::Data { .. }) {
                         queue.data_bytes -= frame.encoded_len();

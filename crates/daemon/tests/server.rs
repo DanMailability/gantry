@@ -241,3 +241,24 @@ async fn version_mismatch_still_accepts_stop_all() {
     write_frame(&mut send, &Frame::control(&ClientMessage::StopAll)).await.unwrap();
     timeout(Duration::from_secs(5), h.server).await.expect("server did not stop").unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn final_output_survives_exit_while_the_client_lags() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let pane = c.spawn("head -c 40000000 /dev/zero | tr '\\0' x; printf '\\r\\nFINAL-MARKER'").await;
+    tokio::time::sleep(Duration::from_secs(4)).await; // lag while the flood runs and the program exits
+    let mut since_resync = String::new();
+    loop {
+        match c.frame().await.expect("connection closed") {
+            Frame::Data { pane: p, bytes } if p == pane => since_resync.push_str(&String::from_utf8_lossy(&bytes)),
+            frame @ Frame::Control(_) => match frame.parse().unwrap().unwrap() {
+                DaemonMessage::Resync { pane: p, .. } if p == pane => since_resync.clear(),
+                DaemonMessage::Exited { pane: p, .. } if p == pane => break,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert!(since_resync.contains("FINAL-MARKER"), "the program's last output never reached the client");
+}

@@ -10,7 +10,7 @@ use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SpawnRequest};
 use tokio::sync::mpsc;
 
-use crate::launch::connect_or_spawn;
+use crate::launch::{connect_or_spawn, connect_trusted};
 use crate::paths::Paths;
 
 /// Events delivered to the GUI, in daemon order.
@@ -288,7 +288,7 @@ async fn next_message<R: tokio::io::AsyncRead + Unpin>(recv: &mut R) -> Result<D
 pub fn restart_daemon(paths: &Paths) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
-        let stream = Stream::connect(paths.socket_name()?).await?;
+        let stream = connect_trusted(paths).await?;
         let (mut recv, mut send) = stream.split();
         write_frame(&mut send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await?;
         let _ = read_frame(&mut recv).await?;

@@ -93,8 +93,6 @@ impl TermState {
             }
         }
         out.push_str("\x1b[0m");
-        let cursor = grid.cursor.point;
-        write!(out, "\x1b[{};{}H", cursor.line.0 + 1, cursor.column.0 + 1).unwrap();
         let fresh = TermState::new(columns as u16, term.screen_lines() as u16);
         let fresh_mode = *fresh.term.mode();
         for &(flag, number) in PRIVATE_MODES {
@@ -120,6 +118,24 @@ impl TermState {
                 _ => 1,
             };
             write!(out, "\x1b[{} q", if cursor_style.blinking { base } else { base + 1 }).unwrap();
+        }
+        let cursor = &grid.cursor;
+        if cursor.input_needs_wrap {
+            // A wrap is pending after writing the last column; re-print that cell to recreate it
+            // (positioning the cursor directly would cancel the pending wrap).
+            let row = &grid[cursor.point.line];
+            let mut col = cursor.point.column.0;
+            if col > 0 && row[Column(col)].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                col -= 1;
+            }
+            let cell = &row[Column(col)];
+            write!(out, "\x1b[{};{}H\x1b[{}m{}", cursor.point.line.0 + 1, col + 1, sgr(cell), cell.c).unwrap();
+            if let Some(marks) = cell.zerowidth() {
+                out.extend(marks.iter());
+            }
+            out.push_str("\x1b[0m");
+        } else {
+            write!(out, "\x1b[{};{}H", cursor.point.line.0 + 1, cursor.point.column.0 + 1).unwrap();
         }
         if !mode.contains(TermMode::SHOW_CURSOR) {
             out.push_str("\x1b[?25l");
@@ -244,6 +260,16 @@ mod tests {
         copy.scroll_viewport(1000);
         assert_eq!(copy.row_text(0), t.row_text(0));
         assert_eq!(copy.row_text(0), "line0");
+    }
+
+    #[test]
+    fn pending_wrap_at_the_last_column_survives() {
+        let mut t = TermState::new(10, 3);
+        t.feed(b"abcdefghij");
+        let mut copy = replayed(&t, 10, 3);
+        t.feed(b"K");
+        copy.feed(b"K");
+        assert_eq!((copy.row_text(0), copy.row_text(1)), (t.row_text(0), t.row_text(1)));
     }
 
     #[test]
