@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 
+use crate::theme;
 use app_core::bidi::{RowOrder, logical_hit, to_display};
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
@@ -753,7 +754,17 @@ fn banner_button(
     label: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    div().id(id).px_2().rounded_sm().border_1().border_color(rgb(0x6cb6ff)).cursor_pointer().child(label).on_click(on_click)
+    div()
+        .id(id)
+        .px_3()
+        .py(px(2.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(theme::ACCENT))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(theme::RAISED)))
+        .child(label)
+        .on_click(on_click)
 }
 
 fn report_button(button: MouseButton) -> Option<mouse::Button> {

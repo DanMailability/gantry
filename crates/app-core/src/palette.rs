@@ -19,10 +19,10 @@ pub struct Palette {
 
 /// Dark theme with a light-blue accent.
 pub const DARK: Palette = Palette {
-    foreground: Rgb::hex(0xd6dde6),
-    background: Rgb::hex(0x11141a),
-    cursor: Rgb::hex(0x7cc4ff),
-    selection: Rgb::hex(0x2a4a6b),
+    foreground: Rgb::hex(0xd8dde8),
+    background: Rgb::hex(0x141821),
+    cursor: Rgb::hex(0x9ecbff),
+    selection: Rgb::hex(0x2f4a6e),
     ansi: [
         Rgb::hex(0x1b1f27),
         Rgb::hex(0xe06c75),

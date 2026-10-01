@@ -5,7 +5,7 @@ Name:           gantry
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Terminal for running and managing Claude Code sessions
-License:        MIT OR Apache-2.0
+License:        (MIT OR Apache-2.0) AND OFL-1.1
 Source0:        gantry-%{version}-x86_64-linux.tar.gz
 ExclusiveArch:  x86_64
 BuildRequires:  desktop-file-utils
@@ -27,7 +27,7 @@ install -Dm0644 io.github.idogrf.Gantry.svg %{buildroot}%{_datadir}/icons/hicolo
 desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.idogrf.Gantry.desktop
 
 %files
-%license LICENSE-MIT LICENSE-APACHE
+%license LICENSE-MIT LICENSE-APACHE LICENSE-FONT-FIGTREE
 %{_bindir}/gantry
 %{_datadir}/applications/io.github.idogrf.Gantry.desktop
 %{_datadir}/icons/hicolor/scalable/apps/io.github.idogrf.Gantry.svg

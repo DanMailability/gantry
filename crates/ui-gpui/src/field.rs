@@ -3,7 +3,7 @@
 use app_core::text_field::TextField;
 use gpui::{Div, Keystroke, div, prelude::*, px, rgb};
 
-use crate::workspace_view::{ACCENT, MUTED};
+use crate::theme::{ACCENT, MUTED};
 
 /// Apply an editing key (typing, Backspace, Delete, arrows, Home/End) to `field`. False for anything
 /// else — chords with Ctrl/Alt/Cmd are never text.

@@ -13,7 +13,7 @@ use gpui::{
 use protocol::message::SessionInfo;
 
 use crate::field;
-use crate::workspace_view::{ACCENT, BORDER, MUTED, PANEL, SELECTED, TEXT};
+use crate::theme::{LINE, MUTED, RADIUS_LARGE, RADIUS_SMALL, RAISED, SURFACE, TEXT};
 
 /// What the launcher asks the workspace to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,18 +107,27 @@ impl LauncherView {
             LauncherItem::Dir(dir) => display_path(dir, self.home.as_deref()),
             LauncherItem::Browse => "Browse…".into(),
         };
+        let selected = index == self.selected;
         div()
             .id(index)
             .w_full()
-            .h(px(24.))
-            .px_3()
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .when(index == self.selected, |el| el.bg(rgb(SELECTED)))
-            .child(label)
+            .h(px(34.))
+            .px_2()
+            .py(px(2.))
+            .child(
+                div()
+                    .size_full()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .rounded(px(RADIUS_SMALL))
+                    .cursor_pointer()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .when(selected, |el| el.bg(rgb(RAISED)))
+                    .when(!selected, |el| el.text_color(rgb(MUTED)).hover(|style| style.text_color(rgb(TEXT))))
+                    .child(label),
+            )
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, !event.modifiers().alt, cx)))
     }
 }
@@ -133,21 +142,22 @@ impl Render for LauncherView {
             .w(px(560.))
             .flex()
             .flex_col()
-            .bg(rgb(PANEL))
+            .bg(rgb(SURFACE))
             .border_1()
-            .border_color(rgb(ACCENT))
-            .rounded_md()
+            .border_color(rgb(LINE))
+            .rounded(px(RADIUS_LARGE))
+            .overflow_hidden()
             .shadow_lg()
             .text_sm()
             .text_color(rgb(TEXT))
             .child(
                 div()
-                    .h(px(34.))
-                    .px_3()
+                    .h(px(46.))
+                    .px_4()
                     .flex()
                     .items_center()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(LINE))
                     .child(field::render(&self.query, "Open a directory…", true)),
             )
             .child(
@@ -161,14 +171,14 @@ impl Render for LauncherView {
             )
             .child(
                 div()
-                    .h(px(24.))
-                    .px_3()
+                    .h(px(32.))
+                    .px_4()
                     .flex()
                     .items_center()
                     .text_xs()
                     .text_color(rgb(MUTED))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(LINE))
                     .child("Enter: Claude · Alt+Enter: shell · Esc: close"),
             )
     }

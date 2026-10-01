@@ -7,7 +7,7 @@ use gpui::{
     Window, canvas, div, point, prelude::*, px, rgb,
 };
 
-use crate::workspace_view::{ACCENT, BORDER, MUTED, TAB_BAR_HEIGHT};
+use crate::theme::{LINE, MUTED, RAISED, TEXT};
 
 /// Width of the invisible resize border (and shadow) around an untiled window.
 pub const INSET: Pixels = px(8.0);
@@ -89,7 +89,7 @@ pub fn frame(window: &mut Window, content: impl IntoElement) -> impl IntoElement
                 .map(|inner| match decorations {
                     Decorations::Server => inner,
                     Decorations::Client { tiling } => inner
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(LINE))
                         .when(!tiling.top, |inner| inner.border_t_1())
                         .when(!tiling.bottom, |inner| inner.border_b_1())
                         .when(!tiling.left, |inner| inner.border_l_1())
@@ -109,20 +109,25 @@ pub fn window_controls(window: &Window, on_close: impl Fn(&gpui::ClickEvent, &mu
     let button = |id: &'static str, glyph: &'static str| {
         div()
             .id(id)
-            .w(px(TAB_BAR_HEIGHT + 6.))
-            .h_full()
+            .size(px(30.))
             .flex()
             .items_center()
             .justify_center()
+            .rounded_full()
+            .bg(rgb(RAISED))
+            .text_sm()
             .text_color(rgb(MUTED))
-            .hover(|style| style.text_color(rgb(ACCENT)).bg(rgb(BORDER)))
+            .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(LINE)))
             .child(glyph)
     };
     div()
         .flex_none()
         .h_full()
+        .pr_3()
         .flex()
         .flex_row()
+        .items_center()
+        .gap_2()
         .when(controls.minimize, |row| row.child(button("minimize", "–").on_click(|_, window, _| window.minimize_window())))
         .when(controls.maximize, |row| row.child(button("maximize", "□").on_click(|_, window, _| window.zoom_window())))
         .child(button("close", "✕").on_click(on_close))

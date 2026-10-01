@@ -5,6 +5,7 @@ mod field;
 pub mod launcher_view;
 pub mod sidebar_view;
 pub mod terminal_view;
+mod theme;
 pub mod workspace_view;
 mod window_frame;
 
@@ -27,7 +28,7 @@ struct Notice;
 
 impl Render for Notice {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().bg(rgb(0x11141a))
+        div().size_full().bg(rgb(theme::GROUND))
     }
 }
 
@@ -37,6 +38,7 @@ pub const APP_ID: &str = "io.github.idogrf.Gantry";
 /// Connect to (or start) the daemon, restore the layout, and run until the app quits.
 pub fn run(launch: Launch) {
     gpui_platform::application().run(move |cx: &mut App| {
+        theme::load_fonts(cx);
         terminal_view::bind_keys(cx);
         workspace_view::bind_keys(cx);
         let paths = Paths::for_profile(&current_profile());

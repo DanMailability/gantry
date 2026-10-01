@@ -142,9 +142,10 @@ pub struct Tab {
 /// Which sidebar view is shown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TreeView {
-    /// Directories with their sessions.
+    /// Sessions by project.
     #[default]
-    Folders,
+    #[serde(alias = "Folders")]
+    Projects,
     /// Sessions grouped by state.
     Status,
 }
@@ -159,13 +160,13 @@ pub struct SidebarState {
     pub visible: bool,
     /// Width in pixels.
     pub width: f32,
-    /// Folders or Status.
+    /// Projects or Status.
     pub view: TreeView,
 }
 
 impl Default for SidebarState {
     fn default() -> Self {
-        SidebarState { visible: true, width: SIDEBAR_WIDTH, view: TreeView::Folders }
+        SidebarState { visible: true, width: SIDEBAR_WIDTH, view: TreeView::Projects }
     }
 }
 
@@ -656,9 +657,15 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_defaults_to_a_visible_folder_view() {
+    fn the_sidebar_defaults_to_a_visible_project_view() {
         let state = Workspace::default().sidebar;
-        assert_eq!((state.visible, state.width, state.view), (true, SIDEBAR_WIDTH, TreeView::Folders));
+        assert_eq!((state.visible, state.width, state.view), (true, SIDEBAR_WIDTH, TreeView::Projects));
+    }
+
+    #[test]
+    fn layouts_saved_with_the_folders_view_open_the_project_view() {
+        let state: SidebarState = serde_json::from_str(r#"{"visible":true,"width":300.0,"view":"Folders"}"#).unwrap();
+        assert_eq!(state.view, TreeView::Projects);
     }
 
     #[test]

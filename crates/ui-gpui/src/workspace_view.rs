@@ -13,28 +13,28 @@ use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::pty::default_shell;
 use gpui::{
-    Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
-    PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
+    Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
+    PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
 use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::session_tree::{Activation, ShellEntry, display_path, session_title};
+use app_core::session_tree::{Activation, ShellEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
 use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
+use crate::theme::{
+    ACCENT, GROUND, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_LARGE, RADIUS_SMALL, RAISED, SURFACE, TERMINAL, TEXT, UI_FONT,
+    tone_colors,
+};
 use crate::window_frame;
 
-pub(crate) const PANEL: u32 = 0x1a1e26;
-pub(crate) const BORDER: u32 = 0x2a2f3a;
-pub(crate) const ACCENT: u32 = 0x6cb6ff;
-pub(crate) const TEXT: u32 = 0xd6dde6;
-pub(crate) const MUTED: u32 = 0x8b949e;
-pub(crate) const SELECTED: u32 = 0x24324a;
-pub(crate) const AMBER: u32 = 0xe3b341;
-const BACKGROUND: u32 = 0x11141a;
-pub(crate) const TAB_BAR_HEIGHT: f32 = 34.0;
+pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
+/// Space between split panes (and around them).
+const PANE_GAP: f32 = 8.0;
+/// Width of the sidebar's drag edge.
+const SIDEBAR_EDGE: f32 = 1.0;
 /// Largest amount of output routed per UI update, so input and rendering keep running during a flood.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 const SIDEBAR_MIN: f32 = 160.0;
@@ -606,12 +606,10 @@ impl WorkspaceView {
                     };
                     self.confirm_take_over(session, target, window, cx);
                 }
-                Activation::ToggleDetails(_)
-                | Activation::ToggleDir(_)
-                | Activation::ShowAll(_)
-                | Activation::Nothing => {}
+                Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
             SidebarEvent::NewHere { dir, claude } => self.open_launch(new_launch(claude, dir), None, None, window, cx),
+            SidebarEvent::New { claude } => self.open(claude, None, window, cx),
             SidebarEvent::ViewChanged(view) => {
                 self.workspace.sidebar.view = view;
                 self.save(cx);
@@ -866,46 +864,75 @@ impl WorkspaceView {
                 (title, status, unseen)
             })
             .collect();
+        let sidebar = &self.workspace.sidebar;
         div()
             .id("tab-bar")
             .h(px(TAB_BAR_HEIGHT))
             .w_full()
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .bg(rgb(PANEL))
+            .gap(px(6.))
+            .bg(rgb(SURFACE))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(LINE))
             .text_sm()
+            .map(|bar| {
+                if sidebar.visible {
+                    // The brand sits above the sidebar; the tabs start where the panes do.
+                    bar.child(
+                        div()
+                            .flex_none()
+                            .w(px(sidebar.width + SIDEBAR_EDGE))
+                            .pl(px(18.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Gantry"),
+                    )
+                } else {
+                    bar.pl_2()
+                }
+            })
             .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen))| {
                 let active = index == self.workspace.active;
+                // Claude tabs are filled with what their most urgent session needs; shells stay plain.
+                let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
+                let ink = colors.map_or(if active { TEXT } else { MUTED }, |colors| colors.ink);
+                let fill = colors.and_then(|colors| colors.fill).or(active.then_some(RAISED));
                 div()
                     .id(("tab", index))
-                    .h_full()
-                    .px_3()
+                    .h(px(32.))
+                    .pl_3()
+                    .pr_1()
                     .max_w(px(220.))
                     // Tabs shrink (titles truncate) so the buttons and window controls stay visible.
-                    .min_w(px(48.))
+                    .min_w(px(56.))
                     .flex_shrink(1.)
                     .flex()
                     .items_center()
-                    .border_r_1()
-                    .border_color(rgb(BORDER))
-                    .text_color(rgb(if active { TEXT } else { MUTED }))
-                    .when(active, |tab| tab.bg(rgb(BACKGROUND)).border_t_2().border_color(rgb(ACCENT)))
-                    .when_some(status, |tab, status| {
-                        let (glyph, color) = status_glyph(Some(&status));
-                        tab.child(div().flex_none().mr_1().text_color(rgb(color)).child(glyph))
-                    })
+                    .gap_2()
+                    .rounded(px(RADIUS - 2.))
+                    .border_2()
+                    .border_color(if active { rgb(ACCENT) } else { rgba(0) })
+                    .text_color(rgb(ink))
+                    .when(active, |tab| tab.font_weight(FontWeight::SEMIBOLD))
+                    .when_some(fill, |tab, fill| tab.bg(rgb(fill)))
+                    .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(RAISED))))
+                    .cursor_pointer()
+                    .when_some(colors, |tab, colors| tab.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.dot))))
                     .child(div().min_w_0().truncate().child(title))
-                    .when(unseen, |tab| tab.child(div().flex_none().ml_1().text_color(rgb(AMBER)).child("•")))
+                    .when(unseen, |tab| tab.child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(ink))))
                     .child(
                         div()
                             .id(("close-tab", index))
                             .flex_none()
-                            .ml_2()
-                            .text_color(rgb(MUTED))
-                            .hover(|style| style.text_color(rgb(ACCENT)))
+                            .size(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .text_xs()
+                            .hover(|style| style.bg(rgba(0x00000026)))
                             .child("✕")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -915,8 +942,7 @@ impl WorkspaceView {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
             }))
-            .child(tab_bar_button("new-claude", "+ Claude", cx.listener(|this, _, window, cx| this.open(true, None, window, cx))))
-            .child(tab_bar_button("new-shell", "+ Shell", cx.listener(|this, _, window, cx| this.open(false, None, window, cx))))
+            .child(round_button("new-claude", "+", cx.listener(|this, _, window, cx| this.open(true, None, window, cx))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
             .when(client_decorations, |bar| {
                 bar.child(
@@ -955,9 +981,40 @@ impl WorkspaceView {
                 .gap_3()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(TEXT))
-                .child(tab_bar_button("empty-claude", "New Claude", cx.listener(|this, _, window, cx| this.open(true, None, window, cx))))
-                .child(tab_bar_button("empty-shell", "New shell", cx.listener(|this, _, window, cx| this.open(false, None, window, cx))))
+                .text_sm()
+                .child(
+                    div()
+                        .id("empty-claude")
+                        .w(px(220.))
+                        .h(px(40.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS))
+                        .bg(rgb(ACCENT))
+                        .text_color(rgb(ON_ACCENT))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .cursor_pointer()
+                        .child("New Claude session")
+                        .on_click(cx.listener(|this, _, window, cx| this.open(true, None, window, cx))),
+                )
+                .child(
+                    div()
+                        .id("empty-shell")
+                        .w(px(220.))
+                        .h(px(40.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .text_color(rgb(MUTED))
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(RAISED)))
+                        .child("New shell")
+                        .on_click(cx.listener(|this, _, window, cx| this.open(false, None, window, cx))),
+                )
                 .into_any_element();
         };
         let multiple = tab.root.leaves().len() > 1;
@@ -965,8 +1022,8 @@ impl WorkspaceView {
             .id("tab-content")
             .relative()
             .flex_1()
+            .min_h_0()
             .w_full()
-            .bg(rgb(BORDER))
             .child({
                 let view = cx.entity();
                 canvas(move |bounds, _, cx| view.update(cx, |this, _| this.content_bounds = bounds), |_, _, _, _| {})
@@ -979,6 +1036,7 @@ impl WorkspaceView {
                 let title = view.read(cx).title();
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
+                let unseen = self.unseen.contains_key(&leaf);
                 Some(
                     div()
                         .absolute()
@@ -986,14 +1044,19 @@ impl WorkspaceView {
                         .top(relative(rect.y))
                         .w(relative(rect.w))
                         .h(relative(rect.h))
-                        .p(px(1.))
+                        .p(px(PANE_GAP / 2.))
                         .child(
+                            // A rounded card; the terminal sits inside its padding, clear of the corners.
                             div()
                                 .size_full()
                                 .flex()
                                 .flex_col()
-                                .bg(rgb(BACKGROUND))
-                                .when(multiple, |pane| pane.child(pane_header(title, focused, status)))
+                                .p(px(6.))
+                                .rounded(px(RADIUS_LARGE))
+                                .bg(rgb(TERMINAL))
+                                .border_2()
+                                .border_color(rgb(if focused && multiple { ACCENT } else { LINE }))
+                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1031,38 +1094,35 @@ impl WorkspaceView {
     }
 }
 
-/// Glyph and color for a live session's status: ● needs input, ◐ busy, ✓ idle, · unknown.
-pub(crate) fn status_glyph(status: Option<&SessionStatus>) -> (&'static str, u32) {
-    match status {
-        Some(SessionStatus::NeedsInput { .. }) => ("●", AMBER),
-        Some(SessionStatus::Busy) => ("◐", ACCENT),
-        Some(SessionStatus::Idle) => ("✓", TEXT),
-        None => ("·", MUTED),
-    }
-}
-
-/// A new Claude session (or the user's shell) in `cwd`.
-pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
-    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd } }
-}
-
-fn pane_header(title: String, focused: bool, status: Option<SessionStatus>) -> impl IntoElement {
+/// A split pane's header: filled like its tab, with the session's status in words.
+fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool) -> impl IntoElement {
+    let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
+    let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
+        Tone::NeedsInput => "Needs input",
+        Tone::Working => "Working",
+        Tone::Done => "Done",
+        _ => "Idle",
+    });
     div()
-        .h(px(22.))
-        .px_2()
+        .flex_none()
+        .h(px(28.))
+        .mb(px(4.))
+        .px_3()
         .flex()
         .items_center()
+        .gap_2()
+        .rounded(px(RADIUS_SMALL))
         .text_xs()
-        .bg(rgb(PANEL))
-        .text_color(rgb(if focused { ACCENT } else { MUTED }))
-        .when_some(status, |header, status| {
-            let (glyph, color) = status_glyph(Some(&status));
-            header.child(div().flex_none().mr_1().text_color(rgb(color)).child(glyph))
-        })
-        .child(div().truncate().child(title))
+        .font_weight(FontWeight::SEMIBOLD)
+        .bg(rgb(colors.and_then(|colors| colors.fill).unwrap_or(RAISED)))
+        .text_color(rgb(colors.map_or(TEXT, |colors| colors.ink)))
+        .when_some(colors, |header, colors| header.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.dot))))
+        .child(div().flex_1().min_w_0().truncate().child(title))
+        .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
 }
 
-pub(crate) fn tab_bar_button(
+/// A small round icon button in the tab bar.
+pub(crate) fn round_button(
     id: &'static str,
     label: &'static str,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -1070,28 +1130,62 @@ pub(crate) fn tab_bar_button(
     div()
         .id(id)
         .flex_none()
-        .h_full()
-        .px_3()
+        .size(px(30.))
         .flex()
         .items_center()
+        .justify_center()
+        .rounded_full()
         .text_color(rgb(MUTED))
-        .hover(|style| style.text_color(rgb(ACCENT)))
+        .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(RAISED)))
         .cursor_pointer()
         .child(label)
         .on_click(on_click)
 }
 
+/// A new Claude session (or the user's shell) in `cwd`.
+pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
+    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd } }
+}
+
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = self.workspace.sidebar.clone();
-        let main = div()
+        let body = div()
             .flex_1()
-            .min_w_0()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .flex()
-            .flex_col()
-            .child(self.render_tab_bar(window, cx))
-            .child(self.render_active_tab(cx));
+            .flex_row()
+            .when(sidebar.visible, |body| {
+                body.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .h_full()
+                        .w(px(sidebar.width))
+                        .child({
+                            let view = cx.entity();
+                            canvas(move |bounds, _, cx| view.update(cx, |this, _| this.sidebar_bounds = bounds), |_, _, _, _| {})
+                                .absolute()
+                                .size_full()
+                        })
+                        .child(self.sidebar.clone()),
+                )
+                .child(
+                    div()
+                        .id("sidebar-edge")
+                        .flex_none()
+                        .w(px(SIDEBAR_EDGE))
+                        .h_full()
+                        .bg(rgb(LINE))
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.resizing_sidebar = true;
+                            cx.stop_propagation();
+                        })),
+                )
+            })
+            .child(div().flex_1().min_w_0().h_full().flex().flex_col().p(px(PANE_GAP / 2.)).child(self.render_active_tab(cx)));
         let root = div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
@@ -1131,38 +1225,12 @@ impl Render for WorkspaceView {
             .relative()
             .size_full()
             .flex()
-            .flex_row()
-            .bg(rgb(BACKGROUND))
-            .when(sidebar.visible, |root| {
-                root.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .h_full()
-                        .w(px(sidebar.width))
-                        .child({
-                            let view = cx.entity();
-                            canvas(move |bounds, _, cx| view.update(cx, |this, _| this.sidebar_bounds = bounds), |_, _, _, _| {})
-                                .absolute()
-                                .size_full()
-                        })
-                        .child(self.sidebar.clone()),
-                )
-                .child(
-                    div()
-                        .id("sidebar-edge")
-                        .flex_none()
-                        .w(px(4.))
-                        .h_full()
-                        .bg(rgb(BORDER))
-                        .cursor(CursorStyle::ResizeLeftRight)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.resizing_sidebar = true;
-                            cx.stop_propagation();
-                        })),
-                )
-            })
-            .child(main)
+            .flex_col()
+            .bg(rgb(GROUND))
+            .text_color(rgb(TEXT))
+            .font_family(UI_FONT)
+            .child(self.render_tab_bar(window, cx))
+            .child(body)
             .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
                     div().id("launcher-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),

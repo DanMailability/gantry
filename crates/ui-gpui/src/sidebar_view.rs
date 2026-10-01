@@ -1,29 +1,38 @@
-//! The sidebar: Claude sessions (and shell panes) by folder or by state, with a fuzzy filter.
+//! The sidebar: Claude sessions (and shell panes) by project or by status, coloured by what each needs, with a fuzzy
+//! filter that reaches every session.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use app_core::session_tree::{self, Activation, Row, RowKey, RowKind, ShellEntry, TreeInput, session_title};
+use app_core::session_tree::{
+    self, Activation, Row, RowKey, RowKind, ShellEntry, Tone, ToneCounts, TreeInput, project_root, session_title,
+};
 use app_core::sessions::SessionStore;
 use app_core::text_field::TextField;
 use app_core::workspace::TreeView;
 use gpui::{
-    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, anchored, deferred, div,
-    prelude::*, px, rgb, uniform_list,
+    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, anchored,
+    deferred, div, prelude::*, px, rgb, rgba, uniform_list,
 };
-use protocol::message::{SessionInfo, SessionState};
+use protocol::message::SessionInfo;
 
 use crate::field;
-use crate::workspace_view::{ACCENT, AMBER, BORDER, MUTED, PANEL, SELECTED, TAB_BAR_HEIGHT, TEXT, status_glyph};
+use crate::theme::{
+    ACCENT, GROUND, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_SMALL, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
+};
 
-const ROW_HEIGHT: f32 = 22.0;
-const INDENT: f32 = 12.0;
-const FIELD_BACKGROUND: u32 = 0x11141a;
+/// Every row is this tall (the list is uniform); session rows draw a pill inside it.
+const ROW_HEIGHT: f32 = 38.0;
 /// Ages ("5m") are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
+const FIND_SHORTCUT: &str = "⌘F";
+#[cfg(not(target_os = "macos"))]
+const FIND_SHORTCUT: &str = "Ctrl+Shift+F";
 
 /// What the sidebar asks the workspace to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,7 +51,12 @@ pub enum SidebarEvent {
         /// Claude (true) or a shell.
         claude: bool,
     },
-    /// The user switched between Folders and Status.
+    /// Open a new Claude (or shell) tab where the focused pane is.
+    New {
+        /// Claude (true) or a shell.
+        claude: bool,
+    },
+    /// The user switched between Projects and Status.
     ViewChanged(TreeView),
     /// Give keyboard focus back to the pane.
     Dismiss,
@@ -56,16 +70,17 @@ pub struct SidebarView {
     view: TreeView,
     filter: TextField,
     toggled: HashSet<PathBuf>,
-    show_all: HashSet<PathBuf>,
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
     unseen: HashSet<String>,
     rows: Vec<Row>,
     selected: Option<RowKey>,
-    /// Directory context menu: its directory and where it opened.
+    /// Project context menu: its directory and where it opened.
     menu: Option<(PathBuf, Point<Pixels>)>,
     scroll: UniformListScrollHandle,
     home: Option<PathBuf>,
+    /// Project of each directory seen (looked up once: it stats parent directories).
+    projects: RefCell<HashMap<PathBuf, PathBuf>>,
     _refresh: Task<()>,
 }
 
@@ -95,7 +110,6 @@ impl SidebarView {
             view,
             filter: TextField::default(),
             toggled: HashSet::new(),
-            show_all: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
             rows: Vec::new(),
@@ -103,6 +117,7 @@ impl SidebarView {
             menu: None,
             scroll: UniformListScrollHandle::new(),
             home: std::env::home_dir(),
+            projects: RefCell::default(),
             _refresh: refresh,
         };
         sidebar.rebuild(cx);
@@ -130,7 +145,7 @@ impl SidebarView {
     pub fn set_unseen(&mut self, unseen: HashSet<String>, cx: &mut Context<Self>) {
         if unseen != self.unseen {
             self.unseen = unseen;
-            cx.notify();
+            self.rebuild(cx);
         }
     }
 
@@ -146,18 +161,20 @@ impl SidebarView {
         let rows = {
             let sessions: Vec<&SessionInfo> = self.sessions.all().collect();
             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            let project_of = |cwd: &Path| self.project_of(cwd);
             let input = TreeInput {
                 sessions: &sessions,
                 shells: &self.shells,
                 home: self.home.as_deref(),
                 filter: self.filter.text(),
                 toggled: &self.toggled,
-                show_all: &self.show_all,
                 details: self.details.as_deref(),
+                unseen: &self.unseen,
+                project_of: &project_of,
                 now_ms,
             };
             match self.view {
-                TreeView::Folders => session_tree::folders(&input),
+                TreeView::Projects => session_tree::projects(&input),
                 TreeView::Status => session_tree::status(&input),
             }
         };
@@ -166,6 +183,16 @@ impl SidebarView {
             self.selected = None;
         }
         cx.notify();
+    }
+
+    /// The project `cwd` belongs to: its git repository, else the directory itself.
+    fn project_of(&self, cwd: &Path) -> PathBuf {
+        if let Some(project) = self.projects.borrow().get(cwd) {
+            return project.clone();
+        }
+        let project = project_root(cwd, self.home.as_deref(), |dir| dir.join(".git").exists());
+        self.projects.borrow_mut().insert(cwd.to_path_buf(), project.clone());
+        project
     }
 
     fn selected_index(&self) -> Option<usize> {
@@ -189,14 +216,10 @@ impl SidebarView {
         let Some(row) = self.rows.get(index) else { return };
         self.selected = Some(row.key());
         match row.activation() {
-            Activation::ToggleDir(dir) => {
+            Activation::ToggleProject(dir) => {
                 if !self.toggled.remove(&dir) {
                     self.toggled.insert(dir);
                 }
-                self.rebuild(cx);
-            }
-            Activation::ShowAll(dir) => {
-                self.show_all.insert(dir);
                 self.rebuild(cx);
             }
             Activation::ToggleDetails(id) => {
@@ -263,17 +286,14 @@ impl SidebarView {
             .id(index)
             .h(px(ROW_HEIGHT))
             .w_full()
-            .pl(px(8. + INDENT * row.depth as f32))
-            .pr_2()
+            .px(px(10.))
+            .py(px(2.))
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
             .text_sm()
             .overflow_hidden()
             .whitespace_nowrap()
-            .cursor_pointer()
-            .when(selected, |el| el.bg(rgb(SELECTED)))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.focus_handle.focus(window, cx);
                 // The list may have been rebuilt since it was drawn: act on the row that was
@@ -282,75 +302,156 @@ impl SidebarView {
                     this.activate(index, event.modifiers().secondary(), cx);
                 }
             }));
-        let muted = |text: String| div().flex_none().text_xs().text_color(rgb(MUTED)).child(text);
-        let count = |text: String, color: u32| div().flex_none().text_xs().text_color(rgb(color)).child(text);
-        let title = |text: String, color: u32| div().min_w_0().truncate().text_color(rgb(color)).child(text);
-        // Paths give way to titles: they shrink first and truncate.
-        let path_label = |text: String| div().min_w_0().flex_shrink(4.).truncate().text_xs().text_color(rgb(MUTED)).child(text);
+        // The visible part of a row: a rounded pill, ringed when selected.
+        let pill = |fill: Option<u32>| {
+            div()
+                .size_full()
+                .px_3()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .rounded(px(RADIUS))
+                .border_2()
+                .border_color(if selected { rgb(ACCENT) } else { rgba(0) })
+                .cursor_pointer()
+                .map(|pill| match fill {
+                    Some(fill) => pill.bg(rgb(fill)),
+                    None => pill.hover(|style| style.bg(rgb(RAISED))),
+                })
+        };
+        let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
+        let note = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
         match &row.kind {
-            RowKind::Host { name } => base.text_color(rgb(MUTED)).child(format!("▾ {name}")),
-            RowKind::Group { label, count } => base.text_xs().text_color(rgb(MUTED)).child(format!("{} · {count}", label.to_uppercase())),
-            RowKind::Dir { path, label, expanded, needs_input, busy, live, closed } => {
+            RowKind::Group { label, count } => base.child(
+                div()
+                    .size_full()
+                    .px_3()
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .pb(px(4.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(*label))
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(count.to_string())),
+            ),
+            RowKind::Project { path, label, expanded, counts } => {
                 let path = path.clone();
-                let rest = live - needs_input - busy;
-                base.child(div().flex_none().text_color(rgb(MUTED)).child(if *expanded { "▾" } else { "▸" }))
-                    .child(title(label.clone(), TEXT))
-                    .child(div().flex_1())
-                    .when(*needs_input > 0, |el| el.child(count(format!("●{needs_input}"), AMBER)))
-                    .when(*busy > 0, |el| el.child(count(format!("◐{busy}"), ACCENT)))
-                    .when(rest > 0, |el| el.child(muted(format!("○{rest}"))))
-                    .when(*closed > 0, |el| el.child(muted(format!("◌{closed}"))))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            this.menu = Some((path.clone(), event.position));
-                            cx.notify();
-                        }),
-                    )
+                base.child(
+                    pill(None)
+                        .child(div().flex_none().text_color(rgb(MUTED)).child(if *expanded { "▾" } else { "▸" }))
+                        .child(title(label.clone()).font_weight(FontWeight::SEMIBOLD))
+                        .children(count_chips(counts)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.menu = Some((path.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
             }
-            RowKind::Session { session, age, path } => {
-                let closed = session.state == SessionState::Closed;
-                let (glyph, color) = if closed { ("◌", MUTED) } else { status_glyph(session.status.as_ref()) };
-                let external = matches!(session.state, SessionState::External { .. });
+            RowKind::Session { session, tone, age, project } => {
+                let colors = tone_colors(*tone);
                 let unseen = self.unseen.contains(&session.id);
-                let right = if closed && !session.cwd_exists { "dir missing".to_string() } else { age.clone() };
-                base.child(div().flex_none().text_color(rgb(color)).child(glyph))
-                    .child(title(session_title(session).to_string(), if closed { MUTED } else { TEXT }))
-                    .when(external, |el| el.child(muted("↗".to_string())))
-                    .when_some(path.clone(), |el, path| el.child(path_label(path)))
-                    .child(div().flex_1())
-                    .when(unseen, |el| el.child(count("•".to_string(), AMBER)))
-                    .child(muted(right))
+                let lead = match tone {
+                    Tone::Elsewhere => div().flex_none().w(px(10.)).text_color(rgb(colors.dot)).child("↗"),
+                    Tone::Closed => div().flex_none().size(px(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
+                    _ => div().flex_none().size(px(8.)).rounded_full().bg(rgb(colors.dot)),
+                };
+                base.child(
+                    pill(colors.fill)
+                        .text_color(rgb(colors.ink))
+                        .child(lead)
+                        .child(title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
+                            title.font_weight(FontWeight::SEMIBOLD)
+                        }))
+                        .when(unseen, |pill| pill.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.ink))))
+                        .child(note(row_note(*tone, age, project.as_deref(), session.cwd_exists), colors.ink)),
+                )
             }
-            RowKind::Shell { entry, path } => base
-                .child(div().flex_none().text_color(rgb(MUTED)).child("○"))
-                .child(title(entry.title.clone(), TEXT))
-                .when_some(path.clone(), |el, path| el.child(path_label(path))),
-            RowKind::More { hidden, .. } => base.text_color(rgb(MUTED)).child(format!("… {hidden} more")),
-            RowKind::Detail { text, .. } => base.text_xs().italic().text_color(rgb(MUTED)).child(text.clone()),
-            RowKind::TakeOver { .. } => base.text_color(rgb(ACCENT)).child("Take over…"),
+            RowKind::Shell { entry, project } => base.child(
+                pill(None)
+                    .child(div().flex_none().text_xs().text_color(rgb(MUTED)).child(">_"))
+                    .child(title(entry.title.clone()))
+                    .when_some(project.clone(), |pill, project| pill.child(note(project, MUTED))),
+            ),
+            RowKind::Detail { text, .. } => {
+                base.child(div().pl(px(34.)).text_xs().italic().text_color(rgb(MUTED)).child(text.clone()))
+            }
+            RowKind::TakeOver { .. } => base.child(pill(None).pl(px(32.)).text_color(rgb(ACCENT)).child("Take over…")),
         }
     }
+}
+
+/// The right-hand note of a session row: its status (Projects view) or its project (Status view), and its age.
+fn row_note(tone: Tone, age: &str, project: Option<&str>, cwd_exists: bool) -> String {
+    let what = match (project, tone) {
+        (Some(project), _) => project,
+        (None, Tone::NeedsInput) => "Needs input",
+        (None, Tone::Working) => "Working",
+        (None, Tone::Done) => "Done",
+        (None, Tone::Idle) => "Idle",
+        (None, Tone::Elsewhere) => "Elsewhere",
+        (None, Tone::Closed) if !cwd_exists => "Folder missing",
+        (None, Tone::Closed) => return age.to_string(),
+    };
+    format!("{what} · {age}")
+}
+
+/// Small rounded counters in the tones of a project's live sessions.
+fn count_chips(counts: &ToneCounts) -> Vec<gpui::Div> {
+    let tones = [
+        (Tone::NeedsInput, counts.needs_input),
+        (Tone::Working, counts.working),
+        (Tone::Done, counts.done),
+        (Tone::Idle, counts.idle),
+        (Tone::Elsewhere, counts.elsewhere),
+    ];
+    tones
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(tone, count)| {
+            let colors = tone_colors(tone);
+            div()
+                .flex_none()
+                .h(px(20.))
+                .min_w(px(20.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(colors.fill.unwrap_or(RAISED)))
+                .text_color(rgb(colors.ink))
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .child(count.to_string())
+        })
+        .collect()
 }
 
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
         let current = self.view;
-        let view_button = |id: &'static str, label: &'static str, view: TreeView, cx: &mut Context<Self>| {
+        let segment = |id: &'static str, label: &'static str, view: TreeView, cx: &mut Context<Self>| {
             let active = current == view;
             div()
                 .id(id)
-                .px_2()
-                .h_full()
+                .flex_1()
+                .h(px(30.))
                 .flex()
                 .items_center()
+                .justify_center()
+                .rounded(px(RADIUS - 4.))
                 .cursor_pointer()
-                .text_color(rgb(if active { ACCENT } else { MUTED }))
-                .when(active, |el| el.border_b_2().border_color(rgb(ACCENT)))
+                .when(active, |el| el.bg(rgb(RAISED)).text_color(rgb(TEXT)).font_weight(FontWeight::SEMIBOLD))
+                .when(!active, |el| el.text_color(rgb(MUTED)).hover(|style| style.text_color(rgb(TEXT))))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
         };
+        let filtering = !self.filter.text().is_empty();
+        let total = self.sessions.all().count();
         div()
             .key_context("Sidebar")
             .track_focus(&self.focus_handle)
@@ -358,37 +459,39 @@ impl Render for SidebarView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(PANEL))
+            .bg(rgb(SURFACE))
             .text_color(rgb(TEXT))
+            .font_family(UI_FONT)
             .child(
                 div()
-                    .h(px(TAB_BAR_HEIGHT))
                     .flex_none()
+                    .mx_3()
+                    .mt_3()
+                    .mb_2()
+                    .p(px(4.))
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .px_1()
+                    .gap_1()
+                    .rounded(px(RADIUS))
+                    .bg(rgb(GROUND))
                     .text_sm()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(view_button("view-folders", "Folders", TreeView::Folders, cx))
-                    .child(view_button("view-status", "Status", TreeView::Status, cx)),
+                    .child(segment("view-projects", "By project", TreeView::Projects, cx))
+                    .child(segment("view-status", "By status", TreeView::Status, cx)),
             )
             .child(
                 div()
                     .id("filter")
-                    .h(px(28.))
+                    .h(px(36.))
                     .flex_none()
-                    .mx_2()
-                    .my_1()
-                    .px_2()
+                    .mx_3()
+                    .mb_1()
+                    .px_3()
                     .flex()
                     .items_center()
                     .text_sm()
-                    .rounded_sm()
-                    .bg(rgb(FIELD_BACKGROUND))
+                    .rounded(px(RADIUS))
+                    .bg(rgb(RAISED))
                     .border_1()
-                    .border_color(rgb(if focused { ACCENT } else { BORDER }))
+                    .border_color(rgb(if focused { ACCENT } else { LINE }))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.focus_handle.focus(window, cx);
                         cx.notify();
@@ -404,19 +507,91 @@ impl Render for SidebarView {
                 .track_scroll(&self.scroll)
                 .flex_1(),
             )
+            .when(!filtering, |el| {
+                el.child(
+                    div()
+                        .id("search-all")
+                        .flex_none()
+                        .h(px(34.))
+                        .mx_3()
+                        .mt_2()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(rgb(TEXT)))
+                        .child(div().flex_1().child(format!("Search all {total} sessions")))
+                        .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(RAISED)).child(FIND_SHORTCUT))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus_handle.focus(window, cx);
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .p_3()
+                    .flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(
+                        div()
+                            .id("new-claude")
+                            .flex_1()
+                            .h(px(36.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS))
+                            .bg(rgb(ACCENT))
+                            .text_color(rgb(ON_ACCENT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .hover(|style| style.opacity(0.9))
+                            .child("New Claude session")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: true }))),
+                    )
+                    .child(
+                        div()
+                            .id("new-shell")
+                            .flex_none()
+                            .size(px(36.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS))
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .text_color(rgb(MUTED))
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(RAISED)))
+                            .child(">_")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: false }))),
+                    ),
+            )
             .when_some(self.menu.clone(), |el, (_, position)| {
                 el.child(deferred(
                     anchored().position(position).child(
                         div()
-                            .id("dir-menu")
+                            .id("project-menu")
                             // A floating layer: clicks must not reach the rows beneath it.
                             .occlude()
-                            .py_1()
+                            .p_1()
                             .text_sm()
-                            .bg(rgb(PANEL))
+                            .font_family(UI_FONT)
+                            .text_color(rgb(TEXT))
+                            .bg(rgb(RAISED))
                             .border_1()
-                            .border_color(rgb(BORDER))
-                            .rounded_md()
+                            .border_color(rgb(LINE))
+                            .rounded(px(RADIUS))
                             .shadow_lg()
                             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                                 this.menu = None;
@@ -435,5 +610,27 @@ fn menu_item(
     label: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    div().id(id).px_3().py_1().cursor_pointer().hover(|style| style.bg(rgb(SELECTED))).child(label).on_click(on_click)
+    div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .rounded(px(RADIUS_SMALL))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(LINE)))
+        .child(label)
+        .on_click(on_click)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_note_their_status_or_their_project_with_the_age() {
+        assert_eq!(row_note(Tone::NeedsInput, "2m", None, true), "Needs input · 2m");
+        assert_eq!(row_note(Tone::Done, "now", None, true), "Done · now");
+        assert_eq!(row_note(Tone::Working, "1m", Some("api-gateway"), true), "api-gateway · 1m");
+        assert_eq!(row_note(Tone::Closed, "3h", None, true), "3h");
+        assert_eq!(row_note(Tone::Closed, "2d", None, false), "Folder missing · 2d");
+    }
 }

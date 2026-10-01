@@ -440,7 +440,7 @@ mod tests {
         let replies = String::from_utf8(t.take_pty_writes()).unwrap();
         assert_eq!(
             replies,
-            "\x1b[1;1R\x1b]11;rgb:1111/1414/1a1a\x07\x1b]10;rgb:d6d6/dddd/e6e6\x1b\\"
+            "\x1b[1;1R\x1b]11;rgb:1414/1818/2121\x07\x1b]10;rgb:d8d8/dddd/e8e8\x1b\\"
         );
     }
 
