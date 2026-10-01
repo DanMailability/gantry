@@ -6,13 +6,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use app_core::term_state::TermState;
+use claude_index::index::SessionRecord;
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SpawnRequest};
+use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, claude_session};
 use tokio::sync::Notify;
 
 use crate::outbox::Outbox;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
+use crate::sessions::{PaneSession, diff, resolve, spawn_indexer};
 
 const OUTPUT_QUEUE_CHUNKS: usize = 32;
 const MAX_BATCH_BYTES: usize = 256 * 1024;
@@ -28,6 +30,8 @@ pub struct ServerOptions {
     pub owner_uid: Option<u32>,
     /// Stop if no client connects within this time after start.
     pub idle_timeout: Duration,
+    /// Claude config directory to index; `None` sends no session messages.
+    pub claude_dir: Option<PathBuf>,
 }
 
 struct Pane {
@@ -36,6 +40,8 @@ struct Pane {
     program: String,
     args: Vec<String>,
     cwd: PathBuf,
+    /// Session its command line names.
+    session_arg: Option<String>,
     last_focused: u64,
     needs_resync: bool,
 }
@@ -56,6 +62,12 @@ struct State {
     next_client: u64,
     focus_seq: u64,
     ever_connected: bool,
+    /// Whether session messages are sent (an index runs).
+    sessions_enabled: bool,
+    /// Latest index scan.
+    records: Arc<Vec<SessionRecord>>,
+    /// Sessions as last sent to (or computed for) the client.
+    sent: Vec<SessionInfo>,
 }
 
 struct Shared {
@@ -113,6 +125,29 @@ impl State {
         }
     }
 
+    /// Send the session list (`full`) or what changed since the last one. Without a client only the
+    /// baseline is updated; a connecting client always gets a full list.
+    fn publish_sessions(&mut self, full: bool) {
+        if !self.sessions_enabled {
+            return;
+        }
+        let panes: Vec<PaneSession> = self
+            .panes
+            .iter()
+            .map(|(id, pane)| PaneSession { pane: *id, pid: pane.pty.pid(), session_arg: pane.session_arg.clone() })
+            .collect();
+        let sessions = resolve(&self.records, &panes);
+        if full {
+            self.control(&DaemonMessage::Sessions { sessions: sessions.clone() });
+        } else {
+            let (upserted, removed) = diff(&self.sent, &sessions);
+            if !upserted.is_empty() || !removed.is_empty() {
+                self.control(&DaemonMessage::SessionsChanged { upserted, removed });
+            }
+        }
+        self.sent = sessions;
+    }
+
     fn send_resync(outbox: &Outbox, pane_id: PaneId, pane: &mut Pane) {
         let snapshot = pane.term.snapshot();
         outbox.push_control(Frame::control(&DaemonMessage::Resync {
@@ -127,8 +162,9 @@ impl State {
 
 /// Serve clients until `StopAll` or until idle (no panes and no client).
 pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result<()> {
+    let claude_dir = options.claude_dir;
     let shared = Arc::new(Shared {
-        state: Mutex::new(State { next_pane: 1, ..State::default() }),
+        state: Mutex::new(State { next_pane: 1, sessions_enabled: claude_dir.is_some(), ..State::default() }),
         shutdown: Notify::new(),
         base_env: options.base_env,
         owner_uid: options.owner_uid,
@@ -162,6 +198,19 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
             }
         })
     };
+    let sessions = claude_dir.map(|dir| {
+        let (tx, mut rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        spawn_indexer(dir, tx);
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                let records = rx.borrow_and_update().clone();
+                let mut state = shared.lock();
+                state.records = records;
+                state.publish_sessions(false);
+            }
+        })
+    });
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -173,6 +222,9 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     }
     idle.abort();
     ticker.abort();
+    if let Some(task) = sessions {
+        task.abort();
+    }
     let mut state = shared.lock();
     if let Some(client) = state.client.take() {
         client.outbox.close();
@@ -270,7 +322,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         ClientMessage::Hello { .. } => {}
         ClientMessage::StopAll => stop_all(shared),
         ClientMessage::ListPanes => {
-            let state = shared.lock();
+            let mut state = shared.lock();
             let mut panes: Vec<PaneInfo> = state
                 .panes
                 .iter()
@@ -284,6 +336,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
                 .collect();
             panes.sort_by(|a, b| b.last_focused.cmp(&a.last_focused).then(b.pane.cmp(&a.pane)));
             state.control(&DaemonMessage::Panes { panes });
+            state.publish_sessions(true);
         }
         ClientMessage::Spawn { request, spec } => spawn_pane(shared, client_id, request, spec),
         ClientMessage::Attach { pane } => {
@@ -328,6 +381,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         .cwd_from
         .and_then(|from| shared.lock().panes.get(&from).and_then(|pane| pane.pty.current_dir()))
         .unwrap_or_else(|| spec.cwd.clone());
+    let session_arg = claude_session(&spec.program, &spec.args).map(String::from);
     let pty_spec = SpawnSpec {
         program: spec.program.clone(),
         args: spec.args.clone(),
@@ -355,6 +409,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         program: spec.program,
         args: spec.args,
         cwd: cwd.clone(),
+        session_arg,
         last_focused: state.focus_seq,
         needs_resync: false,
     };
@@ -363,6 +418,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         client.attached.insert(id);
     }
     state.control(&DaemonMessage::Spawned { request, pane: id, cwd });
+    state.publish_sessions(false);
     drop(state);
 
     let output_done = Arc::new(Notify::new());
@@ -413,6 +469,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         }
         state.panes.remove(&id);
         state.control(&DaemonMessage::Exited { pane: id, code });
+        state.publish_sessions(false);
         exit_shared.stop_if_idle(&state);
     });
 }

@@ -66,7 +66,7 @@ fn daemon_main() -> ExitCode {
         .with_writer(appender)
         .with_ansi(false)
         .init();
-    match run_daemon(DaemonOptions { paths, base_env: None, idle_timeout: Duration::from_secs(10) }) {
+    match run_daemon(DaemonOptions { paths, base_env: None, idle_timeout: Duration::from_secs(10), claude_dir: None }) {
         Ok(DaemonOutcome::Stopped | DaemonOutcome::AlreadyRunning) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!("daemon failed: {err:#}");

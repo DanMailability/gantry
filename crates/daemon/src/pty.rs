@@ -97,6 +97,11 @@ impl PtyProcess {
         self.master.resize(pty_size(cols, rows))
     }
 
+    /// Process id of the program, when the platform reports one.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     /// Current working directory of the process, where the platform exposes it (Linux).
     pub fn current_dir(&self) -> Option<PathBuf> {
         let pid = self.pid?;

@@ -1,6 +1,7 @@
 //! Starting the daemon: one per profile (file lock), private socket, detached process.
 
 use std::fs::{File, TryLockError};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use interprocess::local_socket::ListenerOptions;
@@ -27,11 +28,15 @@ pub struct DaemonOptions {
     pub base_env: Option<Vec<(String, String)>>,
     /// Stop if no client connects within this time.
     pub idle_timeout: Duration,
+    /// Claude config directory to index; `None` uses the panes' environment (`CLAUDE_CONFIG_DIR`, else
+    /// `~/.claude`).
+    pub claude_dir: Option<PathBuf>,
 }
 
 /// Run the daemon in the current thread until it stops.
 pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
     let paths = options.paths;
+    let claude_dir = options.claude_dir;
     std::fs::create_dir_all(&paths.runtime_dir)?;
     #[cfg(unix)]
     {
@@ -59,7 +64,8 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
             Some(env) => env,
             None => tokio::task::spawn_blocking(login_env_or_current).await?,
         };
-        serve(listener, ServerOptions { base_env, owner_uid, idle_timeout: options.idle_timeout }).await
+        let claude_dir = claude_dir.or_else(|| claude_index::config::config_dir(&base_env));
+        serve(listener, ServerOptions { base_env, owner_uid, idle_timeout: options.idle_timeout, claude_dir }).await
     })?;
     drop(lock);
     Ok(DaemonOutcome::Stopped)
@@ -179,7 +185,7 @@ mod tests {
     }
 
     fn options(dir: &std::path::Path, idle: Duration) -> DaemonOptions {
-        DaemonOptions { paths: Paths::in_dir(dir, "t"), base_env: Some(std::env::vars().collect()), idle_timeout: idle }
+        DaemonOptions { paths: Paths::in_dir(dir, "t"), base_env: Some(std::env::vars().collect()), idle_timeout: idle, claude_dir: Some(dir.join("claude")) }
     }
 
     #[test]

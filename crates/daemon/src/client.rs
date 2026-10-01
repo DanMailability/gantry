@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SpawnRequest};
+use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest};
 use tokio::sync::mpsc;
 
 use crate::launch::{connect_or_spawn, connect_trusted};
@@ -58,6 +58,18 @@ pub enum ClientEvent {
         request: u64,
         /// Human-readable reason.
         error: String,
+    },
+    /// Every Claude session the daemon knows, replacing the previous list.
+    Sessions {
+        /// Sessions, most recently active first.
+        sessions: Vec<SessionInfo>,
+    },
+    /// Sessions that appeared or changed, and ids that disappeared.
+    SessionsChanged {
+        /// New or changed sessions.
+        upserted: Vec<SessionInfo>,
+        /// Ids no longer known.
+        removed: Vec<String>,
     },
     /// Another GUI took over the daemon.
     TakenOver,
@@ -224,6 +236,8 @@ async fn run_connection(
                 Some(Ok(DaemonMessage::Exited { pane, code })) => ClientEvent::Exited { pane, code },
                 Some(Ok(DaemonMessage::Spawned { request, pane, cwd })) => ClientEvent::Spawned { request, pane, cwd },
                 Some(Ok(DaemonMessage::SpawnFailed { request, error })) => ClientEvent::SpawnFailed { request, error },
+                Some(Ok(DaemonMessage::Sessions { sessions })) => ClientEvent::Sessions { sessions },
+                Some(Ok(DaemonMessage::SessionsChanged { upserted, removed })) => ClientEvent::SessionsChanged { upserted, removed },
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");

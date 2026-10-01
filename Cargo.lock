@@ -1327,6 +1327,7 @@ dependencies = [
  "anyhow",
  "app-core",
  "async-channel",
+ "claude-index",
  "directories",
  "interprocess",
  "portable-pty",

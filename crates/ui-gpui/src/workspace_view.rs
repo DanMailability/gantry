@@ -214,6 +214,7 @@ impl WorkspaceView {
                         self.slots[&leaf].view.update(cx, |view, cx| view.failed(error.clone(), cx));
                     }
                 }
+                ClientEvent::Sessions { .. } | ClientEvent::SessionsChanged { .. } => {}
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
                     for slot in self.slots.values() {

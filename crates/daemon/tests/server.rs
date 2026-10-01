@@ -22,7 +22,7 @@ async fn start_server(idle_timeout: Duration) -> Harness {
     let paths = Paths::in_dir(dir.path(), "test");
     std::fs::create_dir_all(&paths.runtime_dir).unwrap();
     let listener = ListenerOptions::new().name(paths.socket_name().unwrap()).create_tokio().unwrap();
-    let options = ServerOptions { base_env: std::env::vars().collect(), owner_uid: None, idle_timeout };
+    let options = ServerOptions { base_env: std::env::vars().collect(), owner_uid: None, idle_timeout, claude_dir: None };
     let server = tokio::spawn(serve(listener, options));
     Harness { paths, server, _dir: dir }
 }

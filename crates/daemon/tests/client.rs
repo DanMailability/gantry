@@ -14,7 +14,8 @@ fn sh(script: &str) -> SpawnRequest {
 
 fn daemon_spawner(paths: Paths) -> impl FnOnce() -> std::io::Result<()> + Send + 'static {
     move || {
-        let options = DaemonOptions { paths, base_env: Some(std::env::vars().collect()), idle_timeout: Duration::from_secs(5) };
+        let claude_dir = Some(paths.runtime_dir.with_file_name("claude"));
+        let options = DaemonOptions { paths, base_env: Some(std::env::vars().collect()), idle_timeout: Duration::from_secs(5), claude_dir };
         std::thread::spawn(move || run_daemon(options));
         Ok(())
     }
@@ -110,7 +111,8 @@ fn connect_then_spawn_attach_and_kill() {
     assert_eq!(again.panes[0].pane, pane);
     assert_eq!(again.panes[0].args, vec!["-c".to_string(), "printf 'hello pane'; sleep 10".to_string()]);
     again.client.attach(pane);
-    assert!(matches!(next_event(&again.events, |_| true), ClientEvent::Resync { pane: p, .. } if p == pane));
+    let not_sessions = |e: &ClientEvent| !matches!(e, ClientEvent::Sessions { .. } | ClientEvent::SessionsChanged { .. });
+    assert!(matches!(next_event(&again.events, not_sessions), ClientEvent::Resync { pane: p, .. } if p == pane));
     output_until(&again.events, "hello pane");
     again.client.kill(pane);
     assert!(matches!(next_event(&again.events, |e| matches!(e, ClientEvent::Exited { .. })), ClientEvent::Exited { pane: p, .. } if p == pane));
