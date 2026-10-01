@@ -33,6 +33,7 @@ claude-index = { path = "crates/claude-index" }
 notify = "8.2"
 nucleo-matcher = "0.3.1"
 uuid = { version = "1", features = ["v4"] }
+notify-rust = "4.18"
 
 [workspace.lints.rust]
 missing_docs = "warn"

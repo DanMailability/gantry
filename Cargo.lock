@@ -6032,6 +6032,7 @@ dependencies = [
  "daemon",
  "gpui",
  "gpui_platform",
+ "notify-rust",
  "protocol",
  "tracing",
 ]

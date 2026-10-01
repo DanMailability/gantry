@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use app_core::attention::{Alert, AlertKind, AttentionTracker};
+use app_core::attention::{Alert, AlertKind, AttentionTracker, describe};
 use app_core::layout_store;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
@@ -18,8 +18,9 @@ use gpui::{
 };
 use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::session_tree::{Activation, ShellEntry};
+use app_core::session_tree::{Activation, ShellEntry, display_path, session_title};
 
+use crate::alerts::{self, Notice};
 use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
@@ -145,6 +146,9 @@ pub struct WorkspaceView {
     /// Leaves with an alert the user has not seen yet.
     unseen: HashMap<NodeId, AlertKind>,
     _activation: Subscription,
+    /// Leaves whose notification was clicked.
+    clicked: async_channel::Sender<NodeId>,
+    _clicks: Task<()>,
     _events: Task<()>,
 }
 
@@ -176,6 +180,15 @@ impl WorkspaceView {
         });
         // Coming back to the window counts as seeing its visible tab.
         let activation = cx.observe_window_activation(window, |this, window, cx| this.clear_seen(window, cx));
+        let (clicked, clicks) = async_channel::unbounded::<NodeId>();
+        let clicks_task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(leaf) = clicks.recv().await {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    window.activate_window();
+                    this.focus_leaf(leaf, window, cx);
+                });
+            }
+        });
         let mut this = WorkspaceView {
             workspace: restored.workspace,
             slots: HashMap::new(),
@@ -197,6 +210,8 @@ impl WorkspaceView {
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
             _activation: activation,
+            clicked,
+            _clicks: clicks_task,
             _events: events_task,
         };
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
@@ -315,8 +330,17 @@ impl WorkspaceView {
         if window.is_window_active() && self.workspace.is_visible(leaf) {
             return;
         }
-        self.unseen.insert(leaf, alert.kind);
+        self.unseen.insert(leaf, alert.kind.clone());
         self.sync_unseen(cx);
+        let (title, dir) = self
+            .sidebar
+            .read(cx)
+            .sessions()
+            .get(&alert.session)
+            .map(|session| (session_title(session).to_string(), display_path(&session.cwd, std::env::home_dir().as_deref())))
+            .unwrap_or_default();
+        let (summary, body) = describe(&alert.kind, &title, &dir);
+        alerts::deliver(Notice { leaf, summary, body }, self.clicked.clone());
     }
 
     /// Forget alerts of the panes the user can see now.
