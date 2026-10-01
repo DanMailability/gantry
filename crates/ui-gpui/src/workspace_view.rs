@@ -16,7 +16,7 @@ use gpui::{
     Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
     PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
 };
-use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
+use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
 use app_core::session_tree::{Activation, ShellEntry};
 
@@ -101,6 +101,19 @@ struct Slot {
     _subscription: Subscription,
 }
 
+/// Where a taken-over session is resumed.
+enum TakeOverTarget {
+    /// A new tab, or a split of the focused pane.
+    NewPane {
+        /// The session's directory.
+        cwd: PathBuf,
+        /// As a split.
+        split: bool,
+    },
+    /// The finished leaf that last ran it (Continue).
+    Leaf(NodeId),
+}
+
 /// Root view of the ccm window.
 pub struct WorkspaceView {
     workspace: Workspace,
@@ -125,6 +138,8 @@ pub struct WorkspaceView {
     _sidebar_events: Subscription,
     /// The open launcher overlay.
     launcher: Option<(Entity<LauncherView>, Subscription)>,
+    /// Take-over requests waiting for the daemon, by session.
+    take_overs: HashMap<String, TakeOverTarget>,
     /// Status changes seen so far, to tell which ones alert.
     attention: AttentionTracker,
     /// Leaves with an alert the user has not seen yet.
@@ -178,6 +193,7 @@ impl WorkspaceView {
             resizing_sidebar: false,
             _sidebar_events: sidebar_events,
             launcher: None,
+            take_overs: HashMap::new(),
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
             _activation: activation,
@@ -268,8 +284,7 @@ impl WorkspaceView {
                         self.raise(alert, window, cx);
                     }
                 }
-                // Handled by the take-over flow (M5 Task 9).
-                ClientEvent::TakeOverResult { .. } => {}
+                ClientEvent::TakeOverResult { session, outcome } => self.on_take_over(session.clone(), outcome.clone(), window, cx),
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
                     for slot in self.slots.values() {
@@ -325,25 +340,110 @@ impl WorkspaceView {
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, cx));
     }
 
-    /// Continue / Restart a finished leaf — unless its session already runs: in another pane (show that
-    /// one) or outside ccm (do nothing; taking it over is a separate action).
+    /// Start `launch` in the finished `leaf`.
+    fn start_leaf(&mut self, leaf: NodeId, launch: PaneLaunch, cx: &mut Context<Self>) {
+        let Some(slot) = self.slots.get(&leaf) else { return };
+        if let Some(entry) = self.workspace.leaves.get_mut(&leaf) {
+            entry.launch = launch.clone();
+        }
+        slot.view.update(cx, |view, cx| view.restarting(launch, cx));
+        self.spawn_leaf(leaf, None, cx);
+        self.save(cx);
+    }
+
+    /// Continue / Restart a finished leaf. If its session already runs in another pane, show that one. If it runs
+    /// outside ccm on this host, offer to take it over.
     fn rerun_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
+        let session = entry.session.clone();
         match entry.rerun_with(self.sidebar.read(cx).sessions()) {
-            Rerun::Start(launch) => {
-                if let Some(entry) = self.workspace.leaves.get_mut(&leaf) {
-                    entry.launch = launch.clone();
-                }
-                self.slots[&leaf].view.update(cx, |view, cx| view.restarting(launch, cx));
-                self.spawn_leaf(leaf, None, cx);
-                self.save(cx);
-            }
+            Rerun::Start(launch) => self.start_leaf(leaf, launch, cx),
             Rerun::Focus(pane) => {
                 if let Some(running) = self.workspace.leaf_for_pane(pane) {
                     self.focus_leaf(running, window, cx);
                 }
             }
-            Rerun::Busy => {}
+            Rerun::Busy => {
+                let sessions = self.sidebar.read(cx).sessions();
+                let takeable = session.as_deref().and_then(|id| sessions.get(id)).is_some_and(|info| {
+                    matches!(info.state, SessionState::External { pid: Some(_) }) && info.cwd_exists
+                });
+                if let (true, Some(session)) = (takeable, session) {
+                    self.confirm_take_over(session, TakeOverTarget::Leaf(leaf), window, cx);
+                }
+            }
+        }
+    }
+
+    /// Ask before stopping the outside process running `session`; on yes, request it and remember where to resume.
+    fn confirm_take_over(&mut self, session: String, target: TakeOverTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.take_overs.contains_key(&session) {
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Take over this session?",
+            Some("The Claude running it outside ccm is stopped. Anything typed there but not sent is lost."),
+            &["Take over", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update_in(cx, |this, _, _| {
+                    this.client.take_over(&session, false);
+                    this.take_overs.insert(session, target);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn on_take_over(&mut self, session: String, outcome: TakeOverOutcome, window: &mut Window, cx: &mut Context<Self>) {
+        match outcome {
+            TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
+                Some(TakeOverTarget::NewPane { cwd, split }) => {
+                    let axis = split.then_some(Axis::Horizontal);
+                    self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
+                }
+                Some(TakeOverTarget::Leaf(leaf)) => {
+                    if let Some(launch) = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun(true)) {
+                        self.start_leaf(leaf, launch, cx);
+                        self.focus_leaf(leaf, window, cx);
+                    }
+                }
+                None => {}
+            },
+            TakeOverOutcome::StillRunning => {
+                if !self.take_overs.contains_key(&session) {
+                    return;
+                }
+                let answer = window.prompt(
+                    PromptLevel::Warning,
+                    "Claude is still running",
+                    Some("It did not stop within 5 seconds. Force quit stops it immediately."),
+                    &["Force quit", "Cancel"],
+                    cx,
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    let force = answer.await == Ok(0);
+                    let _ = this.update_in(cx, |this, _, _| {
+                        if force {
+                            this.client.take_over(&session, true);
+                        } else {
+                            this.take_overs.remove(&session);
+                        }
+                    });
+                })
+                .detach();
+            }
+            TakeOverOutcome::Failed { error } => {
+                self.take_overs.remove(&session);
+                let answer = window.prompt(PromptLevel::Critical, "Could not take over the session", Some(&error), &["OK"], cx);
+                cx.spawn(async move |_, _| {
+                    let _ = answer.await;
+                })
+                .detach();
+            }
         }
     }
 
@@ -475,8 +575,14 @@ impl WorkspaceView {
                         self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
                     }
                 },
+                Activation::TakeOver { session, cwd } => {
+                    let target = match self.workspace.leaf_for_session(&session) {
+                        Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
+                        _ => TakeOverTarget::NewPane { cwd, split },
+                    };
+                    self.confirm_take_over(session, target, window, cx);
+                }
                 Activation::ToggleDetails(_)
-                | Activation::TakeOver { .. }
                 | Activation::ToggleDir(_)
                 | Activation::ShowAll(_)
                 | Activation::Nothing => {}
