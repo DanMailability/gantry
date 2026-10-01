@@ -228,6 +228,34 @@ pub fn ready(docker: &impl Docker, registry: &mut Registry, host_folder: &Path) 
     Ok(container)
 }
 
+/// A shell script listing, from inside a container, every process carrying a `GANTRY_PANE` marker as
+/// `<pid> <marker>` lines. Used where the host cannot read those processes' environments (another user's, e.g. root).
+pub fn marked_script() -> String {
+    format!(
+        "for p in /proc/[0-9]*; do v=$({{ tr '\\0' '\\n' < $p/environ; }} 2>/dev/null | grep '^{PANE_MARKER}='); \
+         [ -n \"$v\" ] && echo \"${{p#/proc/}} ${{v#{PANE_MARKER}=}}\"; done; true"
+    )
+}
+
+/// The `<pid> <marker>` lines `marked_script` prints.
+pub fn parse_marked(output: &str) -> Vec<(u32, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (pid, marker) = line.split_once(' ')?;
+            Some((pid.parse().ok()?, marker.to_string()))
+        })
+        .collect()
+}
+
+/// A shell script that asks (SIGTERM), from inside a container, every process carrying `marker` to stop.
+pub fn stop_script(marker: &str) -> String {
+    let wanted = shell_quote(&format!("{PANE_MARKER}={marker}"));
+    format!(
+        "for p in /proc/[0-9]*; do {{ tr '\\0' '\\n' < $p/environ; }} 2>/dev/null | grep -qx {wanted} && kill -TERM ${{p#/proc/}}; done; true"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +463,15 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         registry.refresh(&docker).unwrap();
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn markers_are_listed_and_stopped_from_inside_a_container() {
+        let list = marked_script();
+        assert!(list.contains("GANTRY_PANE=") && list.contains("/proc/[0-9]*"), "{list}");
+        assert_eq!(parse_marked("12 i:3\n13 i:4\nnoise\n14\n"), vec![(12, "i:3".to_string()), (13, "i:4".into())]);
+        let stop = stop_script("i:3");
+        assert!(stop.contains("grep -qx 'GANTRY_PANE=i:3'") && stop.contains("kill -TERM"), "{stop}");
+        assert!(stop_script("it's").contains(r"'GANTRY_PANE=it'\''s'"));
     }
 }

@@ -98,25 +98,50 @@ fn numeric_dirs(proc_root: &Path) -> impl Iterator<Item = (u32, PathBuf)> {
 }
 
 /// The host process (under `proc_root`, normally `/proc`) that is `pid` in the pid namespace `domain` names
-/// (`…pid:[<inode>]`) and — when given — started at `start`. Processes whose entries cannot be read (another
-/// user's) are skipped.
+/// (`…pid:[<inode>]`) and — when given — started at `start`. Another user's process (a root container) hides its
+/// `ns/pid` link; it matches by innermost pid, start time (required then) and a Docker cgroup instead.
 pub fn find_namespaced(proc_root: &Path, domain: &str, pid: u32, start: Option<&str>) -> Option<Namespaced> {
     let namespace = &domain[domain.find("pid:[")?..];
     numeric_dirs(proc_root).find_map(|(host_pid, dir)| {
-        if std::fs::read_link(dir.join("ns/pid")).ok()?.as_os_str() != namespace {
-            return None;
-        }
-        let status = std::fs::read_to_string(dir.join("status")).ok()?;
-        let nspid = status.lines().find_map(|line| line.strip_prefix("NSpid:"))?;
-        if nspid.split_whitespace().last()?.parse::<u32>().ok()? != pid {
+        let same_namespace = match std::fs::read_link(dir.join("ns/pid")) {
+            Ok(link) if link.as_os_str() != namespace => return None,
+            Ok(_) => true,
+            Err(_) => false,
+        };
+        if inner_pid(&dir)? != pid {
             return None;
         }
         let stat = std::fs::read_to_string(dir.join("stat")).ok()?;
-        if start.is_some_and(|start| proc_start_time(&stat).as_deref() != Some(start)) {
+        let started = proc_start_time(&stat);
+        if start.is_some_and(|start| started.as_deref() != Some(start)) || (!same_namespace && start.is_none()) {
             return None;
         }
         let cgroup = std::fs::read_to_string(dir.join("cgroup")).ok();
-        Some(Namespaced { host_pid, container: cgroup.and_then(|c| crate::containers::container_from_cgroup(&c)) })
+        let container = cgroup.and_then(|c| crate::containers::container_from_cgroup(&c));
+        (same_namespace || container.is_some()).then_some(Namespaced { host_pid, container })
+    })
+}
+
+/// The innermost pid (`NSpid`'s last entry) of the process in `dir`.
+fn inner_pid(dir: &Path) -> Option<u32> {
+    let status = std::fs::read_to_string(dir.join("status")).ok()?;
+    status.lines().find_map(|line| line.strip_prefix("NSpid:"))?.split_whitespace().last()?.parse().ok()
+}
+
+/// The host pid and start time of the process that is `pid` inside the Docker container `container_id` (a full id
+/// or a prefix of one). Works for any user's processes.
+pub fn in_container(proc_root: &Path, container_id: &str, pid: u32) -> Option<(u32, Option<String>)> {
+    numeric_dirs(proc_root).find_map(|(host_pid, dir)| {
+        if inner_pid(&dir)? != pid {
+            return None;
+        }
+        let cgroup = std::fs::read_to_string(dir.join("cgroup")).ok()?;
+        let id = crate::containers::container_from_cgroup(&cgroup)?;
+        if !(id.starts_with(container_id) || container_id.starts_with(&id)) {
+            return None;
+        }
+        let start = std::fs::read_to_string(dir.join("stat")).ok().and_then(|stat| proc_start_time(&stat));
+        Some((host_pid, start))
     })
 }
 
@@ -278,5 +303,32 @@ mod tests {
         fake_process(root.path(), 11, "pid:[1]", &[11, 2], "6", "", &["GANTRY_PANES=no"]);
         let marked = processes_with_env(root.path(), "GANTRY_PANE");
         assert_eq!(marked, vec![Marked { pid: 10, value: "i:3".into(), start: Some("5".into()) }]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_container_process_is_found_by_nspid_start_and_a_docker_cgroup() {
+        // Another user's process: `ns/pid` and `environ` cannot be read, but status, stat and cgroup can.
+        let root = tempfile::tempdir().unwrap();
+        fake_process(root.path(), 900, "pid:[1]", &[900, 42], "77", "0::/system.slice/docker-beef.scope\n", &[]);
+        std::fs::remove_file(root.path().join("900/ns/pid")).unwrap();
+        fake_process(root.path(), 901, "pid:[1]", &[901, 43], "78", "0::/user.slice\n", &[]);
+        std::fs::remove_file(root.path().join("901/ns/pid")).unwrap();
+        let found = find_namespaced(root.path(), "linux::pid:[4026533220]", 42, Some("77")).unwrap();
+        assert_eq!((found.host_pid, found.container.as_deref()), (900, Some("beef")));
+        // Without a start time to check, or outside a container, nothing matches.
+        assert!(find_namespaced(root.path(), "linux::pid:[4026533220]", 42, None).is_none());
+        assert!(find_namespaced(root.path(), "linux::pid:[4026533220]", 43, Some("78")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_containers_process_is_found_by_its_inner_pid() {
+        let root = tempfile::tempdir().unwrap();
+        fake_process(root.path(), 900, "pid:[1]", &[900, 42], "77", "0::/system.slice/docker-beef01.scope\n", &[]);
+        fake_process(root.path(), 901, "pid:[1]", &[901, 42], "78", "0::/system.slice/docker-cafe.scope\n", &[]);
+        assert_eq!(in_container(root.path(), "beef01", 42), Some((900, Some("77".into()))));
+        assert_eq!(in_container(root.path(), "beef", 42), Some((900, Some("77".into()))));
+        assert_eq!(in_container(root.path(), "beef01", 7), None);
     }
 }

@@ -105,7 +105,7 @@ pub fn container_from_cgroup(cgroup: &str) -> Option<String> {
         let path = line.splitn(3, ':').nth(2)?;
         let last = path.rsplit('/').next()?;
         if let Some(id) = last.strip_prefix("docker-").and_then(|rest| rest.strip_suffix(".scope")) {
-            return Some(id.into());
+            return (!id.is_empty()).then(|| id.into());
         }
         let (_, rest) = path.split_once("/docker/")?;
         rest.split('/').next().filter(|id| !id.is_empty()).map(Into::into)
@@ -118,6 +118,11 @@ pub trait Docker {
     fn list(&self) -> Result<Vec<Container>, String>;
     /// Start a stopped container and wait until it runs.
     fn start(&self, id: &str) -> Result<(), String>;
+    /// Run the shell `script` as root inside the container `id`; its output.
+    fn run_as_root(&self, id: &str, script: &str) -> Result<String, String> {
+        let _ = (id, script);
+        Err("not supported".into())
+    }
 }
 
 /// The `docker` command-line tool.
@@ -187,6 +192,10 @@ impl Docker for DockerCli {
     fn start(&self, id: &str) -> Result<(), String> {
         self.run(&["start", id], START_TIMEOUT).map(|_| ())
     }
+
+    fn run_as_root(&self, id: &str, script: &str) -> Result<String, String> {
+        self.run(&["exec", "-u", "root", id, "sh", "-c", script], LOOKUP_TIMEOUT)
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +254,7 @@ mod tests {
         assert_eq!(container_from_cgroup("0::/system.slice/docker-4a31e6.scope\n").as_deref(), Some("4a31e6"));
         assert_eq!(container_from_cgroup("12:pids:/docker/4a31e6\n1:name=systemd:/docker/4a31e6\n").as_deref(), Some("4a31e6"));
         assert_eq!(container_from_cgroup("0::/user.slice/user-1000.slice/session-2.scope\n"), None);
+        assert_eq!(container_from_cgroup("0::/system.slice/docker-.scope\n"), None);
     }
 
     #[test]

@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use app_core::term_state::TermState;
-use claude_index::containers::{DockerCli, to_container};
-use claude_index::host::{Marked, processes_with_env};
+use claude_index::containers::{Docker, DockerCli, to_container};
+use claude_index::host::{Marked, in_container, processes_with_env};
 use claude_index::index::{IndexState, SessionRecord};
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
@@ -60,6 +60,8 @@ struct Pane {
     start: Option<String>,
     /// Host folder of the dev container it runs in.
     container: Option<PathBuf>,
+    /// That container's id (when it started).
+    container_id: Option<String>,
     last_focused: u64,
     needs_resync: bool,
 }
@@ -96,6 +98,8 @@ struct State {
     marked: HashMap<u32, PaneId>,
     /// Container processes already checked and found carrying no marker of ours.
     unmarked: HashSet<u32>,
+    /// Containers to look inside for this daemon's markers (processes the host cannot read, e.g. root's).
+    probe_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// When unknown container ids last caused a Docker lookup.
     last_unknown_refresh: Option<Instant>,
     /// Whether "Docker is unavailable" was logged already.
@@ -200,16 +204,26 @@ impl State {
             return;
         }
         let found = pane_marks(&processes_with_env(Path::new("/proc"), PANE_MARKER), &self.instance, &container_panes);
+        let mut probe: HashSet<String> = HashSet::new();
         for pid in live {
             match found.get(&pid) {
                 Some(pane) => {
                     self.marked.insert(pid, *pane);
                 }
                 None => {
-                    if !self.marked.contains_key(&pid) {
-                        self.unmarked.insert(pid);
+                    if !self.marked.contains_key(&pid) && self.unmarked.insert(pid) {
+                        // Not readable here (another user's process): look inside its container, if one of our panes
+                        // runs there.
+                        let container = records.iter().find(|r| r.state == IndexState::InContainer { pid: Some(pid) }).and_then(|r| r.container_id.clone());
+                        let ours = |id: &str| panes.values().filter_map(|p| p.container_id.as_deref()).any(|c| c.starts_with(id) || id.starts_with(c));
+                        probe.extend(container.filter(|id| ours(id)));
                     }
                 }
+            }
+        }
+        if let Some(tx) = &self.probe_tx {
+            for id in probe {
+                let _ = tx.send(id);
             }
         }
     }
@@ -250,6 +264,16 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         docker: options.docker,
     });
     refresh_containers(&shared);
+    let probes = shared.docker.is_some().then(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        shared.lock().probe_tx = Some(tx);
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            while let Some(container) = rx.recv().await {
+                probe_container(&shared, container);
+            }
+        })
+    });
     let idle = {
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -313,6 +337,9 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     idle.abort();
     ticker.abort();
     if let Some(task) = sessions {
+        task.abort();
+    }
+    if let Some(task) = probes {
         task.abort();
     }
     let mut state = shared.lock();
@@ -404,12 +431,18 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
 
 fn stop_all(shared: &Shared) {
     let mut state = shared.lock();
-    let container_panes: Vec<PaneId> = state.panes.iter().filter(|(_, p)| p.container.is_some()).map(|(id, _)| *id).collect();
-    for pane in container_panes {
-        stop_container_processes(&marker(&shared.instance, pane));
-    }
+    let inside: Vec<(String, String)> = state
+        .panes
+        .iter()
+        .filter(|(_, p)| p.container.is_some())
+        .filter_map(|(id, pane)| stop_container_processes(shared, *id, pane))
+        .collect();
     state.panes.clear();
     drop(state);
+    // The daemon exits next: stop the rest from inside their containers before it does.
+    for (container, marker) in inside {
+        stop_inside(shared, &container, &marker);
+    }
     shared.shutdown.notify_one();
 }
 
@@ -456,15 +489,57 @@ fn pane_marks(marked: &[Marked], instance: &str, panes: &[PaneId]) -> HashMap<u3
         .collect()
 }
 
-/// Ask the processes a container pane started (inside the container) to stop. Killing the `docker exec` client
-/// alone does not end them.
-fn stop_container_processes(marker: &str) {
+/// Ask the processes a container pane started (inside the container) to stop; killing the `docker exec` client alone
+/// does not end them. Processes this user can see are signalled from the host. When none are (another user's, e.g.
+/// root's), returns the container and marker to stop them from inside (`stop_inside`).
+fn stop_container_processes(shared: &Shared, pane_id: PaneId, pane: &Pane) -> Option<(String, String)> {
+    let marker = marker(&shared.instance, pane_id);
     let host = LocalHost::new();
-    for target in marked_targets(&processes_with_env(Path::new("/proc"), PANE_MARKER), marker) {
-        if let Err(err) = take_over::signal(&target, false, &host) {
+    let targets = marked_targets(&processes_with_env(Path::new("/proc"), PANE_MARKER), &marker);
+    for target in &targets {
+        if let Err(err) = take_over::signal(target, false, &host) {
             tracing::warn!("could not stop container process {}: {err}", target.pid);
         }
     }
+    targets.is_empty().then(|| pane.container_id.clone().map(|id| (id, marker))).flatten()
+}
+
+/// Ask every process carrying `marker` inside `container` to stop, as root inside it (Docker, up to 3 s).
+fn stop_inside(shared: &Shared, container: &str, marker: &str) {
+    let Some(program) = shared.docker.clone() else { return };
+    if let Err(err) = (DockerCli { program }).run_as_root(container, &containers::stop_script(marker)) {
+        tracing::warn!("could not stop the pane's processes in container {container}: {err}");
+    }
+}
+
+/// Look inside `container` for processes carrying this daemon's markers (the host cannot read them), and mark them.
+fn probe_container(shared: &Arc<Shared>, container: String) {
+    let Some(program) = shared.docker.clone() else { return };
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = match (DockerCli { program }).run_as_root(&container, &containers::marked_script()) {
+            Ok(output) => output,
+            Err(err) => return tracing::info!("could not look inside container {container}: {err}"),
+        };
+        let marked: Vec<Marked> = containers::parse_marked(&output)
+            .into_iter()
+            .filter_map(|(inner, value)| {
+                let (pid, start) = in_container(Path::new("/proc"), &container, inner)?;
+                Some(Marked { pid, value, start })
+            })
+            .collect();
+        let mut state = shared.lock();
+        let panes: Vec<PaneId> = state.panes.iter().filter(|(_, p)| p.container.is_some()).map(|(id, _)| *id).collect();
+        let found = pane_marks(&marked, &state.instance, &panes);
+        if found.is_empty() {
+            return;
+        }
+        for (pid, pane) in found {
+            state.unmarked.remove(&pid);
+            state.marked.insert(pid, pane);
+        }
+        state.publish_sessions(false);
+    });
 }
 
 /// Stop the outside process running `session`, then report. On success, the session is published as closed first
@@ -552,8 +627,10 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         ClientMessage::FindContainer { request, dir } => find_container(shared, request, dir),
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
-            if state.panes.get(&pane).is_some_and(|p| p.container.is_some()) {
-                stop_container_processes(&marker(&shared.instance, pane));
+            let inside = state.panes.get(&pane).filter(|p| p.container.is_some()).and_then(|p| stop_container_processes(shared, pane, p));
+            if let Some((container, marker)) = inside {
+                let shared = shared.clone();
+                tokio::task::spawn_blocking(move || stop_inside(&shared, &container, &marker));
             }
             if let Some(p) = state.panes.get_mut(&pane) {
                 let _ = p.pty.kill();
@@ -634,7 +711,7 @@ fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: S
             spec,
             cwd,
             |id| containers::exec_command(&container, &inner_cwd, &program, &args, &marker(&instance, id)),
-            Some(folder),
+            Some((folder, container.id.clone())),
         );
     });
 }
@@ -647,7 +724,7 @@ fn start_pane(
     spec: SpawnRequest,
     cwd: PathBuf,
     command: impl FnOnce(PaneId) -> (String, Vec<String>),
-    container: Option<PathBuf>,
+    container: Option<(PathBuf, String)>,
 ) {
     let session_arg = claude_session(&spec.program, &spec.args).map(String::from);
     let mut state = shared.lock();
@@ -681,7 +758,8 @@ fn start_pane(
         cwd: cwd.clone(),
         session_arg,
         start,
-        container,
+        container_id: container.as_ref().map(|(_, id)| id.clone()),
+        container: container.map(|(folder, _)| folder),
         last_focused: state.focus_seq,
         needs_resync: false,
     };
