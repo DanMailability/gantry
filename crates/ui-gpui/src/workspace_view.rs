@@ -7,13 +7,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use app_core::layout_store;
-use app_core::split_tree::{Axis, NodeId, Rect};
+use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::workspace::{PaneLaunch, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::pty::default_shell;
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, IntoElement, PromptLevel, Render, Subscription, Task, Window, div,
-    prelude::*, px, relative, rgb,
+    Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
+    PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
 };
 use protocol::message::PaneId;
 
@@ -28,6 +28,60 @@ const BACKGROUND: u32 = 0x11141a;
 pub(crate) const TAB_BAR_HEIGHT: f32 = 34.0;
 /// Largest amount of output routed per UI update, so input and rendering keep running during a flood.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
+
+#[allow(missing_docs)]
+mod workspace_actions {
+    gpui::actions!(
+        workspace,
+        [
+            NewClaudeTab, NewShellTab, SplitRightClaude, SplitRightShell, SplitDownClaude, SplitDownShell, ClosePane,
+            FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
+            ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
+            ActivateTab8, ActivateTab9
+        ]
+    );
+}
+use workspace_actions::*;
+
+/// Register workspace shortcuts: `Ctrl+Shift+…` on Linux/Windows, `Cmd+…` on macOS.
+pub fn bind_keys(cx: &mut gpui::App) {
+    cx.bind_keys(key_bindings());
+}
+
+fn key_bindings() -> Vec<gpui::KeyBinding> {
+    use gpui::KeyBinding;
+    #[cfg(target_os = "macos")]
+    let (m, prev_tab, next_tab, tab_n) = ("cmd", "cmd-shift-[", "cmd-shift-]", "cmd");
+    #[cfg(not(target_os = "macos"))]
+    let (m, prev_tab, next_tab, tab_n) = ("ctrl-shift", "ctrl-pageup", "ctrl-pagedown", "alt");
+    let context = Some("Workspace");
+    vec![
+        KeyBinding::new(&format!("{m}-t"), NewClaudeTab, context),
+        KeyBinding::new(&format!("{m}-alt-t"), NewShellTab, context),
+        KeyBinding::new(&format!("{m}-d"), SplitRightClaude, context),
+        KeyBinding::new(&format!("{m}-alt-d"), SplitRightShell, context),
+        KeyBinding::new(&format!("{m}-e"), SplitDownClaude, context),
+        KeyBinding::new(&format!("{m}-alt-e"), SplitDownShell, context),
+        KeyBinding::new(&format!("{m}-w"), ClosePane, context),
+        KeyBinding::new(&format!("{m}-left"), FocusLeft, context),
+        KeyBinding::new(&format!("{m}-right"), FocusRight, context),
+        KeyBinding::new(&format!("{m}-up"), FocusUp, context),
+        KeyBinding::new(&format!("{m}-down"), FocusDown, context),
+        KeyBinding::new(prev_tab, PreviousTab, context),
+        KeyBinding::new(next_tab, NextTab, context),
+        KeyBinding::new(&format!("{m}-pageup"), MoveTabLeft, context),
+        KeyBinding::new(&format!("{m}-pagedown"), MoveTabRight, context),
+        KeyBinding::new(&format!("{tab_n}-1"), ActivateTab1, context),
+        KeyBinding::new(&format!("{tab_n}-2"), ActivateTab2, context),
+        KeyBinding::new(&format!("{tab_n}-3"), ActivateTab3, context),
+        KeyBinding::new(&format!("{tab_n}-4"), ActivateTab4, context),
+        KeyBinding::new(&format!("{tab_n}-5"), ActivateTab5, context),
+        KeyBinding::new(&format!("{tab_n}-6"), ActivateTab6, context),
+        KeyBinding::new(&format!("{tab_n}-7"), ActivateTab7, context),
+        KeyBinding::new(&format!("{tab_n}-8"), ActivateTab8, context),
+        KeyBinding::new(&format!("{tab_n}-9"), ActivateTab9, context),
+    ]
+}
 
 struct Slot {
     view: Entity<TerminalView>,
@@ -46,6 +100,10 @@ pub struct WorkspaceView {
     default_cwd: PathBuf,
     focus_handle: FocusHandle,
     prompting: Rc<Cell<bool>>,
+    /// Divider being dragged.
+    dragging: Option<Divider>,
+    /// Window bounds of the visible tab's pane area (for divider drags).
+    content_bounds: Bounds<Pixels>,
     _events: Task<()>,
 }
 
@@ -81,6 +139,8 @@ impl WorkspaceView {
             default_cwd,
             focus_handle: cx.focus_handle(),
             prompting: Rc::new(Cell::new(false)),
+            dragging: None,
+            content_bounds: Bounds::default(),
             _events: events_task,
         };
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
@@ -275,6 +335,135 @@ impl WorkspaceView {
         false
     }
 
+    fn new_claude_tab(&mut self, _: &NewClaudeTab, window: &mut Window, cx: &mut Context<Self>) { self.open(true, None, window, cx) }
+    fn new_shell_tab(&mut self, _: &NewShellTab, window: &mut Window, cx: &mut Context<Self>) { self.open(false, None, window, cx) }
+    fn split_right_claude(&mut self, _: &SplitRightClaude, window: &mut Window, cx: &mut Context<Self>) { self.open(true, Some(Axis::Horizontal), window, cx) }
+    fn split_right_shell(&mut self, _: &SplitRightShell, window: &mut Window, cx: &mut Context<Self>) { self.open(false, Some(Axis::Horizontal), window, cx) }
+    fn split_down_claude(&mut self, _: &SplitDownClaude, window: &mut Window, cx: &mut Context<Self>) { self.open(true, Some(Axis::Vertical), window, cx) }
+    fn split_down_shell(&mut self, _: &SplitDownShell, window: &mut Window, cx: &mut Context<Self>) { self.open(false, Some(Axis::Vertical), window, cx) }
+    fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(leaf) = self.workspace.focused() {
+            self.confirm_close(vec![leaf], window, cx);
+        }
+    }
+    fn focus_dir(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.focus_direction(direction).is_some() {
+            self.focus_current(window, cx);
+            self.save();
+        }
+    }
+    fn focus_left(&mut self, _: &FocusLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_dir(Direction::Left, window, cx)
+    }
+    fn focus_right(&mut self, _: &FocusRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_dir(Direction::Right, window, cx)
+    }
+    fn focus_up(&mut self, _: &FocusUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_dir(Direction::Up, window, cx)
+    }
+    fn focus_down(&mut self, _: &FocusDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_dir(Direction::Down, window, cx)
+    }
+    fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.cycle_tab(delta);
+        self.focus_current(window, cx);
+        self.save();
+    }
+    fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle(-1, window, cx)
+    }
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle(1, window, cx)
+    }
+    fn move_tab_left(&mut self, _: &MoveTabLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.move_tab(-1);
+        self.save();
+        cx.notify();
+    }
+    fn move_tab_right(&mut self, _: &MoveTabRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.move_tab(1);
+        self.save();
+        cx.notify();
+    }
+    fn activate_tab_1(&mut self, _: &ActivateTab1, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(0, window, cx)
+    }
+    fn activate_tab_2(&mut self, _: &ActivateTab2, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(1, window, cx)
+    }
+    fn activate_tab_3(&mut self, _: &ActivateTab3, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(2, window, cx)
+    }
+    fn activate_tab_4(&mut self, _: &ActivateTab4, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(3, window, cx)
+    }
+    fn activate_tab_5(&mut self, _: &ActivateTab5, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(4, window, cx)
+    }
+    fn activate_tab_6(&mut self, _: &ActivateTab6, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(5, window, cx)
+    }
+    fn activate_tab_7(&mut self, _: &ActivateTab7, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(6, window, cx)
+    }
+    fn activate_tab_8(&mut self, _: &ActivateTab8, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(7, window, cx)
+    }
+    fn activate_tab_9(&mut self, _: &ActivateTab9, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(8, window, cx)
+    }
+
+    /// Close `leaves`, asking first if any still runs a process.
+    fn confirm_close(&mut self, leaves: Vec<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
+        let running = self.running_panes(&leaves, cx);
+        if running == 0 {
+            for leaf in leaves {
+                self.close_leaf(leaf, window, cx);
+            }
+            return;
+        }
+        let (title, detail) = if leaves.len() == 1 {
+            ("Close pane?", "Its process is still running.".to_string())
+        } else {
+            ("Close tab?", format!("{running} running process(es) will be stopped."))
+        };
+        let answer = window.prompt(PromptLevel::Warning, title, Some(&detail), &["Close", "Cancel"], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    for leaf in leaves {
+                        this.close_leaf(leaf, window, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn drag_divider(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(divider) = self.dragging else { return };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.dragging = None;
+            self.save();
+            return;
+        }
+        let bounds = self.content_bounds;
+        let ratio = match divider.axis {
+            Axis::Horizontal => {
+                let x = f32::from(event.position.x - bounds.origin.x) / f32::from(bounds.size.width);
+                (x - divider.area.x) / divider.area.w
+            }
+            Axis::Vertical => {
+                let y = f32::from(event.position.y - bounds.origin.y) / f32::from(bounds.size.height);
+                (y - divider.area.y) / divider.area.h
+            }
+        };
+        if ratio.is_finite() {
+            self.workspace.set_ratio(divider.split, ratio);
+            cx.notify();
+        }
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let titles: Vec<String> = self
             .workspace
@@ -307,6 +496,19 @@ impl WorkspaceView {
                     .text_color(rgb(if active { TEXT } else { MUTED }))
                     .when(active, |tab| tab.bg(rgb(BACKGROUND)).border_t_2().border_color(rgb(ACCENT)))
                     .child(div().truncate().child(title))
+                    .child(
+                        div()
+                            .id(("close-tab", index))
+                            .ml_2()
+                            .text_color(rgb(MUTED))
+                            .hover(|style| style.text_color(rgb(ACCENT)))
+                            .child("✕")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                let leaves = this.workspace.tabs.get(index).map(|tab| tab.root.leaves()).unwrap_or_default();
+                                this.confirm_close(leaves, window, cx);
+                            })),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
             }))
             .child(tab_bar_button("new-claude", "+ Claude", cx.listener(|this, _, window, cx| this.open(true, None, window, cx))))
@@ -336,6 +538,12 @@ impl WorkspaceView {
             .flex_1()
             .w_full()
             .bg(rgb(BORDER))
+            .child({
+                let view = cx.entity();
+                canvas(move |bounds, _, cx| view.update(cx, |this, _| this.content_bounds = bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+            })
             .children(tab.root.layout(Rect::UNIT).into_iter().filter_map(|(leaf, rect)| {
                 let view = self.slots.get(&leaf)?.view.clone();
                 let focused = leaf == tab.focused;
@@ -358,6 +566,35 @@ impl WorkspaceView {
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
+            }))
+            .children(tab.root.dividers(Rect::UNIT).into_iter().map(|divider| {
+                let handle = div().id(("divider", divider.split as usize)).absolute();
+                let handle = match divider.axis {
+                    Axis::Horizontal => handle
+                        .left(relative(divider.area.x + divider.area.w * divider.ratio))
+                        .top(relative(divider.area.y))
+                        .h(relative(divider.area.h))
+                        .w(px(6.))
+                        .ml(px(-3.))
+                        .cursor(CursorStyle::ResizeLeftRight),
+                    Axis::Vertical => handle
+                        .top(relative(divider.area.y + divider.area.h * divider.ratio))
+                        .left(relative(divider.area.x))
+                        .w(relative(divider.area.w))
+                        .h(px(6.))
+                        .mt(px(-3.))
+                        .cursor(CursorStyle::ResizeUpDown),
+                };
+                handle.on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    this.dragging = Some(divider);
+                    cx.stop_propagation();
+                }))
+            }))
+            .on_mouse_move(cx.listener(Self::drag_divider))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
+                if this.dragging.take().is_some() {
+                    this.save();
+                }
             }))
             .into_any_element()
     }
@@ -398,11 +635,79 @@ impl Render for WorkspaceView {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::new_claude_tab))
+            .on_action(cx.listener(Self::new_shell_tab))
+            .on_action(cx.listener(Self::split_right_claude))
+            .on_action(cx.listener(Self::split_right_shell))
+            .on_action(cx.listener(Self::split_down_claude))
+            .on_action(cx.listener(Self::split_down_shell))
+            .on_action(cx.listener(Self::close_pane))
+            .on_action(cx.listener(Self::focus_left))
+            .on_action(cx.listener(Self::focus_right))
+            .on_action(cx.listener(Self::focus_up))
+            .on_action(cx.listener(Self::focus_down))
+            .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::move_tab_left))
+            .on_action(cx.listener(Self::move_tab_right))
+            .on_action(cx.listener(Self::activate_tab_1))
+            .on_action(cx.listener(Self::activate_tab_2))
+            .on_action(cx.listener(Self::activate_tab_3))
+            .on_action(cx.listener(Self::activate_tab_4))
+            .on_action(cx.listener(Self::activate_tab_5))
+            .on_action(cx.listener(Self::activate_tab_6))
+            .on_action(cx.listener(Self::activate_tab_7))
+            .on_action(cx.listener(Self::activate_tab_8))
+            .on_action(cx.listener(Self::activate_tab_9))
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(BACKGROUND))
             .child(self.render_tab_bar(cx))
             .child(self.render_active_tab(cx))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use gpui::Keystroke;
+
+    fn action_for(keys: &str) -> Option<&'static str> {
+        let keystroke = Keystroke::parse(keys).unwrap();
+        key_bindings()
+            .into_iter()
+            .find(|binding| binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false))
+            .map(|binding| binding.action().name())
+    }
+
+    #[test]
+    fn workspace_shortcuts_match_the_spec() {
+        for (keys, action) in [
+            ("ctrl-shift-t", "workspace::NewClaudeTab"),
+            ("ctrl-shift-alt-t", "workspace::NewShellTab"),
+            ("ctrl-shift-d", "workspace::SplitRightClaude"),
+            ("ctrl-shift-alt-d", "workspace::SplitRightShell"),
+            ("ctrl-shift-e", "workspace::SplitDownClaude"),
+            ("ctrl-shift-alt-e", "workspace::SplitDownShell"),
+            ("ctrl-shift-w", "workspace::ClosePane"),
+            ("ctrl-shift-left", "workspace::FocusLeft"),
+            ("ctrl-shift-down", "workspace::FocusDown"),
+            ("ctrl-pageup", "workspace::PreviousTab"),
+            ("ctrl-pagedown", "workspace::NextTab"),
+            ("ctrl-shift-pageup", "workspace::MoveTabLeft"),
+            ("ctrl-shift-pagedown", "workspace::MoveTabRight"),
+            ("alt-1", "workspace::ActivateTab1"),
+            ("alt-9", "workspace::ActivateTab9"),
+        ] {
+            assert_eq!(action_for(keys), Some(action), "{keys}");
+        }
+    }
+
+    #[test]
+    fn plain_control_keys_stay_with_the_pane() {
+        for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab"] {
+            assert_eq!(action_for(keys), None, "{keys}");
+        }
     }
 }

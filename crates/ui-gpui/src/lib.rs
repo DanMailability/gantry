@@ -30,6 +30,7 @@ impl Render for Notice {
 pub fn run(launch: Launch) {
     gpui_platform::application().run(move |cx: &mut App| {
         terminal_view::bind_keys(cx);
+        workspace_view::bind_keys(cx);
         let paths = Paths::for_profile(&current_profile());
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
         let options = WindowOptions {
