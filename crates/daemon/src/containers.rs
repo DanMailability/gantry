@@ -1,6 +1,7 @@
 //! The daemon's knowledge of dev containers: the last Docker lookup, mappings remembered after a container is
 //! removed, and which sessions are container sessions.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use claude_index::containers::{Container, Docker, Mount, to_container, to_host};
@@ -26,11 +27,30 @@ pub struct Mapping {
     pub mounts: Vec<Mount>,
 }
 
-/// Dev containers as last seen, plus every mapping seen before (saved in `file`).
+/// The dev container a session ran in, remembered after it closes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPlace {
+    /// That container's id.
+    pub container_id: String,
+    /// The host folder it served.
+    pub host_folder: PathBuf,
+}
+
+/// What `containers.json` holds.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Saved {
+    #[serde(default)]
+    mappings: Vec<Mapping>,
+    #[serde(default)]
+    sessions: BTreeMap<String, SessionPlace>,
+}
+
+/// Dev containers as last seen, every mapping seen before, and the container each session ran in (saved in `file`).
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     containers: Vec<Container>,
     mappings: Vec<Mapping>,
+    sessions: BTreeMap<String, SessionPlace>,
     file: Option<PathBuf>,
 }
 
@@ -41,17 +61,39 @@ fn same_container(a: &str, b: &str) -> bool {
 impl Registry {
     /// Start from the mappings saved in `file` (missing or unreadable: none).
     pub fn load(file: Option<PathBuf>) -> Registry {
-        let mappings = file
+        let saved: Saved = file
             .as_deref()
             .and_then(|file| std::fs::read(file).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        Registry { containers: Vec::new(), mappings, file }
+        Registry { containers: Vec::new(), mappings: saved.mappings, sessions: saved.sessions, file }
+    }
+
+    /// Remember the container a running session's process is in (from the index), so it reopens there after it
+    /// closes. Whether anything changed.
+    pub fn remember(&mut self, record: &SessionRecord) -> bool {
+        match (&record.state, record.container_id.as_deref()) {
+            (IndexState::InContainer { .. }, Some(id)) => self.remember_session(&record.id, id),
+            _ => false,
+        }
+    }
+
+    /// Remember that `session` runs in the container `container_id` (a known one). Whether anything changed.
+    pub fn remember_session(&mut self, session: &str, container_id: &str) -> bool {
+        let Some(mapping) = self.mappings.iter().rev().find(|m| same_container(&m.container_id, container_id)) else { return false };
+        let place = SessionPlace { container_id: mapping.container_id.clone(), host_folder: mapping.host_folder.clone() };
+        if self.sessions.get(session) == Some(&place) {
+            return false;
+        }
+        self.sessions.insert(session.into(), place);
+        self.save();
+        true
     }
 
     /// Ask Docker for the current containers, remember their mappings (oldest first) and save them.
     pub fn refresh(&mut self, docker: &impl Docker) -> Result<(), String> {
         self.containers = docker.list()?;
+        let before = self.mappings.clone();
         for c in &self.containers {
             self.mappings.retain(|m| m.container_id != c.id);
             self.mappings.push(Mapping {
@@ -62,7 +104,9 @@ impl Registry {
             });
         }
         self.mappings.sort_by(|a, b| a.created.cmp(&b.created));
-        self.save();
+        if self.mappings != before {
+            self.save();
+        }
         Ok(())
     }
 
@@ -73,7 +117,8 @@ impl Registry {
                 std::fs::create_dir_all(dir)?;
             }
             let tmp = file.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_vec_pretty(&self.mappings)?)?;
+            let saved = Saved { mappings: self.mappings.clone(), sessions: self.sessions.clone() };
+            std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
             std::fs::rename(tmp, file)
         };
         if let Err(err) = write() {
@@ -92,10 +137,21 @@ impl Registry {
     }
 
     /// Whether `record` is a container session, and if so where, plus its directory on this host when known. It is
-    /// one when a container process runs it, or when its directory lies under a remembered mapping (or
-    /// `/workspaces`) and does not exist on this host. Its own container's mapping wins, else the newest that covers
-    /// its directory.
+    /// one when it was seen running in a container (remembered), when a container process runs it, or when its
+    /// directory lies under a remembered mapping (or `/workspaces`) and does not exist on this host. Its own
+    /// container's mapping wins, else the newest that covers its directory.
     pub fn place(&self, record: &SessionRecord, host_dir_exists: &dyn Fn(&Path) -> bool) -> Option<(ContainerPlace, Option<PathBuf>)> {
+        // A session seen running in a container belongs to it, wherever its directory is.
+        if let Some(seen) = self.sessions.get(&record.id) {
+            let mapping = self
+                .mappings
+                .iter()
+                .rev()
+                .find(|m| m.container_id == seen.container_id)
+                .or_else(|| self.mappings.iter().rev().find(|m| m.host_folder == seen.host_folder));
+            let host_cwd = mapping.and_then(|m| to_host(&m.mounts, &record.cwd));
+            return Some((ContainerPlace { host_folder: Some(seen.host_folder.clone()), path: record.cwd.clone() }, host_cwd));
+        }
         let own = record.container_id.as_deref().and_then(|id| self.mappings.iter().rev().find(|m| same_container(&m.container_id, id)));
         let mapping = own
             .filter(|m| to_host(&m.mounts, &record.cwd).is_some())
@@ -344,5 +400,40 @@ mod tests {
     fn docker_failures_reach_the_pane() {
         let err = ready(&FailingDocker, &mut Registry::load(None), Path::new("/h/app")).unwrap_err();
         assert!(err.contains("Cannot connect"), "{err}");
+    }
+
+    #[test]
+    fn a_session_seen_in_a_container_reopens_there_after_it_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("containers.json");
+        let mut registry = Registry::load(Some(file.clone()));
+        registry
+            .refresh(&FakeDocker(vec![
+                container("old", "/home/u/a/app", "/workspaces/app", "2026-01-01"),
+                container("new", "/home/u/b/app", "/workspaces/app", "2026-06-01"),
+                // A container that mounts the project at its host path.
+                container("same", "/home/u/c", "/home/u/c", "2026-03-01"),
+            ]))
+            .unwrap();
+        // While running, the index names the container (from the process's cgroup); once closed it does not.
+        assert!(registry.remember(&record("/workspaces/app", IndexState::InContainer { pid: Some(5) }, Some("old"))));
+        assert!(registry.remember(&SessionRecord { id: "t".into(), ..record("/home/u/c", IndexState::InContainer { pid: Some(6) }, Some("same")) }));
+        let later = Registry::load(Some(file));
+        let closed = later.place(&record("/workspaces/app", IndexState::Closed, None), &|_| false).unwrap();
+        assert_eq!((closed.0.host_folder, closed.1), (Some("/home/u/a/app".into()), Some("/home/u/a/app".into())));
+        let at_host_path = SessionRecord { id: "t".into(), ..record("/home/u/c", IndexState::Closed, None) };
+        assert_eq!(later.place(&at_host_path, &|_| true).unwrap().0.host_folder, Some("/home/u/c".into()));
+    }
+
+    #[test]
+    fn an_unchanged_refresh_does_not_rewrite_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("containers.json");
+        let mut registry = Registry::load(Some(file.clone()));
+        let docker = FakeDocker(vec![container("c1", "/h/app", "/workspaces/app", "1")]);
+        registry.refresh(&docker).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        registry.refresh(&docker).unwrap();
+        assert!(!file.exists());
     }
 }

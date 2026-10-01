@@ -290,6 +290,10 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
                     state.last_unknown_refresh = Some(Instant::now());
                     refresh_containers(&shared);
                 }
+                // Sessions seen in a container reopen there after they close.
+                for record in records.iter().flat_map(|r| r.iter()) {
+                    state.registry.remember(record);
+                }
                 // The first scan is the first list a connected client gets.
                 let first = state.records.is_none();
                 state.records = records;
@@ -608,7 +612,10 @@ fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: S
             (registry, ready, folder)
         })
         .await;
-        let Ok((registry, ready, folder)) = looked_up else { return fail(&shared, "the Docker lookup failed".into()) };
+        let Ok((mut registry, ready, folder)) = looked_up else { return fail(&shared, "the Docker lookup failed".into()) };
+        if let (Ok(container), Some(session)) = (&ready, claude_session(&spec.program, &spec.args)) {
+            registry.remember_session(session, &container.id);
+        }
         shared.lock().registry = registry;
         let container = match ready {
             Ok(container) => container,
