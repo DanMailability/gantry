@@ -2,6 +2,7 @@
 
 pub mod terminal_view;
 pub mod workspace_view;
+mod window_frame;
 
 use std::path::PathBuf;
 
@@ -36,6 +37,8 @@ pub fn run(launch: Launch) {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions { title: Some("ccm".into()), ..Default::default() }),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Client),
             ..Default::default()
         };
         match DaemonClient::connect(&paths, spawn_detached_daemon) {

@@ -12,12 +12,13 @@ use app_core::workspace::{PaneLaunch, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::pty::default_shell;
 use gpui::{
-    Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
+    Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
     PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
 };
 use protocol::message::PaneId;
 
 use crate::terminal_view::{PaneEvent, TerminalView};
+use crate::window_frame;
 
 pub(crate) const PANEL: u32 = 0x1a1e26;
 pub(crate) const BORDER: u32 = 0x2a2f3a;
@@ -464,7 +465,8 @@ impl WorkspaceView {
         }
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let titles: Vec<String> = self
             .workspace
             .tabs
@@ -513,7 +515,31 @@ impl WorkspaceView {
             }))
             .child(tab_bar_button("new-claude", "+ Claude", cx.listener(|this, _, window, cx| this.open(true, None, window, cx))))
             .child(tab_bar_button("new-shell", "+ Shell", cx.listener(|this, _, window, cx| this.open(false, None, window, cx))))
-            .child(div().flex_1().h_full())
+            .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
+            .when(client_decorations, |bar| {
+                bar.child(
+                    div()
+                        .id("drag-area")
+                        .flex_1()
+                        .h_full()
+                        .on_mouse_down(MouseButton::Left, |event, window, _| {
+                            if event.click_count >= 2 {
+                                window.zoom_window();
+                            } else {
+                                window.start_window_move();
+                            }
+                        })
+                        .on_mouse_down(MouseButton::Right, |event, window, _| window.show_window_menu(event.position)),
+                )
+                .child(window_frame::window_controls(
+                    window,
+                    cx.listener(|this, _, window, cx| {
+                        if this.request_quit(window, cx) {
+                            cx.quit();
+                        }
+                    }),
+                ))
+            })
     }
 
     fn render_active_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -631,8 +657,8 @@ pub(crate) fn tab_bar_button(
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let root = div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_claude_tab))
@@ -663,8 +689,9 @@ impl Render for WorkspaceView {
             .flex()
             .flex_col()
             .bg(rgb(BACKGROUND))
-            .child(self.render_tab_bar(cx))
-            .child(self.render_active_tab(cx))
+            .child(self.render_tab_bar(window, cx))
+            .child(self.render_active_tab(cx));
+        window_frame::frame(window, root)
     }
 }
 
