@@ -1,5 +1,8 @@
 [advisories]
 version = 2
+# Fail only on unmaintained crates we depend on directly; transitive ones (e.g. via GPUI) can't be
+# replaced from here. Vulnerability advisories still fail for every crate.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
