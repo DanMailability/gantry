@@ -149,7 +149,8 @@ impl WorkspaceView {
             this.add_slot(leaf, window, cx);
         }
         for (leaf, pane) in &restored.attach {
-            this.slots[leaf].view.update(cx, |view, cx| view.attach(*pane, cx));
+            let launch = this.workspace.leaves[leaf].launch.clone();
+            this.slots[leaf].view.update(cx, |view, cx| view.attach(*pane, launch, cx));
             this.client.attach(*pane);
         }
         for (leaf, slot) in &this.slots {
@@ -198,7 +199,8 @@ impl WorkspaceView {
                 ClientEvent::Spawned { request, pane, cwd } => match self.pending.remove(request) {
                     Some(leaf) => {
                         self.workspace.pane_started(leaf, *pane, cwd.clone());
-                        self.slots[&leaf].view.update(cx, |view, cx| view.attach(*pane, cx));
+                        let launch = self.workspace.leaves[&leaf].launch.clone();
+                        self.slots[&leaf].view.update(cx, |view, cx| view.attach(*pane, launch, cx));
                         if self.workspace.focused() == Some(leaf) {
                             self.client.focus(*pane);
                         }

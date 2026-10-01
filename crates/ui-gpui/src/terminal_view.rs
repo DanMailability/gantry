@@ -157,14 +157,16 @@ impl TerminalView {
         }
     }
 
-    /// Show daemon pane `pane` (a fresh terminal; its output or replay follows).
-    pub fn attach(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+    /// Show daemon pane `pane`, running `launch` (a fresh terminal; its output or replay follows).
+    pub fn attach(&mut self, pane: PaneId, launch: PaneLaunch, cx: &mut Context<Self>) {
         self.pane = Some(pane);
+        self.launch = launch;
         self.state = PaneState::Live;
         self.term = TermState::new(self.grid_size.0, self.grid_size.1);
         self.title = None;
-        // The spawn request may have used a size from before the first layout.
-        self.client.resize(pane, self.grid_size.0, self.grid_size.1, self.cell.0, self.cell.1);
+        if let Some((cols, rows, width, height)) = resize_on_attach(self.grid_size, self.cell) {
+            self.client.resize(pane, cols, rows, width, height);
+        }
         cx.notify();
     }
 
@@ -581,6 +583,12 @@ impl Render for TerminalView {
     }
 }
 
+/// The resize to send when attaching: the laid-out size, since a spawn request may have used a size
+/// from before the first layout. Before any layout (`cell` unknown) the daemon's size stands.
+fn resize_on_attach(grid: (u16, u16), cell: (u16, u16)) -> Option<(u16, u16, u16, u16)> {
+    (cell != (0, 0)).then_some((grid.0, grid.1, cell.0, cell.1))
+}
+
 fn banner_button(
     id: &'static str,
     label: &'static str,
@@ -697,6 +705,12 @@ mod tests {
             key: key.into(),
             key_char: key_char.map(Into::into),
         }
+    }
+
+    #[test]
+    fn attaching_before_the_first_layout_keeps_the_daemon_size() {
+        assert_eq!(resize_on_attach((80, 24), (0, 0)), None);
+        assert_eq!(resize_on_attach((120, 40), (8, 18)), Some((120, 40, 8, 18)));
     }
 
     #[test]
