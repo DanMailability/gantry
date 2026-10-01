@@ -818,8 +818,8 @@ dependencies = [
 name = "ccm"
 version = "0.1.0"
 dependencies = [
+ "app-core",
  "daemon",
- "protocol",
  "tempfile",
  "tracing",
  "tracing-appender",

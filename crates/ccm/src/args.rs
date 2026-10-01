@@ -2,9 +2,8 @@
 
 use std::path::PathBuf;
 
-use daemon::client::Launch;
+use app_core::workspace::{Launch, PaneLaunch};
 use daemon::pty::default_shell;
-use protocol::message::SpawnRequest;
 
 /// Parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -38,20 +37,13 @@ impl LaunchArgs {
         Ok(LaunchArgs { cwd, command })
     }
 
-    /// Turn the arguments into a launch request with the given initial grid size.
-    pub fn into_launch(self, cols: u16, rows: u16) -> std::io::Result<Launch> {
+    /// Turn the arguments into a launch request.
+    pub fn into_launch(self) -> std::io::Result<Launch> {
         let current = std::env::current_dir()?;
-        let default = SpawnRequest { program: default_shell(), args: Vec::new(), cwd: current.clone(), cols, rows, cwd_from: None };
+        let default = PaneLaunch { program: default_shell(), args: Vec::new(), cwd: current.clone() };
         let explicit = (self.cwd.is_some() || !self.command.is_empty()).then(|| {
             let mut command = self.command.into_iter();
-            SpawnRequest {
-                program: command.next().unwrap_or_else(default_shell),
-                args: command.collect(),
-                cwd: self.cwd.unwrap_or(current),
-                cols,
-                rows,
-                cwd_from: None,
-            }
+            PaneLaunch { program: command.next().unwrap_or_else(default_shell), args: command.collect(), cwd: self.cwd.unwrap_or(current) }
         });
         Ok(Launch { explicit, default })
     }
@@ -66,8 +58,8 @@ mod tests {
     }
 
     #[test]
-    fn no_args_reattaches_or_opens_the_default_shell() {
-        let launch = parse(&[]).unwrap().into_launch(80, 24).unwrap();
+    fn no_args_restores_or_opens_the_default_shell() {
+        let launch = parse(&[]).unwrap().into_launch().unwrap();
         assert!(launch.explicit.is_none());
         assert_eq!(launch.default.program, daemon::pty::default_shell());
         assert_eq!(launch.default.cwd, std::env::current_dir().unwrap());
@@ -75,10 +67,10 @@ mod tests {
 
     #[test]
     fn command_or_cwd_makes_an_explicit_launch() {
-        let launch = parse(&["--cwd", "/tmp", "--", "claude", "--resume", "abc"]).unwrap().into_launch(80, 24).unwrap();
+        let launch = parse(&["--cwd", "/tmp", "--", "claude", "--resume", "abc"]).unwrap().into_launch().unwrap();
         let explicit = launch.explicit.unwrap();
         assert_eq!((explicit.program.as_str(), explicit.args.clone(), explicit.cwd.clone()), ("claude", vec!["--resume".into(), "abc".into()], PathBuf::from("/tmp")));
-        let cwd_only = parse(&["--cwd", "/tmp"]).unwrap().into_launch(80, 24).unwrap();
+        let cwd_only = parse(&["--cwd", "/tmp"]).unwrap().into_launch().unwrap();
         assert_eq!(cwd_only.explicit.unwrap().program, daemon::pty::default_shell());
     }
 

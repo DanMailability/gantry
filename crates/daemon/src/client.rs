@@ -65,35 +65,6 @@ pub enum ClientEvent {
     Disconnected,
 }
 
-/// What the GUI was asked to open.
-#[derive(Clone, Debug)]
-pub struct Launch {
-    /// Explicitly requested command (`ccm -- cmd` or `--cwd`); always spawns a new pane.
-    pub explicit: Option<SpawnRequest>,
-    /// What to spawn when there is nothing to reattach to.
-    pub default: SpawnRequest,
-}
-
-/// Decision taken at startup.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Startup {
-    /// Reattach to this live pane.
-    Attach(PaneId),
-    /// Start a new pane.
-    Spawn(SpawnRequest),
-}
-
-/// Explicit command → spawn it; else the most recently focused live pane; else the default.
-pub fn choose_startup(panes: &[PaneInfo], launch: &Launch) -> Startup {
-    if let Some(spec) = &launch.explicit {
-        return Startup::Spawn(spec.clone());
-    }
-    panes
-        .iter()
-        .max_by_key(|pane| (pane.last_focused, pane.pane))
-        .map_or_else(|| Startup::Spawn(launch.default.clone()), |pane| Startup::Attach(pane.pane))
-}
-
 /// Why the client could not start.
 #[derive(Debug)]
 pub enum StartError {
@@ -102,8 +73,6 @@ pub enum StartError {
         /// Its version.
         daemon_protocol: u32,
     },
-    /// The daemon could not start the requested program.
-    SpawnFailed(String),
     /// Connection or protocol failure.
     Io(anyhow::Error),
 }
@@ -114,7 +83,6 @@ impl fmt::Display for StartError {
             StartError::VersionMismatch { daemon_protocol } => {
                 write!(f, "the running daemon uses protocol {daemon_protocol}, this ccm uses {PROTOCOL_VERSION}")
             }
-            StartError::SpawnFailed(error) => write!(f, "failed to start program: {error}"),
             StartError::Io(error) => write!(f, "{error:#}"),
         }
     }
@@ -164,34 +132,6 @@ impl DaemonClient {
         });
         let (instance, panes) = ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
         Ok(Connection { client: DaemonClient { outgoing }, instance, panes, events })
-    }
-
-    /// Connect, pick the startup pane, and begin streaming events.
-    pub fn start(
-        paths: &Paths,
-        launch: Launch,
-        spawn: impl FnOnce() -> io::Result<()> + Send + 'static,
-    ) -> Result<(DaemonClient, PaneId, async_channel::Receiver<ClientEvent>), StartError> {
-        let Connection { client, panes, events, .. } = DaemonClient::connect(paths, spawn)?;
-        let pane = match choose_startup(&panes, &launch) {
-            Startup::Attach(pane) => {
-                client.attach(pane);
-                pane
-            }
-            Startup::Spawn(spec) => {
-                client.spawn(1, spec);
-                loop {
-                    match events.recv_blocking() {
-                        Ok(ClientEvent::Spawned { request: 1, pane, .. }) => break pane,
-                        Ok(ClientEvent::SpawnFailed { error, .. }) => return Err(StartError::SpawnFailed(error)),
-                        Ok(_) => {}
-                        Err(_) => return Err(StartError::Io(anyhow::anyhow!("daemon closed the connection"))),
-                    }
-                }
-            }
-        };
-        client.focus(pane);
-        Ok((client, pane, events))
     }
 
     /// Start a pane; answered by `Spawned`/`SpawnFailed` with the same `request`.
@@ -378,23 +318,6 @@ pub fn batch_events(first: ClientEvent, rx: &async_channel::Receiver<ClientEvent
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn request(program: &str) -> SpawnRequest {
-        SpawnRequest { program: program.into(), args: vec![], cwd: "/".into(), cols: 80, rows: 24, cwd_from: None }
-    }
-
-    fn info(pane: PaneId, last_focused: u64) -> PaneInfo {
-        PaneInfo { pane, program: "sh".into(), args: vec![], cwd: "/".into(), last_focused }
-    }
-
-    #[test]
-    fn startup_prefers_explicit_command_then_most_recent_pane() {
-        let explicit = Launch { explicit: Some(request("claude")), default: request("sh") };
-        assert_eq!(choose_startup(&[info(1, 5)], &explicit), Startup::Spawn(request("claude")));
-        let plain = Launch { explicit: None, default: request("sh") };
-        assert_eq!(choose_startup(&[info(1, 2), info(2, 9)], &plain), Startup::Attach(2));
-        assert_eq!(choose_startup(&[], &plain), Startup::Spawn(request("sh")));
-    }
 
     #[test]
     fn consecutive_output_is_batched_up_to_the_limit() {

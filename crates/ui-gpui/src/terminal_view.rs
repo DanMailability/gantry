@@ -1,7 +1,6 @@
 //! GPUI view that renders one terminal pane and exchanges bytes with its PTY.
 
 use std::ops::Range;
-use std::time::Duration;
 
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
@@ -10,12 +9,13 @@ use app_core::scroll::{ScrollAction, scroll_action};
 use app_core::url::link_at;
 use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
 use app_core::term_state::TermState;
-use daemon::client::{ClientEvent, DaemonClient, batch_events};
+use app_core::workspace::PaneLaunch;
+use daemon::client::{ClientEvent, DaemonClient};
 use protocol::message::PaneId;
 use gpui::{
-    App, BorderStyle, Bounds, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, Pixels,
-    Point, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, canvas, div,
-    fill, font, outline, point, prelude::*, px, rgb, size,
+    App, BorderStyle, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
+    FontWeight, Hsla, Pixels, Point, StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, canvas,
+    div, fill, font, outline, point, prelude::*, px, rgb, size,
 };
 use gpui::{
     ClipboardItem, ElementInputHandler, EntityInputHandler, KeyBinding, KeyDownEvent, MouseButton,
@@ -62,8 +62,6 @@ fn key_bindings() -> Vec<KeyBinding> {
 /// Font size used at startup and restored by "reset zoom".
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
-/// Largest amount of output parsed per UI update, so input and rendering keep running during a flood.
-const MAX_BATCH_BYTES: usize = 256 * 1024;
 
 #[cfg(target_os = "linux")]
 const FONT_FAMILY: &str = "Noto Sans Mono";
@@ -78,12 +76,44 @@ struct CellMetrics {
     height: Pixels,
 }
 
-/// One terminal pane, attached to a daemon-owned session.
+/// What the pane is doing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaneState {
+    /// Waiting for the daemon to start the process.
+    Starting,
+    /// Showing a live process.
+    Live,
+    /// The process ended (`None`: it ended while ccm was closed).
+    Exited(Option<u32>),
+    /// The process could not be started.
+    Failed(String),
+    /// The daemon connection is gone.
+    Disconnected,
+}
+
+/// Something the workspace should react to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneEvent {
+    /// The user clicked into the pane.
+    Focused,
+    /// The user asked to run the pane again (Continue / Restart).
+    Rerun,
+    /// The user asked to close the pane.
+    Close,
+    /// The program changed the title.
+    TitleChanged,
+}
+
+/// One terminal pane, showing a daemon-owned session.
 pub struct TerminalView {
     focus_handle: FocusHandle,
     term: TermState,
     client: DaemonClient,
-    pane: PaneId,
+    pane: Option<PaneId>,
+    launch: PaneLaunch,
+    state: PaneState,
+    title: Option<String>,
+    cell: (u16, u16),
     font: Font,
     font_size: Pixels,
     grid_origin: Point<Pixels>,
@@ -93,84 +123,130 @@ pub struct TerminalView {
     selecting: bool,
     mouse_position: Option<Point<Pixels>>,
     hovered_link: Option<(u16, Range<usize>)>,
-    exit_code: Option<u32>,
-    disconnected: bool,
-    _events: Task<()>,
+}
+
+impl EventEmitter<PaneEvent> for TerminalView {}
+
+impl Focusable for TerminalView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
 }
 
 impl TerminalView {
-    /// Show daemon pane `pane`, fed by `events`. `cols`/`rows` is the pane's size until the first resync or resize.
-    pub fn new(
-        client: DaemonClient,
-        pane: PaneId,
-        events: async_channel::Receiver<ClientEvent>,
-        cols: u16,
-        rows: u16,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let events_task = cx.spawn(async move |this, cx| {
-            while let Ok(first) = events.recv().await {
-                let batch = batch_events(first, &events, MAX_BATCH_BYTES);
-                if this.update(cx, |view, cx| view.on_events(batch, cx)).is_err() {
-                    return;
-                }
-                // Yield to the event loop so keystrokes (e.g. Ctrl+C) are handled between batches.
-                cx.background_executor().timer(Duration::ZERO).await;
-            }
-            let _ = this.update(cx, |view, cx| view.on_events(vec![ClientEvent::Disconnected], cx));
-        });
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+    /// A pane that will show `launch` once `attach` is called.
+    pub fn new(client: DaemonClient, launch: PaneLaunch, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         TerminalView {
-            focus_handle,
-            term: TermState::new(cols, rows),
+            focus_handle: cx.focus_handle(),
+            term: TermState::new(80, 24),
             client,
-            pane,
+            pane: None,
+            launch,
+            state: PaneState::Starting,
+            title: None,
+            cell: (0, 0),
             font: font(FONT_FAMILY),
             font_size: px(DEFAULT_FONT_SIZE),
             grid_origin: Point::default(),
-            grid_size: (cols, rows),
+            grid_size: (80, 24),
             metrics: CellMetrics { width: px(8.), height: px(18.) },
             scroll_accum: 0.0,
             selecting: false,
             mouse_position: None,
             hovered_link: None,
-            exit_code: None,
-            disconnected: false,
-            _events: events_task,
         }
     }
 
-    fn on_events(&mut self, events: Vec<ClientEvent>, cx: &mut Context<Self>) {
-        for event in events {
-            match event {
-                ClientEvent::Output { pane, bytes } if pane == self.pane => {
-                    self.term.feed(&bytes);
-                    // The daemon answers terminal queries; replies from this copy would be duplicates.
-                    self.term.take_pty_writes();
+    /// Show daemon pane `pane` (a fresh terminal; its output or replay follows).
+    pub fn attach(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        self.pane = Some(pane);
+        self.state = PaneState::Live;
+        self.term = TermState::new(self.grid_size.0, self.grid_size.1);
+        self.title = None;
+        // The spawn request may have used a size from before the first layout.
+        self.client.resize(pane, self.grid_size.0, self.grid_size.1, self.cell.0, self.cell.1);
+        cx.notify();
+    }
+
+    /// Output or resync for this pane.
+    pub fn on_event(&mut self, event: &ClientEvent, cx: &mut Context<Self>) {
+        match event {
+            ClientEvent::Output { bytes, .. } => {
+                self.term.feed(bytes);
+                // The daemon answers terminal queries; replies from this copy would be duplicates.
+                self.term.take_pty_writes();
+                let title = self.term.title();
+                if title != self.title {
+                    self.title = title;
+                    cx.emit(PaneEvent::TitleChanged);
                 }
-                ClientEvent::Resync { pane, cols, rows } if pane == self.pane => {
-                    self.term = TermState::new(cols, rows);
-                    // The next layout pass resizes to the window if it differs.
-                    self.grid_size = (cols, rows);
-                }
-                ClientEvent::Exited { pane, code } if pane == self.pane => self.exit_code = Some(code),
-                ClientEvent::TakenOver => cx.quit(),
-                ClientEvent::Disconnected => self.disconnected = true,
-                _ => {}
             }
+            ClientEvent::Resync { cols, rows, .. } => {
+                self.term = TermState::new(*cols, *rows);
+                // The next layout pass resizes to the window if it differs.
+                self.grid_size = (*cols, *rows);
+            }
+            _ => return,
         }
         cx.notify();
     }
 
-    /// Whether the pane can no longer be used (process exited or daemon connection lost).
-    pub fn is_finished(&self) -> bool {
-        self.exit_code.is_some() || self.disconnected
+    /// The process ended.
+    pub fn exited(&mut self, code: Option<u32>, cx: &mut Context<Self>) {
+        self.pane = None;
+        self.state = PaneState::Exited(code);
+        cx.notify();
+    }
+
+    /// The process could not be started.
+    pub fn failed(&mut self, error: String, cx: &mut Context<Self>) {
+        self.state = PaneState::Failed(error);
+        cx.notify();
+    }
+
+    /// The daemon connection is gone.
+    pub fn disconnected(&mut self, cx: &mut Context<Self>) {
+        self.state = PaneState::Disconnected;
+        cx.notify();
+    }
+
+    /// About to start `launch` in this pane again.
+    pub fn restarting(&mut self, launch: PaneLaunch, cx: &mut Context<Self>) {
+        self.launch = launch;
+        self.state = PaneState::Starting;
+        cx.notify();
+    }
+
+    /// Whether a live process is running here.
+    pub fn is_running(&self) -> bool {
+        self.state == PaneState::Live
+    }
+
+    /// Program title, else `program · dir`.
+    pub fn title(&self) -> String {
+        self.title.clone().filter(|title| !title.trim().is_empty()).unwrap_or_else(|| self.launch.label())
+    }
+
+    /// Current grid size (columns, rows).
+    pub fn grid_size(&self) -> (u16, u16) {
+        self.grid_size
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
-        self.client.input(self.pane, bytes);
+        if let (Some(pane), PaneState::Live) = (self.pane, &self.state) {
+            self.client.input(pane, bytes);
+        }
+    }
+
+    /// Banner text and whether Continue/Restart + Close apply.
+    fn banner(&self) -> Option<(String, bool)> {
+        match &self.state {
+            PaneState::Starting | PaneState::Live => None,
+            PaneState::Exited(Some(code)) => Some((format!("Process exited (code {code})"), true)),
+            PaneState::Exited(None) => Some(("Session ended while ccm was closed".into(), true)),
+            PaneState::Failed(error) => Some((format!("Could not start: {error}"), true)),
+            PaneState::Disconnected => Some(("Lost connection to the ccm daemon — restart ccm".into(), false)),
+        }
     }
 
     fn cell_metrics(&self, window: &Window) -> CellMetrics {
@@ -188,6 +264,7 @@ impl TerminalView {
         self.metrics = metrics;
         let cell = (f32::from(metrics.width).round() as u16, f32::from(metrics.height).round() as u16);
         self.term.set_cell_size(cell.0, cell.1);
+        self.cell = cell;
         let dims = grid_dims(
             f32::from(bounds.size.width),
             f32::from(bounds.size.height),
@@ -197,7 +274,9 @@ impl TerminalView {
         if dims != self.grid_size {
             self.grid_size = dims;
             self.term.resize(dims.0, dims.1);
-            self.client.resize(self.pane, dims.0, dims.1, cell.0, cell.1);
+            if let Some(pane) = self.pane {
+                self.client.resize(pane, dims.0, dims.1, cell.0, cell.1);
+            }
             cx.notify();
         }
     }
@@ -210,8 +289,11 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_finished() {
-            cx.quit();
+        if !self.is_running() {
+            if event.keystroke.key == "enter" && matches!(self.state, PaneState::Exited(_) | PaneState::Failed(_)) {
+                cx.emit(PaneEvent::Rerun);
+            }
+            cx.stop_propagation();
             return;
         }
         let keystroke = &event.keystroke;
@@ -280,6 +362,7 @@ impl TerminalView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        cx.emit(PaneEvent::Focused);
         let Some((col, row, right_half)) = self.cell_at(event.position) else { return };
         if link_modifier(event.modifiers)
             && let Some(link) = link_at(&self.term.row_text(row), col as usize)
@@ -381,8 +464,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_finished() {
-            cx.quit();
+        if !self.is_running() {
             return;
         }
         self.send_input(text.as_bytes(), cx);
@@ -478,25 +560,33 @@ impl Render for TerminalView {
                 .flex_1()
                 .w_full(),
             )
-            .when_some(self.exit_code, |this, code| {
+            .when_some(self.banner(), |this, (text, actions)| {
+                let rerun = if self.launch.is_claude() { "Continue" } else { "Restart" };
                 this.child(
                     div()
                         .px_2()
                         .py_1()
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .items_center()
                         .text_color(banner_color)
-                        .child(format!("Process exited (code {code}) — press any key to close")),
-                )
-            })
-            .when(self.disconnected, |this| {
-                this.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_color(banner_color)
-                        .child("Lost connection to the ccm daemon — press any key to close"),
+                        .child(text)
+                        .when(actions, |row| {
+                            row.child(banner_button("rerun", rerun, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun))))
+                                .child(banner_button("close", "Close", cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close))))
+                        }),
                 )
             })
     }
+}
+
+fn banner_button(
+    id: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div().id(id).px_2().rounded_sm().border_1().border_color(rgb(0x6cb6ff)).cursor_pointer().child(label).on_click(on_click)
 }
 
 fn link_modifier(modifiers: Modifiers) -> bool {

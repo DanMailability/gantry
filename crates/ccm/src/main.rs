@@ -20,7 +20,7 @@ fn main() -> ExitCode {
         _ => {}
     }
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
-    let launch = match LaunchArgs::parse(argv).map_err(|m| m.to_string()).and_then(|a| a.into_launch(80, 24).map_err(|e| e.to_string())) {
+    let launch = match LaunchArgs::parse(argv).map_err(|m| m.to_string()).and_then(|a| a.into_launch().map_err(|e| e.to_string())) {
         Ok(launch) => launch,
         Err(message) => {
             eprintln!("ccm: {message}");

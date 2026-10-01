@@ -42,6 +42,8 @@ pub struct Paths {
     pub lock_file: PathBuf,
     /// Daemon log directory.
     pub log_dir: PathBuf,
+    /// Saved window layout (GUI-owned).
+    pub layout_file: PathBuf,
     socket: SocketLocation,
 }
 
@@ -59,22 +61,22 @@ impl Paths {
         };
         #[cfg(windows)]
         let runtime_dir = data.join(profile).join("run");
-        Paths::build(profile, runtime_dir, data.join(profile).join("logs"), &user)
+        Paths::build(profile, runtime_dir, data.join(profile).join("logs"), data.join(profile).join("layout.json"), &user)
     }
 
     /// Locations entirely inside `dir` (for tests).
     pub fn in_dir(dir: &Path, profile: &str) -> Paths {
         let unique = dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        Paths::build(profile, dir.join("run"), dir.join("logs"), &unique)
+        Paths::build(profile, dir.join("run"), dir.join("logs"), dir.join("layout.json"), &unique)
     }
 
     #[cfg_attr(unix, allow(unused_variables))]
-    fn build(profile: &str, runtime_dir: PathBuf, log_dir: PathBuf, unique: &str) -> Paths {
+    fn build(profile: &str, runtime_dir: PathBuf, log_dir: PathBuf, layout_file: PathBuf, unique: &str) -> Paths {
         #[cfg(unix)]
         let socket = SocketLocation::File(runtime_dir.join("daemon.sock"));
         #[cfg(windows)]
         let socket = SocketLocation::Pipe(format!("ccm-{profile}-{unique}"));
-        Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, socket }
+        Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, layout_file, socket }
     }
 
     /// Name to bind or connect to.
@@ -114,7 +116,7 @@ mod tests {
     fn test_paths_stay_inside_the_given_dir() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::in_dir(dir.path(), "t");
-        for path in [&paths.runtime_dir, &paths.lock_file, &paths.log_dir] {
+        for path in [&paths.runtime_dir, &paths.lock_file, &paths.log_dir, &paths.layout_file] {
             assert!(path.starts_with(dir.path()), "{path:?}");
         }
         #[cfg(unix)]
@@ -127,5 +129,6 @@ mod tests {
         let (a, b) = (Paths::for_profile("a"), Paths::for_profile("b"));
         assert_ne!(a.lock_file, b.lock_file);
         assert_ne!(a.log_dir, b.log_dir);
+        assert_ne!(a.layout_file, b.layout_file);
     }
 }

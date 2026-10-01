@@ -11,7 +11,7 @@ workspace = true
 ui-gpui.workspace = true
 daemon.workspace = true
 tracing-subscriber.workspace = true
-protocol.workspace = true
+app-core.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 
