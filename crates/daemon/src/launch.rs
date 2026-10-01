@@ -44,7 +44,6 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
         Err(TryLockError::WouldBlock) => return Ok(DaemonOutcome::AlreadyRunning),
         Err(TryLockError::Error(err)) => return Err(err.into()),
     }
-    let base_env = options.base_env.unwrap_or_else(login_env_or_current);
     #[cfg(unix)]
     let owner_uid = {
         use std::os::unix::fs::MetadataExt;
@@ -54,7 +53,12 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
     let owner_uid = None;
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     runtime.block_on(async {
+        // Bind first: connecting clients wait in the backlog while a slow login shell is resolved.
         let listener = listener_options(&paths)?.create_tokio()?;
+        let base_env = match options.base_env {
+            Some(env) => env,
+            None => tokio::task::spawn_blocking(login_env_or_current).await?,
+        };
         serve(listener, ServerOptions { base_env, owner_uid, idle_timeout: options.idle_timeout }).await
     })?;
     drop(lock);
@@ -94,11 +98,6 @@ fn login_env_or_current() -> Vec<(String, String)> {
 pub fn spawn_detached_daemon() -> std::io::Result<()> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -108,6 +107,24 @@ pub fn spawn_detached_daemon() -> std::io::Result<()> {
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
     command.spawn().map(|_| ())
+}
+
+/// Move this process into a new session with no controlling terminal, so job control on the
+/// terminal it was started from (e.g. an interactive login shell taking the terminal) can never
+/// stop it. Returns `Ok(false)` if that is impossible because this process leads its process group.
+#[cfg(unix)]
+pub fn detach_from_terminal() -> std::io::Result<bool> {
+    match rustix::process::setsid() {
+        Ok(_) => Ok(true),
+        Err(rustix::io::Errno::PERM) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Windows has no controlling-terminal job control to escape; always succeeds.
+#[cfg(windows)]
+pub fn detach_from_terminal() -> std::io::Result<bool> {
+    Ok(true)
 }
 
 /// Connect to the profile's daemon, starting it with `spawn` if none is running.

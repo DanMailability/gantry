@@ -816,6 +816,7 @@ version = "0.1.0"
 dependencies = [
  "daemon",
  "protocol",
+ "tempfile",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -1315,6 +1316,7 @@ dependencies = [
  "interprocess",
  "portable-pty",
  "protocol",
+ "rustix",
  "serde_json",
  "tempfile",
  "tokio",

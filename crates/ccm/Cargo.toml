@@ -14,3 +14,6 @@ tracing-subscriber.workspace = true
 protocol.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

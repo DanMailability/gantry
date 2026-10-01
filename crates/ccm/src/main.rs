@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use args::LaunchArgs;
-use daemon::launch::{DaemonOptions, DaemonOutcome, run_daemon};
+use daemon::launch::{DaemonOptions, DaemonOutcome, detach_from_terminal, run_daemon};
 use daemon::paths::{Paths, current_profile};
 
 fn main() -> ExitCode {
@@ -31,7 +31,34 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Set on a daemon re-launched by `daemon_main`, so it never re-launches again.
+const RESPAWNED_ENV: &str = "CCM_DAEMON_RESPAWNED";
+
 fn daemon_main() -> ExitCode {
+    match detach_from_terminal() {
+        Ok(true) => {}
+        // A process group leader (e.g. a shell job) cannot start a session: re-launch as a child that can.
+        Ok(false) if std::env::var_os(RESPAWNED_ENV).is_none() => {
+            let relaunched = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .arg("daemon")
+                    .env(RESPAWNED_ENV, "1")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+            });
+            return match relaunched {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("ccm daemon: failed to re-launch detached: {err}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Ok(false) => {}
+        Err(err) => eprintln!("ccm daemon: could not detach from the terminal: {err}"),
+    }
     let paths = Paths::for_profile(&current_profile());
     let appender = tracing_appender::rolling::daily(&paths.log_dir, "daemon.log");
     tracing_subscriber::fmt()
