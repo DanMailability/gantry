@@ -1,6 +1,6 @@
 //! Process and filesystem queries about the machine sessions run on (phase 2 adds remote hosts).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What the index needs to know about a host.
 pub trait Host {
@@ -11,6 +11,32 @@ pub trait Host {
     fn pid_domain(&self) -> Option<String>;
     /// Whether `path` is an existing directory.
     fn dir_exists(&self, path: &Path) -> bool;
+    /// The host process behind `pid` from the foreign pid namespace `domain` (verified by `start` when given):
+    /// `Some(None)` when there is none (it exited), `None` when this host cannot tell.
+    fn namespaced(&self, domain: &str, pid: u32, start: Option<&str>) -> Option<Option<Namespaced>> {
+        let _ = (domain, pid, start);
+        None
+    }
+}
+
+/// A process from another pid namespace, found on this host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Namespaced {
+    /// Its pid on this host.
+    pub host_pid: u32,
+    /// The Docker container it runs in (from its cgroup).
+    pub container: Option<String>,
+}
+
+/// A process whose environment sets a given variable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Marked {
+    /// Host pid.
+    pub pid: u32,
+    /// The variable's value.
+    pub value: String,
+    /// Its start time (`/proc/<pid>/stat` field 22).
+    pub start: Option<String>,
 }
 
 /// The machine Gantry runs on.
@@ -56,6 +82,56 @@ impl Host for LocalHost {
     fn dir_exists(&self, path: &Path) -> bool {
         path.is_dir()
     }
+
+    #[cfg(target_os = "linux")]
+    fn namespaced(&self, domain: &str, pid: u32, start: Option<&str>) -> Option<Option<Namespaced>> {
+        Some(find_namespaced(Path::new("/proc"), domain, pid, start))
+    }
+}
+
+fn numeric_dirs(proc_root: &Path) -> impl Iterator<Item = (u32, PathBuf)> {
+    std::fs::read_dir(proc_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| Some((entry.file_name().to_str()?.parse().ok()?, entry.path())))
+}
+
+/// The host process (under `proc_root`, normally `/proc`) that is `pid` in the pid namespace `domain` names
+/// (`…pid:[<inode>]`) and — when given — started at `start`. Processes whose entries cannot be read (another
+/// user's) are skipped.
+pub fn find_namespaced(proc_root: &Path, domain: &str, pid: u32, start: Option<&str>) -> Option<Namespaced> {
+    let namespace = &domain[domain.find("pid:[")?..];
+    numeric_dirs(proc_root).find_map(|(host_pid, dir)| {
+        if std::fs::read_link(dir.join("ns/pid")).ok()?.as_os_str() != namespace {
+            return None;
+        }
+        let status = std::fs::read_to_string(dir.join("status")).ok()?;
+        let nspid = status.lines().find_map(|line| line.strip_prefix("NSpid:"))?;
+        if nspid.split_whitespace().last()?.parse::<u32>().ok()? != pid {
+            return None;
+        }
+        let stat = std::fs::read_to_string(dir.join("stat")).ok()?;
+        if start.is_some_and(|start| proc_start_time(&stat).as_deref() != Some(start)) {
+            return None;
+        }
+        let cgroup = std::fs::read_to_string(dir.join("cgroup")).ok();
+        Some(Namespaced { host_pid, container: cgroup.and_then(|c| crate::containers::container_from_cgroup(&c)) })
+    })
+}
+
+/// Processes (under `proc_root`) whose environment sets `key`, with its value. Only that variable is kept.
+pub fn processes_with_env(proc_root: &Path, key: &str) -> Vec<Marked> {
+    let prefix = format!("{key}=");
+    numeric_dirs(proc_root)
+        .filter_map(|(pid, dir)| {
+            let environ = std::fs::read(dir.join("environ")).ok()?;
+            let value = environ.split(|byte| *byte == 0).find_map(|var| var.strip_prefix(prefix.as_bytes()))?;
+            let value = String::from_utf8(value.to_vec()).ok()?;
+            let start = std::fs::read_to_string(dir.join("stat")).ok().and_then(|stat| proc_start_time(&stat));
+            Some(Marked { pid, value, start })
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -154,5 +230,53 @@ mod tests {
     fn local_pid_domain_has_claudes_format() {
         let domain = LocalHost::new().pid_domain().unwrap();
         assert!(domain.starts_with("linux:") && domain.contains(":pid:["), "{domain}");
+    }
+
+    #[cfg(unix)]
+    fn fake_process(root: &Path, host_pid: u32, ns: &str, nspid: &[u32], start: &str, cgroup: &str, environ: &[&str]) {
+        let dir = root.join(host_pid.to_string());
+        std::fs::create_dir_all(dir.join("ns")).unwrap();
+        std::os::unix::fs::symlink(ns, dir.join("ns/pid")).unwrap();
+        let ids: Vec<String> = nspid.iter().map(u32::to_string).collect();
+        std::fs::write(dir.join("status"), format!("Name:\tclaude\nNSpid:\t{}\n", ids.join("\t"))).unwrap();
+        let fields: Vec<String> = (3..=25).map(|n| if n == 22 { start.to_string() } else { "0".into() }).collect();
+        std::fs::write(dir.join("stat"), format!("{host_pid} (claude) {}", fields.join(" "))).unwrap();
+        std::fs::write(dir.join("cgroup"), cgroup).unwrap();
+        std::fs::write(dir.join("environ"), environ.join("\0")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_container_pid_is_found_on_the_host_by_namespace_pid_and_start() {
+        let root = tempfile::tempdir().unwrap();
+        let cgroup = "0::/system.slice/docker-4a31e6.scope\n";
+        fake_process(root.path(), 3299035, "pid:[4026533220]", &[3299035, 129384], "62933926", cgroup, &[]);
+        fake_process(root.path(), 500, "pid:[4026531836]", &[500], "1", "0::/user.slice\n", &[]);
+        let found = find_namespaced(root.path(), "linux::pid:[4026533220]", 129384, Some("62933926")).unwrap();
+        assert_eq!((found.host_pid, found.container.as_deref()), (3299035, Some("4a31e6")));
+        // Dead (no such pid in that namespace), and the pid reused with another start time.
+        assert!(find_namespaced(root.path(), "linux::pid:[4026533223]", 365644, Some("1")).is_none());
+        assert!(find_namespaced(root.path(), "linux::pid:[4026533220]", 129384, Some("999")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_processes_are_skipped() {
+        // A process of another user: its ns link, status and environ cannot be read (simulated: no files).
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("77")).unwrap();
+        std::fs::write(root.path().join("self"), "").unwrap();
+        assert!(find_namespaced(root.path(), "linux::pid:[1]", 77, None).is_none());
+        assert!(processes_with_env(root.path(), "GANTRY_PANE").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn processes_carrying_a_variable_are_found_with_its_value() {
+        let root = tempfile::tempdir().unwrap();
+        fake_process(root.path(), 10, "pid:[1]", &[10, 1], "5", "", &["A=1", "GANTRY_PANE=i:3", "B=2"]);
+        fake_process(root.path(), 11, "pid:[1]", &[11, 2], "6", "", &["GANTRY_PANES=no"]);
+        let marked = processes_with_env(root.path(), "GANTRY_PANE");
+        assert_eq!(marked, vec![Marked { pid: 10, value: "i:3".into(), start: Some("5".into()) }]);
     }
 }

@@ -71,7 +71,7 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone]) 
                     Some(pane) => SessionState::Managed { pane: *pane },
                     None => SessionState::External { pid: Some(pid) },
                 },
-                IndexState::InContainer => SessionState::External { pid: None },
+                IndexState::InContainer { pid } => SessionState::External { pid },
                 IndexState::Closed => match by_arg.get(r.id.as_str()) {
                     Some(pane) => SessionState::Managed { pane: *pane },
                     None => SessionState::Closed,
@@ -165,6 +165,7 @@ mod tests {
             activity: None,
             activity_since_ms: 0,
             proc_start: None,
+            container_id: None,
         }
     }
 
@@ -181,7 +182,7 @@ mod tests {
         let records = [
             record("mine", IndexState::Running { pid: 100 }),
             record("other", IndexState::Running { pid: 200 }),
-            record("boxed", IndexState::InContainer),
+            record("boxed", IndexState::InContainer { pid: None }),
             record("old", IndexState::Closed),
         ];
         let sessions = resolve(&records, &[pane(7, 100, None)], &[]);
@@ -213,7 +214,7 @@ mod tests {
     fn live_sessions_carry_their_status_and_closed_ones_none() {
         let mut busy = record("busy", IndexState::Running { pid: 100 });
         (busy.activity, busy.activity_since_ms) = (Some(Activity::Busy), 50);
-        let mut asks = record("asks", IndexState::InContainer);
+        let mut asks = record("asks", IndexState::InContainer { pid: None });
         (asks.activity, asks.activity_since_ms) = (Some(Activity::Waiting { reason: Some("dialog open".into()) }), 60);
         let mut stale = record("old", IndexState::Closed);
         (stale.activity, stale.activity_since_ms) = (Some(Activity::Idle), 70);

@@ -545,6 +545,7 @@ mod tests {
             activity: None,
             activity_since_ms: 0,
             proc_start: None,
+            container_id: None,
         };
         state.records = Some(Arc::new(vec![record]));
         state.publish_sessions(true);
