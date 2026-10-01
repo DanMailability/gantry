@@ -106,6 +106,12 @@ pub fn most_urgent<'a>(statuses: impl IntoIterator<Item = &'a SessionStatus>) ->
     statuses.into_iter().max_by_key(|status| rank(status))
 }
 
+/// `title` without the status glyph Claude puts in front of its terminal title (◐/◑ while busy, ✳ when idle);
+/// ccm shows its own status next to the title.
+pub fn without_claude_glyph(title: &str) -> &str {
+    title.strip_prefix(['◐', '◑', '✳']).map_or(title, str::trim_start)
+}
+
 /// Notification summary and body for `kind` on the session titled `title` in `dir` (already shortened for display).
 pub fn describe(kind: &AlertKind, title: &str, dir: &str) -> (String, String) {
     match kind {
@@ -213,6 +219,15 @@ mod tests {
         assert_eq!(most_urgent([&idle, &needs, &busy]), Some(&needs));
         assert_eq!(most_urgent([&idle, &busy]), Some(&busy));
         assert_eq!(most_urgent([]), None);
+    }
+
+    #[test]
+    fn claudes_own_status_glyph_is_dropped_from_titles() {
+        assert_eq!(without_claude_glyph("◐ Poem about terminals"), "Poem about terminals");
+        assert_eq!(without_claude_glyph("◑ Poem"), "Poem");
+        assert_eq!(without_claude_glyph("✳ Poem"), "Poem");
+        assert_eq!(without_claude_glyph("Claude Code"), "Claude Code");
+        assert_eq!(without_claude_glyph("◐"), "");
     }
 
     #[test]

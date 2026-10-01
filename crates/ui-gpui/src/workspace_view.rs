@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use app_core::attention::{Alert, AlertKind, AttentionTracker, describe};
+use app_core::attention::{Alert, AlertKind, AttentionTracker, describe, without_claude_glyph};
 use app_core::layout_store;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
@@ -861,6 +861,7 @@ impl WorkspaceView {
             .map(|(index, tab)| {
                 let title = self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title());
                 let status = self.workspace.tab_status(index, sessions).cloned();
+                let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
                 (title, status, unseen)
             })
@@ -977,6 +978,7 @@ impl WorkspaceView {
                 let focused = leaf == tab.focused;
                 let title = view.read(cx).title();
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
+                let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 Some(
                     div()
                         .absolute()
