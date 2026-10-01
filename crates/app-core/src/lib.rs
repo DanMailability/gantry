@@ -1,6 +1,7 @@
 //! GPUI-free application logic for ccm: terminal state, render snapshots, and input encoding.
 
 pub mod input;
+pub mod layout_store;
 pub mod layout;
 pub mod palette;
 pub mod replay;
@@ -10,3 +11,4 @@ pub mod snapshot;
 pub mod split_tree;
 pub mod term_state;
 pub mod url;
+pub mod workspace;

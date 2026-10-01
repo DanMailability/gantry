@@ -13,3 +13,7 @@ regex.workspace = true
 unicode-bidi.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+protocol.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
