@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -44,6 +44,50 @@ pub struct PaneInfo {
     pub cwd: PathBuf,
     /// Focus sequence number; higher = focused more recently (0 = never).
     pub last_focused: u64,
+}
+
+/// Where a Claude session runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionState {
+    /// In this daemon's pane.
+    Managed {
+        /// That pane.
+        pane: PaneId,
+    },
+    /// Outside ccm: another terminal on this host (`pid`), or a container (`pid: None`).
+    External {
+        /// Host process id, when it runs on this host.
+        pid: Option<u32>,
+    },
+    /// Nothing runs it; it can be resumed.
+    Closed,
+}
+
+/// One Claude session, from the daemon's index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Session id (`claude --resume <id>`).
+    pub id: String,
+    /// Directory it runs (ran) in.
+    pub cwd: PathBuf,
+    /// Title; empty while a live session has no transcript yet.
+    pub title: String,
+    /// Last activity, ms since the Unix epoch.
+    pub last_active_ms: u64,
+    /// Where it runs.
+    pub state: SessionState,
+    /// Whether `cwd` still exists.
+    pub cwd_exists: bool,
+}
+
+/// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`, when
+/// `program` is `claude`.
+pub fn claude_session<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
+    if std::path::Path::new(program).file_stem().is_none_or(|stem| stem != "claude") {
+        return None;
+    }
+    args.windows(2).find(|pair| matches!(pair[0].as_str(), "--session-id" | "--resume" | "-r")).map(|pair| pair[1].as_str())
 }
 
 /// GUI → daemon.
@@ -149,6 +193,18 @@ pub enum DaemonMessage {
         /// Exit code.
         code: u32,
     },
+    /// Every known Claude session, replacing any earlier list (sent after `Panes`).
+    Sessions {
+        /// Sessions, most recently active first.
+        sessions: Vec<SessionInfo>,
+    },
+    /// Sessions that appeared or changed, and ids that disappeared, since the last list.
+    SessionsChanged {
+        /// New or changed sessions.
+        upserted: Vec<SessionInfo>,
+        /// Ids no longer known.
+        removed: Vec<String>,
+    },
     /// Another GUI connected; this connection is closed next.
     TakenOver,
     /// A request could not be handled.
@@ -190,5 +246,39 @@ mod tests {
     fn cwd_from_is_optional_on_the_wire() {
         let json = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
         assert_eq!(serde_json::from_str::<SpawnRequest>(json).unwrap().cwd_from, None);
+    }
+
+    #[test]
+    fn session_messages_round_trip_with_a_tagged_state() {
+        let session = SessionInfo {
+            id: "9835b878".into(),
+            cwd: "/home/me/repo".into(),
+            title: "Fix the build".into(),
+            last_active_ms: 1_790_840_985_757,
+            state: SessionState::Managed { pane: 3 },
+            cwd_exists: true,
+        };
+        assert!(serde_json::to_string(&session).unwrap().contains(r#""state":{"kind":"managed","pane":3}"#));
+        for message in [
+            DaemonMessage::Sessions { sessions: vec![session.clone()] },
+            DaemonMessage::SessionsChanged {
+                upserted: vec![SessionInfo { state: SessionState::External { pid: None }, ..session.clone() }],
+                removed: vec!["gone".into()],
+            },
+        ] {
+            let json = serde_json::to_string(&message).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn claude_session_reads_the_session_flags_of_claude_only() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(claude_session("claude", &args(&["--session-id", "abc"])), Some("abc"));
+        assert_eq!(claude_session("/usr/bin/claude", &args(&["--model", "x", "--resume", "def"])), Some("def"));
+        assert_eq!(claude_session("claude", &args(&["-r", "ghi"])), Some("ghi"));
+        assert_eq!(claude_session("claude", &args(&["--continue"])), None);
+        assert_eq!(claude_session("sh", &args(&["--session-id", "abc"])), None);
+        assert_eq!(claude_session("claude", &args(&["--resume"])), None);
     }
 }
