@@ -35,6 +35,10 @@ pub struct ScrollModes {
     pub mouse_report: bool,
     /// Mouse events use SGR encoding.
     pub sgr_mouse: bool,
+    /// Report motion while a button is held (1002).
+    pub mouse_drag: bool,
+    /// Report all motion (1003).
+    pub mouse_motion: bool,
     /// DECCKM application cursor keys.
     pub app_cursor: bool,
 }
@@ -187,6 +191,8 @@ impl TermState {
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
             mouse_report: mode.intersects(TermMode::MOUSE_MODE),
             sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+            mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
+            mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
             app_cursor: mode.contains(TermMode::APP_CURSOR),
         }
     }

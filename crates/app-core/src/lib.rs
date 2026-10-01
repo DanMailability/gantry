@@ -7,6 +7,7 @@ pub mod input;
 pub mod launcher;
 pub mod layout_store;
 pub mod layout;
+pub mod mouse;
 pub mod palette;
 pub mod replay;
 pub mod paste;

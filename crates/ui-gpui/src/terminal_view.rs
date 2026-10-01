@@ -6,6 +6,7 @@ use app_core::bidi::{RowOrder, logical_hit, to_display};
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
 use app_core::paste::encode_paste;
+use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
 use app_core::scroll::{ScrollAction, scroll_action};
 use app_core::url::link_at;
 use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
@@ -162,6 +163,10 @@ pub struct TerminalView {
     row_orders: Vec<Option<RowOrder>>,
     /// Input typed while Starting, sent on attach.
     held_input: Vec<u8>,
+    /// Button whose press was reported to the program (its release goes there too).
+    reporting: Option<mouse::Button>,
+    /// Last cell a mouse report named.
+    reported_cell: Option<(u16, u16)>,
 }
 
 impl EventEmitter<PaneEvent> for TerminalView {}
@@ -195,6 +200,8 @@ impl TerminalView {
             hovered_link: None,
             row_orders: Vec::new(),
             held_input: Vec::new(),
+            reporting: None,
+            reported_cell: None,
         }
     }
 
@@ -432,9 +439,36 @@ impl TerminalView {
             cx.open_url(&link.url);
             return;
         }
+        if let Some(button) = report_button(event.button)
+            && self.report(MouseAction::Press(button), event.modifiers, Some((col, row)))
+        {
+            self.reporting = Some(button);
+            self.reported_cell = Some((col, row));
+            return;
+        }
+        self.reporting = None;
+        if event.button != MouseButton::Left {
+            return;
+        }
         self.term.start_selection(col, row, right_half);
         self.selecting = true;
         cx.notify();
+    }
+
+    /// Send `action` at `cell` to the program when its mouse mode asks for it. Shift keeps the mouse for selecting,
+    /// except for the release of a press that was already reported.
+    fn report(&mut self, action: MouseAction, modifiers: Modifiers, cell: Option<(u16, u16)>) -> bool {
+        if modifiers.shift && !matches!(action, MouseAction::Release(_)) {
+            return false;
+        }
+        let Some((col, row)) = cell else { return false };
+        match encode_mouse(self.term.scroll_modes(), action, report_mods(modifiers), col, row) {
+            Some(bytes) => {
+                self.write_pty(&bytes);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Underline the link under the mouse while the link modifier (Ctrl, or Cmd on macOS) is held.
@@ -459,6 +493,14 @@ impl TerminalView {
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.mouse_position = Some(event.position);
         self.update_hovered_link(event.modifiers, cx);
+        if self.term.scroll_modes().mouse_report && !event.modifiers.shift && !self.selecting {
+            let cell = self.logical_cell_at(event.position).map(|(col, row, _)| (col, row));
+            if cell.is_some() && cell != self.reported_cell {
+                self.report(MouseAction::Motion(event.pressed_button.and_then(report_button)), event.modifiers, cell);
+                self.reported_cell = cell;
+            }
+            return;
+        }
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -468,7 +510,14 @@ impl TerminalView {
         }
     }
 
-    fn mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(button) = self.reporting.take() {
+            // Released outside the grid: report it at the last cell the program heard about.
+            let cell = self.logical_cell_at(event.position).map(|(col, row, _)| (col, row)).or(self.reported_cell);
+            self.report(MouseAction::Release(button), event.modifiers, cell);
+            self.reported_cell = None;
+            return;
+        }
         self.selecting = false;
         if self.term.selection_text().is_none() {
             self.term.clear_selection();
@@ -602,8 +651,12 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::zoom_reset))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .when(hovering_link, |this| this.cursor_pointer())
@@ -659,6 +712,19 @@ fn banner_button(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div().id(id).px_2().rounded_sm().border_1().border_color(rgb(0x6cb6ff)).cursor_pointer().child(label).on_click(on_click)
+}
+
+fn report_button(button: MouseButton) -> Option<mouse::Button> {
+    match button {
+        MouseButton::Left => Some(mouse::Button::Left),
+        MouseButton::Middle => Some(mouse::Button::Middle),
+        MouseButton::Right => Some(mouse::Button::Right),
+        _ => None,
+    }
+}
+
+fn report_mods(modifiers: Modifiers) -> MouseMods {
+    MouseMods { alt: modifiers.alt, ctrl: modifiers.control }
 }
 
 fn link_modifier(modifiers: Modifiers) -> bool {
