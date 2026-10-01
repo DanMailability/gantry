@@ -71,6 +71,24 @@ const FONT_FAMILY: &str = "Menlo";
 #[cfg(target_os = "windows")]
 const FONT_FAMILY: &str = "Consolas";
 
+/// Tried before cosmic-text's own fallback list, which misses some installed symbol fonts (it asks for "Noto Sans
+/// Symbols2"; `⏺` then lands on a COLRv1 emoji font that cannot be drawn). GPUI drops — and unloads — any fallback
+/// font without an `m` glyph, so pure symbol or Hebrew fonts must not be listed here.
+#[cfg(target_os = "linux")]
+const FALLBACK_FAMILIES: &[&str] = &["Adwaita Mono", "Symbola"];
+
+/// The pane font, with its fallback chain on Linux.
+fn pane_font() -> Font {
+    #[allow(unused_mut)]
+    let mut pane_font = font(FONT_FAMILY);
+    #[cfg(target_os = "linux")]
+    {
+        pane_font.fallbacks =
+            Some(gpui::FontFallbacks::from_fonts(FALLBACK_FAMILIES.iter().map(|family| family.to_string()).collect()));
+    }
+    pane_font
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CellMetrics {
     width: Pixels,
@@ -148,7 +166,7 @@ impl TerminalView {
             state: PaneState::Starting,
             title: None,
             cell: (0, 0),
-            font: font(FONT_FAMILY),
+            font: pane_font(),
             font_size: px(DEFAULT_FONT_SIZE),
             grid_origin: Point::default(),
             grid_size: (80, 24),
@@ -723,6 +741,12 @@ mod tests {
             key: key.into(),
             key_char: key_char.map(Into::into),
         }
+    }
+
+    #[test]
+    fn the_pane_font_falls_back_to_fonts_gpui_keeps() {
+        let fallbacks = pane_font().fallbacks.expect("Linux panes have a fallback chain");
+        assert_eq!(fallbacks.fallback_list(), ["Adwaita Mono", "Symbola"]);
     }
 
     #[test]
