@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use claude_index::containers::{Container, Docker, Mount, to_host};
+use claude_index::containers::{Container, Docker, Mount, to_container, to_host};
 use claude_index::index::{IndexState, SessionRecord};
 use protocol::message::{ContainerPlace, PaneId};
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,62 @@ pub fn marker(instance: &str, pane: PaneId) -> String {
     format!("{instance}:{pane}")
 }
 
+/// What resuming a session whose dev container is gone says.
+pub const GONE: &str = "This session ran in a dev container that no longer exists. Open the project in VS Code to rebuild it.";
+
+/// Quote `word` for `bash -c` (single quotes; `'` becomes `'\''`).
+pub fn shell_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// The `docker exec` command line that runs `program args` in `c` at `container_cwd`, through an interactive bash
+/// so `.bashrc` puts `~/.local/bin` on `PATH`, as in VS Code's terminal. Programs other than Claude get `bash -i`.
+pub fn exec_command(c: &Container, container_cwd: &Path, program: &str, args: &[String], marker: &str) -> (String, Vec<String>) {
+    let mut out: Vec<String> = vec!["exec".into(), "-it".into()];
+    if let Some(user) = &c.remote_user {
+        out.extend(["-u".into(), user.clone()]);
+    }
+    out.extend(["-w".into(), container_cwd.display().to_string()]);
+    let mut vars = vec!["TERM=xterm-256color".to_string(), "COLORTERM=truecolor".into(), format!("{PANE_MARKER}={marker}")];
+    vars.extend(c.config_dir.as_ref().map(|dir| format!("CLAUDE_CONFIG_DIR={dir}")));
+    for var in vars {
+        out.extend(["-e".into(), var]);
+    }
+    out.push(c.id.clone());
+    if Path::new(program).file_stem().is_some_and(|stem| stem == "claude") {
+        let words: Vec<String> = std::iter::once(program).chain(args.iter().map(String::as_str)).map(shell_quote).collect();
+        out.extend(["bash".into(), "-ic".into(), format!("exec {}", words.join(" "))]);
+    } else {
+        out.extend(["bash".into(), "-i".into()]);
+    }
+    ("docker".into(), out)
+}
+
+fn best(mut found: Vec<&Container>) -> Option<&Container> {
+    found.sort_by(|a, b| a.running.cmp(&b.running).then_with(|| a.created.cmp(&b.created)));
+    found.pop()
+}
+
+/// The container serving `host_folder`: a running one first, then the newest.
+pub fn choose<'a>(containers: &'a [Container], host_folder: &Path) -> Option<&'a Container> {
+    best(containers.iter().filter(|c| c.host_folder == host_folder).collect())
+}
+
+/// The container that mounts `dir`: a running one first, then the newest.
+pub fn for_dir<'a>(containers: &'a [Container], dir: &Path) -> Option<&'a Container> {
+    best(containers.iter().filter(|c| to_container(&c.mounts, dir).is_some()).collect())
+}
+
+/// Refresh, pick the container serving `host_folder`, and start it if it is stopped.
+pub fn ready(docker: &impl Docker, registry: &mut Registry, host_folder: &Path) -> Result<Container, String> {
+    registry.refresh(docker).map_err(|err| format!("Docker is not available: {err}"))?;
+    let container = choose(registry.containers(), host_folder).cloned().ok_or_else(|| GONE.to_string())?;
+    if !container.running {
+        docker.start(&container.id).map_err(|err| format!("Could not start the dev container {}: {err}", container.name))?;
+    }
+    Ok(container)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +267,82 @@ mod tests {
         registry.refresh(&FakeDocker(vec![container("4a31e67c9795abcd", "/h", "/w", "1")])).unwrap();
         assert!(registry.knows("4a31e67c9795abcd") && registry.knows("4a31e6"));
         assert!(!registry.knows("ffff"));
+    }
+
+    #[test]
+    fn claude_runs_through_an_interactive_bash_as_the_container_user() {
+        let c = container("c1", "/home/u/app", "/workspaces/app", "1");
+        let (program, args) = exec_command(&c, Path::new("/workspaces/app/sub"), "claude", &["--resume".into(), "it's".into()], "i:4");
+        assert_eq!(program, "docker");
+        assert_eq!(
+            args,
+            [
+                "exec", "-it", "-u", "u", "-w", "/workspaces/app/sub", "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor",
+                "-e", "GANTRY_PANE=i:4", "-e", "CLAUDE_CONFIG_DIR=/home/u/.claude", "c1", "bash", "-ic", "exec 'claude' '--resume' 'it'\\''s'",
+            ]
+            .map(String::from)
+        );
+    }
+
+    #[test]
+    fn a_shell_pane_is_an_interactive_bash() {
+        let c = container("c1", "/home/u/app", "/workspaces/app", "1");
+        let (_, args) = exec_command(&c, Path::new("/workspaces/app"), "/bin/zsh", &[], "i:5");
+        assert_eq!(&args[args.len() - 3..], ["c1", "bash", "-i"]);
+    }
+
+    #[test]
+    fn the_running_container_wins_then_the_newest() {
+        let mut stopped = container("a", "/h/app", "/workspaces/app", "2026-09-01");
+        stopped.running = false;
+        let older = container("b", "/h/app", "/workspaces/app", "2026-01-01");
+        assert_eq!(choose(&[stopped.clone(), older.clone()], Path::new("/h/app")).unwrap().id, "b");
+        assert_eq!(choose(std::slice::from_ref(&stopped), Path::new("/h/app")).unwrap().id, "a");
+        assert!(choose(&[stopped], Path::new("/h/other")).is_none());
+        assert_eq!(for_dir(std::slice::from_ref(&older), Path::new("/h/app/src")).unwrap().id, "b");
+        assert!(for_dir(&[older], Path::new("/h")).is_none());
+    }
+
+    struct RecordingDocker {
+        containers: Vec<Container>,
+        started: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Docker for RecordingDocker {
+        fn list(&self) -> Result<Vec<Container>, String> {
+            Ok(self.containers.clone())
+        }
+        fn start(&self, id: &str) -> Result<(), String> {
+            self.started.borrow_mut().push(id.into());
+            Ok(())
+        }
+    }
+
+    struct FailingDocker;
+
+    impl Docker for FailingDocker {
+        fn list(&self) -> Result<Vec<Container>, String> {
+            Err("Cannot connect to the Docker daemon".into())
+        }
+        fn start(&self, _id: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+    }
+
+    #[test]
+    fn a_stopped_container_is_started_and_a_removed_one_explains_itself() {
+        let mut c = container("a", "/h/app", "/workspaces/app", "1");
+        c.running = false;
+        let docker = RecordingDocker { containers: vec![c], started: Default::default() };
+        let mut registry = Registry::load(None);
+        assert_eq!(ready(&docker, &mut registry, Path::new("/h/app")).unwrap().id, "a");
+        assert_eq!(*docker.started.borrow(), ["a"]);
+        assert_eq!(ready(&docker, &mut registry, Path::new("/h/gone")).unwrap_err(), GONE);
+    }
+
+    #[test]
+    fn docker_failures_reach_the_pane() {
+        let err = ready(&FailingDocker, &mut Registry::load(None), Path::new("/h/app")).unwrap_err();
+        assert!(err.contains("Cannot connect"), "{err}");
     }
 }

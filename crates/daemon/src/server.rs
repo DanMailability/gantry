@@ -7,18 +7,18 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use app_core::term_state::TermState;
-use claude_index::containers::DockerCli;
+use claude_index::containers::{DockerCli, to_container};
 use claude_index::host::{Marked, processes_with_env};
 use claude_index::index::{IndexState, SessionRecord};
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use claude_index::host::LocalHost;
 use protocol::message::{
-    ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome, claude_session,
+    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome, claude_session,
 };
 use tokio::sync::Notify;
 
-use crate::containers::{PANE_MARKER, Registry, marker};
+use crate::containers::{self, PANE_MARKER, Registry, marker};
 use crate::outbox::Outbox;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
 use crate::sessions::{ContainerView, Gone, PaneSession, diff, resolve, spawn_indexer, still_claimed};
@@ -508,7 +508,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
                     args: pane.args.clone(),
                     cwd: pane.cwd.clone(),
                     last_focused: pane.last_focused,
-                    container: None,
+                    container: pane.container.clone(),
                 })
                 .collect();
             panes.sort_by(|a, b| b.last_focused.cmp(&a.last_focused).then(b.pane.cmp(&a.pane)));
@@ -545,7 +545,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             }
         }
         ClientMessage::TakeOver { session, force } => take_over_session(shared, session, force),
-        ClientMessage::FindContainer { request, .. } => shared.lock().control(&DaemonMessage::ContainerFound { request, container: None }),
+        ClientMessage::FindContainer { request, dir } => find_container(shared, request, dir),
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             if state.panes.get(&pane).is_some_and(|p| p.container.is_some()) {
@@ -559,21 +559,103 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
 }
 
 fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnRequest) {
+    if let Some(folder) = spec.container.clone() {
+        spawn_in_container(shared.clone(), client_id, request, spec, folder);
+        return;
+    }
     let cwd = spec
         .cwd_from
         .and_then(|from| shared.lock().panes.get(&from).and_then(|pane| pane.pty.current_dir()))
         .unwrap_or_else(|| spec.cwd.clone());
+    let command = (spec.program.clone(), spec.args.clone());
+    start_pane(shared, client_id, request, spec, cwd, |_| command, None);
+}
+
+/// Answer `FindContainer`: refresh the dev containers (off the async threads) and name the one that mounts `dir`.
+fn find_container(shared: &Arc<Shared>, request: u64, dir: PathBuf) {
+    let Some(program) = shared.docker.clone() else {
+        shared.lock().control(&DaemonMessage::ContainerFound { request, container: None });
+        return;
+    };
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut registry = shared.lock().registry.clone();
+        let refreshed = registry.refresh(&DockerCli { program });
+        let mut state = shared.lock();
+        if refreshed.is_ok() {
+            state.registry = registry;
+        }
+        let container = refreshed.ok().and_then(|()| containers::for_dir(state.registry.containers(), &dir)).map(|c| ContainerChoice {
+            host_folder: c.host_folder.clone(),
+            name: c.name.clone(),
+            short_id: c.short_id().into(),
+            running: c.running,
+        });
+        state.control(&DaemonMessage::ContainerFound { request, container });
+    });
+}
+
+/// Start `spec` in the dev container serving `folder`: find it (starting it when stopped), then run the command
+/// through `docker exec` with this pane's marker.
+fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: SpawnRequest, folder: PathBuf) {
+    tokio::spawn(async move {
+        let fail = |shared: &Shared, error: String| shared.lock().control(&DaemonMessage::SpawnFailed { request, error });
+        let Some(program) = shared.docker.clone() else {
+            return fail(&shared, "Dev containers are not available: Docker is turned off".into());
+        };
+        let mut registry = shared.lock().registry.clone();
+        let looked_up = tokio::task::spawn_blocking(move || {
+            let ready = containers::ready(&DockerCli { program }, &mut registry, &folder);
+            (registry, ready, folder)
+        })
+        .await;
+        let Ok((registry, ready, folder)) = looked_up else { return fail(&shared, "the Docker lookup failed".into()) };
+        shared.lock().registry = registry;
+        let container = match ready {
+            Ok(container) => container,
+            Err(error) => return fail(&shared, error),
+        };
+        let Some(inner_cwd) = to_container(&container.mounts, &spec.cwd) else {
+            return fail(&shared, format!("{} is not inside the dev container {}", spec.cwd.display(), container.name));
+        };
+        let cwd = spec.cwd.clone();
+        let (program, args) = (spec.program.clone(), spec.args.clone());
+        let instance = shared.instance.clone();
+        start_pane(
+            &shared,
+            client_id,
+            request,
+            spec,
+            cwd,
+            |id| containers::exec_command(&container, &inner_cwd, &program, &args, &marker(&instance, id)),
+            Some(folder),
+        );
+    });
+}
+
+/// Start a pane for `spec` in `cwd`, running the command `command` builds from the new pane's id.
+fn start_pane(
+    shared: &Arc<Shared>,
+    client_id: u64,
+    request: u64,
+    spec: SpawnRequest,
+    cwd: PathBuf,
+    command: impl FnOnce(PaneId) -> (String, Vec<String>),
+    container: Option<PathBuf>,
+) {
     let session_arg = claude_session(&spec.program, &spec.args).map(String::from);
+    let mut state = shared.lock();
+    let id = state.next_pane;
+    let (program, args) = command(id);
     let pty_spec = SpawnSpec {
-        program: spec.program.clone(),
-        args: spec.args.clone(),
+        program,
+        args,
         cwd: cwd.clone(),
         env: Vec::new(),
         base_env: Some(shared.base_env.clone()),
         cols: spec.cols,
         rows: spec.rows,
     };
-    let mut state = shared.lock();
     let (pty, reader) = match PtyProcess::spawn(&pty_spec) {
         Ok(pair) => pair,
         Err(err) => {
@@ -581,7 +663,6 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
             return;
         }
     };
-    let id = state.next_pane;
     state.next_pane += 1;
     state.focus_seq += 1;
     let exit = pty.exit_signal();
@@ -594,7 +675,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         cwd: cwd.clone(),
         session_arg,
         start,
-        container: None,
+        container,
         last_focused: state.focus_seq,
         needs_resync: false,
     };
