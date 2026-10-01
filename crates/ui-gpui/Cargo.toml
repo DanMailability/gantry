@@ -16,3 +16,4 @@ protocol.workspace = true
 async-channel.workspace = true
 tracing.workspace = true
 notify-rust.workspace = true
+rodio.workspace = true
