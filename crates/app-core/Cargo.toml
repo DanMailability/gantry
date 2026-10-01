@@ -11,3 +11,5 @@ workspace = true
 alacritty_terminal.workspace = true
 regex.workspace = true
 unicode-bidi.workspace = true
+serde.workspace = true
+serde_json.workspace = true

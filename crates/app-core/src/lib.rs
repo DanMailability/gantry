@@ -7,5 +7,6 @@ pub mod replay;
 pub mod paste;
 pub mod scroll;
 pub mod snapshot;
+pub mod split_tree;
 pub mod term_state;
 pub mod url;
