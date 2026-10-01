@@ -13,12 +13,13 @@ use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::pty::default_shell;
 use gpui::{
     Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
-    PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
+    PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
 };
 use protocol::message::{PaneId, SessionInfo, SessionState};
 
 use app_core::session_tree::{Activation, ShellEntry};
 
+use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
 use crate::window_frame;
@@ -44,7 +45,7 @@ mod workspace_actions {
             NewClaudeTab, NewShellTab, SplitRightClaude, SplitRightShell, SplitDownClaude, SplitDownShell, ClosePane,
             FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
             ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
-            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession
+            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher
         ]
     );
 }
@@ -89,6 +90,7 @@ fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new(&format!("{tab_n}-9"), ActivateTab9, context),
         KeyBinding::new(&format!("{m}-b"), ToggleSidebar, context),
         KeyBinding::new(&format!("{m}-f"), FindSession, context),
+        KeyBinding::new(&format!("{m}-o"), OpenLauncher, context),
     ]
 }
 
@@ -119,6 +121,8 @@ pub struct WorkspaceView {
     /// The sidebar's edge is being dragged.
     resizing_sidebar: bool,
     _sidebar_events: Subscription,
+    /// The open launcher overlay.
+    launcher: Option<(Entity<LauncherView>, Subscription)>,
     _events: Task<()>,
 }
 
@@ -164,6 +168,7 @@ impl WorkspaceView {
             sidebar_bounds: Bounds::default(),
             resizing_sidebar: false,
             _sidebar_events: sidebar_events,
+            launcher: None,
             _events: events_task,
         };
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
@@ -432,6 +437,40 @@ impl WorkspaceView {
         }
         let width = f32::from(event.position.x - self.sidebar_bounds.origin.x);
         self.workspace.sidebar.width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        cx.notify();
+    }
+
+    fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
+        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
+        let view = cx.new(|cx| LauncherView::new(sessions, cx));
+        let subscription = cx.subscribe_in(&view, window, |this, _, event: &LauncherEvent, window, cx| {
+            this.on_launcher_event(event.clone(), window, cx)
+        });
+        view.focus_handle(cx).focus(window, cx);
+        self.launcher = Some((view, subscription));
+        cx.notify();
+    }
+
+    fn on_launcher_event(&mut self, event: LauncherEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.launcher = None;
+        match event {
+            LauncherEvent::Open { dir, claude } => self.open_launch(new_launch(claude, dir), None, None, window, cx),
+            LauncherEvent::Browse { claude } => {
+                let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
+                cx.spawn_in(window, async move |this, cx| {
+                    let dir = match picked.await {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        _ => None,
+                    };
+                    let _ = this.update_in(cx, |this, window, cx| match dir {
+                        Some(dir) => this.open_launch(new_launch(claude, dir), None, None, window, cx),
+                        None => this.focus_current(window, cx),
+                    });
+                })
+                .detach();
+            }
+            LauncherEvent::Dismiss => self.focus_current(window, cx),
+        }
         cx.notify();
     }
 
@@ -842,6 +881,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::activate_tab_9))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::find_session))
+            .on_action(cx.listener(Self::open_launcher))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if std::mem::take(&mut this.resizing_sidebar) {
@@ -882,7 +922,12 @@ impl Render for WorkspaceView {
                         })),
                 )
             })
-            .child(main);
+            .child(main)
+            .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div().id("launcher-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
+                )
+            });
         window_frame::frame(window, root)
     }
 }
@@ -920,6 +965,7 @@ mod tests {
             ("alt-9", "workspace::ActivateTab9"),
             ("ctrl-shift-b", "workspace::ToggleSidebar"),
             ("ctrl-shift-f", "workspace::FindSession"),
+            ("ctrl-shift-o", "workspace::OpenLauncher"),
         ] {
             assert_eq!(action_for(keys), Some(action), "{keys}");
         }
