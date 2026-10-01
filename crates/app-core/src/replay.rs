@@ -36,13 +36,17 @@ impl TermState {
     /// Escape stream that rebuilds this terminal in a fresh one of the same size.
     ///
     /// Replays the active grid (with scrollback when on the primary screen), cell styles, the
-    /// cursor, terminal modes, kitty keyboard flags, cursor style, and palette overrides. While the
-    /// alternate screen is active only the alternate screen is replayed. Scroll region, title,
-    /// charsets, tab stops, and hyperlinks are not replayed.
+    /// cursor, terminal modes, kitty keyboard flags, cursor style, palette overrides, and the
+    /// window title. While the alternate screen is active only the alternate screen is replayed.
+    /// Scroll region, charsets, tab stops, and hyperlinks are not replayed.
     pub fn replay_bytes(&self) -> Vec<u8> {
         let term = &self.term;
         let mode = *term.mode();
         let mut out = String::new();
+        if let Some(title) = self.title() {
+            let title: String = title.chars().filter(|c| !c.is_control()).collect();
+            write!(out, "\x1b]2;{title}\x07").unwrap();
+        }
         for index in 0..=258 {
             if let Some(rgb) = term.colors()[index] {
                 let spec = format!("rgb:{:02x}/{:02x}/{:02x}", rgb.r, rgb.g, rgb.b);
@@ -296,5 +300,15 @@ mod tests {
         let copy = replayed(&t, 10, 3);
         assert_same_screen(&t, &copy);
         assert!(copy.scroll_modes().alt_screen);
+    }
+
+    #[test]
+    fn title_survives_replay() {
+        let mut a = TermState::new(20, 4);
+        a.feed(b"\x1b]2;my task\x07hi");
+        let mut b = TermState::new(20, 4);
+        b.feed(&a.replay_bytes());
+        assert_eq!(b.title().as_deref(), Some("my task"));
+        assert_eq!(b.row_text(0), "hi");
     }
 }

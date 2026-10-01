@@ -52,6 +52,7 @@ enum Reply {
 #[derive(Clone)]
 pub(crate) struct Listener {
     replies: Arc<Mutex<Vec<Reply>>>,
+    title: Arc<Mutex<Option<String>>>,
 }
 
 impl EventListener for Listener {
@@ -60,6 +61,14 @@ impl EventListener for Listener {
             Event::PtyWrite(text) => Reply::Text(text),
             Event::ColorRequest(index, format) => Reply::Color(index, format),
             Event::TextAreaSizeRequest(format) => Reply::TextAreaSize(format),
+            Event::Title(title) => {
+                *self.title.lock().unwrap() = Some(title);
+                return;
+            }
+            Event::ResetTitle => {
+                *self.title.lock().unwrap() = None;
+                return;
+            }
             _ => return,
         };
         self.replies.lock().unwrap().push(reply);
@@ -88,6 +97,7 @@ pub struct TermState {
     pub(crate) term: Term<Listener>,
     parser: Processor,
     replies: Arc<Mutex<Vec<Reply>>>,
+    title: Arc<Mutex<Option<String>>>,
     palette: Palette,
     cell_size: (u16, u16),
 }
@@ -96,10 +106,11 @@ impl TermState {
     /// Create an empty terminal of the given size with kitty keyboard support enabled.
     pub fn new(cols: u16, rows: u16) -> Self {
         let replies = Arc::new(Mutex::new(Vec::new()));
-        let listener = Listener { replies: replies.clone() };
+        let title = Arc::new(Mutex::new(None));
+        let listener = Listener { replies: replies.clone(), title: title.clone() };
         let config = Config { kitty_keyboard: true, ..Config::default() };
         let size = GridSize { cols: cols as usize, rows: rows as usize };
-        TermState { term: Term::new(config, &size, listener), parser: Processor::new(), replies, palette: DARK, cell_size: (0, 0) }
+        TermState { term: Term::new(config, &size, listener), parser: Processor::new(), replies, title, palette: DARK, cell_size: (0, 0) }
     }
 
     /// Feed program output into the terminal.
@@ -142,6 +153,11 @@ impl TermState {
             258 => self.palette.cursor,
             _ => self.palette.foreground,
         }
+    }
+
+    /// Window title set by the program (OSC 0/2), if any.
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().unwrap().clone()
     }
 
     /// Change the grid size.
@@ -483,6 +499,16 @@ mod tests {
         assert_eq!(t.row_text(0), "line21");
         t.scroll_to_bottom();
         assert_eq!(t.row_text(0), "line26");
+    }
+
+    #[test]
+    fn osc_title_is_tracked() {
+        let mut t = TermState::new(10, 3);
+        assert_eq!(t.title(), None);
+        t.feed(b"\x1b]2;build: ok\x07");
+        assert_eq!(t.title().as_deref(), Some("build: ok"));
+        t.feed(b"\x1b]0;second\x1b\\");
+        assert_eq!(t.title().as_deref(), Some("second"));
     }
 
     #[test]
