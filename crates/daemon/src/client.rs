@@ -100,7 +100,7 @@ impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StartError::VersionMismatch { daemon_protocol } => {
-                write!(f, "the running daemon uses protocol {daemon_protocol}, this ccm uses {PROTOCOL_VERSION}")
+                write!(f, "the running daemon uses protocol {daemon_protocol}, this Gantry uses {PROTOCOL_VERSION}")
             }
             StartError::Io(error) => write!(f, "{error:#}"),
         }
@@ -168,7 +168,7 @@ impl DaemonClient {
         self.send(&ClientMessage::Kill { pane });
     }
 
-    /// Stop the process running `session` outside ccm (SIGKILL when `force`); answered by `TakeOverResult`.
+    /// Stop the process running `session` outside Gantry (SIGKILL when `force`); answered by `TakeOverResult`.
     pub fn take_over(&self, session: &str, force: bool) {
         self.send(&ClientMessage::TakeOver { session: session.into(), force });
     }

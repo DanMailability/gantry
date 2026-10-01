@@ -14,7 +14,7 @@ const TAIL_LIMIT: u64 = 256 << 10;
 /// Longest title kept, in characters.
 const MAX_TITLE_CHARS: usize = 120;
 
-/// What ccm shows for one transcript.
+/// What Gantry shows for one transcript.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscriptSummary {
     /// Session id (the file name without `.jsonl`).

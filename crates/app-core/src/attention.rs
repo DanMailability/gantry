@@ -1,4 +1,4 @@
-//! Attention: which status changes of ccm's own sessions deserve the user's notice (spec §5.7).
+//! Attention: which status changes of Gantry's own sessions deserve the user's notice (spec §5.7).
 
 use std::collections::HashMap;
 
@@ -107,7 +107,7 @@ pub fn most_urgent<'a>(statuses: impl IntoIterator<Item = &'a SessionStatus>) ->
 }
 
 /// `title` without the status glyph Claude puts in front of its terminal title (◐/◑ while busy, ✳ when idle);
-/// ccm shows its own status next to the title.
+/// Gantry shows its own status next to the title.
 pub fn without_claude_glyph(title: &str) -> &str {
     title.strip_prefix(['◐', '◑', '✳']).map_or(title, str::trim_start)
 }

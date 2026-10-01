@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn extra_env_and_cwd_are_applied() {
         let dir = tempfile::tempdir().unwrap();
-        let mut spec = sh("printf \"$CCM_TEST_VAR:\"; pwd -P", dir.path());
-        spec.env.push(("CCM_TEST_VAR".into(), "set".into()));
+        let mut spec = sh("printf \"$GANTRY_TEST_VAR:\"; pwd -P", dir.path());
+        spec.env.push(("GANTRY_TEST_VAR".into(), "set".into()));
         let (_pty, reader) = PtyProcess::spawn(&spec).unwrap();
         let expected = dir.path().canonicalize().unwrap().display().to_string();
         let out = read_until(reader, &expected, Duration::from_secs(5));
@@ -332,9 +332,9 @@ mod tests {
     #[test]
     fn base_env_replaces_the_inherited_environment() {
         let dir = tempfile::tempdir().unwrap();
-        let mut spec = sh("printf \"[$CCM_BASE][$HOME]\"", dir.path());
+        let mut spec = sh("printf \"[$GANTRY_BASE][$HOME]\"", dir.path());
         spec.base_env = Some(vec![
-            ("CCM_BASE".into(), "from-login-shell".into()),
+            ("GANTRY_BASE".into(), "from-login-shell".into()),
             ("PATH".into(), std::env::var("PATH").unwrap()),
         ]);
         let (_pty, reader) = PtyProcess::spawn(&spec).unwrap();

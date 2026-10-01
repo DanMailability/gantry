@@ -176,7 +176,7 @@ fn a_session_is_closed_as_soon_as_its_pane_exits() {
     }
 }
 
-/// Start `program args` as a process outside ccm and register it as running session `id`.
+/// Start `program args` as a process outside Gantry and register it as running session `id`.
 fn outside(s: &Setup, id: &str, program: &str, args: &[&str]) -> Child {
     let child = Command::new(program).args(args).spawn().unwrap();
     let pid = child.id();

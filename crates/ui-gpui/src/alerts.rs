@@ -23,7 +23,7 @@ pub fn deliver(notice: Notice, clicked: async_channel::Sender<NodeId>) {
 
 fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
     let shown = notify_rust::Notification::new()
-        .appname("ccm")
+        .appname("Gantry")
         .summary(&notice.summary)
         .body(&notice.body)
         .action("default", "Show")
@@ -74,7 +74,7 @@ mod tests {
     fn a_notification_and_the_chime_reach_the_desktop() {
         std::thread::spawn(chime).join().unwrap();
         // Do not wait for a click: pass as soon as it is shown.
-        let shown = notify_rust::Notification::new().appname("ccm").summary("ccm test").body("Delivered by the alerts module test").show();
+        let shown = notify_rust::Notification::new().appname("Gantry").summary("Gantry test").body("Delivered by the alerts module test").show();
         assert!(shown.is_ok(), "{:?}", shown.err());
     }
 }

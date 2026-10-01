@@ -124,7 +124,7 @@ fn spawn_failure_is_an_event() {
     let paths = Paths::in_dir(dir.path(), "t");
     let conn = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
     let mut spec = sh("true");
-    spec.program = "/nonexistent/ccm-test-program".into();
+    spec.program = "/nonexistent/gantry-test-program".into();
     conn.client.spawn(3, spec);
     assert!(matches!(
         next_event(&conn.events, |e| matches!(e, ClientEvent::SpawnFailed { .. })),

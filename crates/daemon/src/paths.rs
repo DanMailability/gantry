@@ -9,7 +9,7 @@ use interprocess::local_socket::{GenericFilePath, ToFsName};
 #[cfg(windows)]
 use interprocess::local_socket::{GenericNamespaced, ToNsName};
 
-/// Profile name from `CCM_PROFILE` (if non-empty), else `dev` for debug builds and `default` otherwise.
+/// Profile name from `GANTRY_PROFILE` (if non-empty), else `dev` for debug builds and `default` otherwise.
 pub fn profile_from(env_value: Option<String>, debug_build: bool) -> String {
     match env_value {
         Some(value) if !value.is_empty() => value,
@@ -20,7 +20,7 @@ pub fn profile_from(env_value: Option<String>, debug_build: bool) -> String {
 
 /// Profile of this process.
 pub fn current_profile() -> String {
-    profile_from(std::env::var("CCM_PROFILE").ok(), cfg!(debug_assertions))
+    profile_from(std::env::var("GANTRY_PROFILE").ok(), cfg!(debug_assertions))
 }
 
 #[derive(Clone, Debug)]
@@ -50,14 +50,14 @@ pub struct Paths {
 impl Paths {
     /// Standard locations for `profile`.
     pub fn for_profile(profile: &str) -> Paths {
-        let data = directories::ProjectDirs::from("", "", "ccm")
+        let data = directories::ProjectDirs::from("", "", "gantry")
             .map(|dirs| dirs.data_local_dir().to_path_buf())
-            .unwrap_or_else(|| std::env::temp_dir().join("ccm-data"));
+            .unwrap_or_else(|| std::env::temp_dir().join("gantry-data"));
         let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into());
         #[cfg(unix)]
         let runtime_dir = match std::env::var_os("XDG_RUNTIME_DIR") {
-            Some(dir) => PathBuf::from(dir).join(format!("ccm-{profile}")),
-            None => std::env::temp_dir().join(format!("ccm-{user}-{profile}")),
+            Some(dir) => PathBuf::from(dir).join(format!("gantry-{profile}")),
+            None => std::env::temp_dir().join(format!("gantry-{user}-{profile}")),
         };
         #[cfg(windows)]
         let runtime_dir = data.join(profile).join("run");
@@ -75,7 +75,7 @@ impl Paths {
         #[cfg(unix)]
         let socket = SocketLocation::File(runtime_dir.join("daemon.sock"));
         #[cfg(windows)]
-        let socket = SocketLocation::Pipe(format!("ccm-{profile}-{unique}"));
+        let socket = SocketLocation::Pipe(format!("gantry-{profile}-{unique}"));
         Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, layout_file, socket }
     }
 
@@ -103,6 +103,15 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_directories_are_named_after_gantry() {
+        let paths = Paths::for_profile("p");
+        let runtime = paths.runtime_dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(runtime.starts_with("gantry-") && runtime.ends_with("-p") || runtime == "gantry-p", "{runtime}");
+        assert!(paths.layout_file.to_string_lossy().contains("/gantry/p/"), "{:?}", paths.layout_file);
+    }
 
     #[test]
     fn profile_selection() {

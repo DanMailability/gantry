@@ -1,4 +1,4 @@
-//! Command-line arguments: `ccm [--cwd DIR] [-- PROGRAM ARGS...]`.
+//! Command-line arguments: `gantry [--cwd DIR] [-- PROGRAM ARGS...]`.
 
 use std::path::PathBuf;
 
@@ -29,7 +29,7 @@ impl LaunchArgs {
                 }
                 other => {
                     return Err(format!(
-                        "unknown argument `{other}` (usage: ccm [--cwd DIR] [-- PROGRAM ARGS...])"
+                        "unknown argument `{other}` (usage: gantry [--cwd DIR] [-- PROGRAM ARGS...])"
                     ));
                 }
             }

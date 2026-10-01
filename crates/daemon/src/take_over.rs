@@ -1,4 +1,4 @@
-//! Stopping a Claude that runs outside ccm, so its session can be resumed in a pane (spec §4.5).
+//! Stopping a Claude that runs outside Gantry, so its session can be resumed in a pane (spec §4.5).
 
 use std::time::{Duration, Instant};
 
@@ -21,14 +21,14 @@ pub struct Target {
     pub start: String,
 }
 
-/// The process running `session` outside ccm. Refused (with the reason) for sessions in containers, in ccm's own
+/// The process running `session` outside Gantry. Refused (with the reason) for sessions in containers, in Gantry's own
 /// panes, not running, unknown, or without a recorded start time.
 pub fn target(sessions: &[SessionInfo], records: &[SessionRecord], session: &str) -> Result<Target, String> {
     let info = sessions.iter().find(|s| s.id == session).ok_or("unknown session")?;
     let pid = match info.state {
         SessionState::External { pid: Some(pid) } => pid,
         SessionState::External { pid: None } => return Err("it runs in a container; stop it there".into()),
-        SessionState::Managed { .. } => return Err("it already runs in ccm".into()),
+        SessionState::Managed { .. } => return Err("it already runs in Gantry".into()),
         SessionState::Closed => return Err("it is not running".into()),
     };
     let start = records
@@ -142,7 +142,7 @@ mod tests {
         let records = [record("box", Some("1")), record("mine", Some("1")), record("old", Some("1")), record("nostart", None)];
         let refused = |id: &str| target(&sessions, &records, id).unwrap_err();
         assert!(refused("box").contains("container"), "{}", refused("box"));
-        assert!(refused("mine").contains("already runs in ccm"), "{}", refused("mine"));
+        assert!(refused("mine").contains("already runs in Gantry"), "{}", refused("mine"));
         assert!(refused("old").contains("not running"), "{}", refused("old"));
         assert!(refused("nostart").contains("no start time"), "{}", refused("nostart"));
         assert!(refused("unknown").contains("unknown session"), "{}", refused("unknown"));

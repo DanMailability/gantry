@@ -334,7 +334,7 @@ fn keep(fuzzy: &mut Option<Fuzzy>, title: &str, cwd: &Path, home: Option<&Path>)
 
 fn detail_text(session: &SessionInfo) -> Option<String> {
     match session.state {
-        SessionState::External { pid: Some(pid) } => Some(format!("Running outside ccm (pid {pid})")),
+        SessionState::External { pid: Some(pid) } => Some(format!("Running outside Gantry (pid {pid})")),
         SessionState::External { pid: None } => Some("Running in a container".into()),
         _ => None,
     }
@@ -751,7 +751,7 @@ mod tests {
         ]);
         fixture.details = Some("e".into());
         assert_eq!(fixture.outline(folders), vec![
-            "Local", "  ▾ /p [2/0]", "    e", "      (Running outside ccm (pid 42))", "      Take over…", "    box",
+            "Local", "  ▾ /p [2/0]", "    e", "      (Running outside Gantry (pid 42))", "      Take over…", "    box",
         ]);
         fixture.details = Some("box".into());
         assert_eq!(fixture.outline(status)[2..], ["  box".to_string(), "    (Running in a container)".to_string()]);

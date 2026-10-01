@@ -102,7 +102,7 @@ pub enum PaneState {
     Starting,
     /// Showing a live process.
     Live,
-    /// The process ended (`None`: it ended while ccm was closed).
+    /// The process ended (`None`: it ended while Gantry was closed).
     Exited(Option<u32>),
     /// The process could not be started.
     Failed(String),
@@ -267,9 +267,9 @@ impl TerminalView {
         match &self.state {
             PaneState::Starting | PaneState::Live => None,
             PaneState::Exited(Some(code)) => Some((format!("Process exited (code {code})"), true)),
-            PaneState::Exited(None) => Some(("Session ended while ccm was closed".into(), true)),
+            PaneState::Exited(None) => Some(("Session ended while Gantry was closed".into(), true)),
             PaneState::Failed(error) => Some((format!("Could not start: {error}"), true)),
-            PaneState::Disconnected => Some(("Lost connection to the ccm daemon — restart ccm".into(), false)),
+            PaneState::Disconnected => Some(("Lost connection to the Gantry daemon — restart Gantry".into(), false)),
         }
     }
 

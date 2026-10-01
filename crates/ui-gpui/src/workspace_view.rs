@@ -115,7 +115,7 @@ enum TakeOverTarget {
     Leaf(NodeId),
 }
 
-/// Root view of the ccm window.
+/// Root view of the Gantry window.
 pub struct WorkspaceView {
     workspace: Workspace,
     slots: HashMap<NodeId, Slot>,
@@ -376,7 +376,7 @@ impl WorkspaceView {
     }
 
     /// Continue / Restart a finished leaf. If its session already runs in another pane, show that one. If it runs
-    /// outside ccm on this host, offer to take it over.
+    /// outside Gantry on this host, offer to take it over.
     fn rerun_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
         let session = entry.session.clone();
@@ -407,7 +407,7 @@ impl WorkspaceView {
         let answer = window.prompt(
             PromptLevel::Warning,
             "Take over this session?",
-            Some("Unsent input outside ccm is lost."),
+            Some("Unsent input outside Gantry is lost."),
             &["Take over", "Cancel"],
             cx,
         );
@@ -700,7 +700,7 @@ impl WorkspaceView {
         }
         let answer = window.prompt(
             PromptLevel::Info,
-            "Quit ccm?",
+            "Quit Gantry?",
             Some("Sessions keep running after Detach."),
             &["Detach", "Stop all sessions", "Cancel"],
             cx,

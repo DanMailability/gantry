@@ -8,9 +8,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 /// Printed right before the environment JSON so shell noise can be skipped.
-pub const ENV_MARKER: &str = "__CCM_ENV__";
+pub const ENV_MARKER: &str = "__GANTRY_ENV__";
 
-/// Current process environment as a JSON object (what `ccm internal-print-env` prints).
+/// Current process environment as a JSON object (what `gantry internal-print-env` prints).
 pub fn print_env_json() -> String {
     let env: BTreeMap<String, String> = std::env::vars().collect();
     serde_json::to_string(&env).expect("string map serializes")
@@ -79,8 +79,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolves_env_through_a_login_shell() {
-        let env = resolve_login_env("/bin/sh", r#"printf '{"CCM_T":"yes"}'"#, Duration::from_secs(5)).unwrap();
-        assert_eq!(env, vec![("CCM_T".into(), "yes".into())]);
+        let env = resolve_login_env("/bin/sh", r#"printf '{"GANTRY_T":"yes"}'"#, Duration::from_secs(5)).unwrap();
+        assert_eq!(env, vec![("GANTRY_T".into(), "yes".into())]);
     }
 
     #[cfg(unix)]

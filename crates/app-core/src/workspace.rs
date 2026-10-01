@@ -65,7 +65,7 @@ impl PaneLaunch {
 /// What the GUI was asked to open at startup.
 #[derive(Clone, Debug)]
 pub struct Launch {
-    /// Explicitly requested command (`ccm -- cmd` or `--cwd`); always opens a new tab.
+    /// Explicitly requested command (`gantry -- cmd` or `--cwd`); always opens a new tab.
     pub explicit: Option<PaneLaunch>,
     /// What to open when there is nothing to restore.
     pub default: PaneLaunch,
@@ -91,7 +91,7 @@ impl Leaf {
     }
 
     /// What Continue / Restart does, given the daemon's sessions: focus the pane that already runs the
-    /// leaf's session, refuse while it runs outside ccm, else start `rerun` — resuming when the session is
+    /// leaf's session, refuse while it runs outside Gantry, else start `rerun` — resuming when the session is
     /// known, or when the list has not arrived yet.
     pub fn rerun_with(&self, sessions: &SessionStore) -> Rerun {
         let known = self.session.as_deref().and_then(|id| sessions.get(id));
@@ -126,7 +126,7 @@ pub enum Rerun {
     Start(PaneLaunch),
     /// The session already runs in this pane: show it instead.
     Focus(PaneId),
-    /// The session runs outside ccm; starting it again would run it twice.
+    /// The session runs outside Gantry; starting it again would run it twice.
     Busy,
 }
 

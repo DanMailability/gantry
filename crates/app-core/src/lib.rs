@@ -1,4 +1,4 @@
-//! GPUI-free application logic for ccm: terminal state, render snapshots, and input encoding.
+//! GPUI-free application logic for Gantry: terminal state, render snapshots, and input encoding.
 
 pub mod attention;
 pub mod bidi;

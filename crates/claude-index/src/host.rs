@@ -13,7 +13,7 @@ pub trait Host {
     fn dir_exists(&self, path: &Path) -> bool;
 }
 
-/// The machine ccm runs on.
+/// The machine Gantry runs on.
 pub struct LocalHost {
     domain: Option<String>,
 }

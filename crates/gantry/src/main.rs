@@ -1,4 +1,4 @@
-//! ccm — Claude Control Manager.
+//! Gantry — a terminal for Claude Code sessions.
 
 mod args;
 
@@ -23,7 +23,7 @@ fn main() -> ExitCode {
     let launch = match LaunchArgs::parse(argv).map_err(|m| m.to_string()).and_then(|a| a.into_launch().map_err(|e| e.to_string())) {
         Ok(launch) => launch,
         Err(message) => {
-            eprintln!("ccm: {message}");
+            eprintln!("gantry: {message}");
             return ExitCode::from(2);
         }
     };
@@ -32,7 +32,7 @@ fn main() -> ExitCode {
 }
 
 /// Set on a daemon re-launched by `daemon_main`, so it never re-launches again.
-const RESPAWNED_ENV: &str = "CCM_DAEMON_RESPAWNED";
+const RESPAWNED_ENV: &str = "GANTRY_DAEMON_RESPAWNED";
 
 fn daemon_main() -> ExitCode {
     match detach_from_terminal() {
@@ -51,13 +51,13 @@ fn daemon_main() -> ExitCode {
             return match relaunched {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(err) => {
-                    eprintln!("ccm daemon: failed to re-launch detached: {err}");
+                    eprintln!("gantry daemon: failed to re-launch detached: {err}");
                     ExitCode::FAILURE
                 }
             };
         }
         Ok(false) => {}
-        Err(err) => eprintln!("ccm daemon: could not detach from the terminal: {err}"),
+        Err(err) => eprintln!("gantry daemon: could not detach from the terminal: {err}"),
     }
     let paths = Paths::for_profile(&current_profile());
     let appender = tracing_appender::rolling::daily(&paths.log_dir, "daemon.log");

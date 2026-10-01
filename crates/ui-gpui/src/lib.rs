@@ -1,4 +1,4 @@
-//! GPUI user interface for ccm. The only crate in the workspace that depends on GPUI.
+//! GPUI user interface for Gantry. The only crate in the workspace that depends on GPUI.
 
 mod alerts;
 mod field;
@@ -40,7 +40,7 @@ pub fn run(launch: Launch) {
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some("ccm".into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions { title: Some("Gantry".into()), ..Default::default() }),
             #[cfg(target_os = "linux")]
             window_decorations: Some(gpui::WindowDecorations::Client),
             ..Default::default()
@@ -57,7 +57,7 @@ pub fn run(launch: Launch) {
                 let _ = window.update(cx, move |_, window, cx| {
                     let answer = window.prompt(
                         PromptLevel::Warning,
-                        "ccm daemon version mismatch",
+                        "Gantry daemon version mismatch",
                         Some("Restarting stops all sessions."),
                         &["Restart daemon", "Quit"],
                         cx,
@@ -77,7 +77,7 @@ pub fn run(launch: Launch) {
                 });
             }
             Err(err) => {
-                eprintln!("ccm: {err}");
+                eprintln!("gantry: {err}");
                 cx.quit();
                 return;
             }

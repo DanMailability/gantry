@@ -55,7 +55,7 @@ pub enum SessionState {
         /// That pane.
         pane: PaneId,
     },
-    /// Outside ccm: another terminal on this host (`pid`), or a container (`pid: None`).
+    /// Outside Gantry: another terminal on this host (`pid`), or a container (`pid: None`).
     External {
         /// Host process id, when it runs on this host.
         pid: Option<u32>,
@@ -170,7 +170,7 @@ pub enum ClientMessage {
         /// Pane.
         pane: PaneId,
     },
-    /// Stop the process that runs `session` outside ccm (SIGTERM, or SIGKILL when `force`), after verifying it.
+    /// Stop the process that runs `session` outside Gantry (SIGTERM, or SIGKILL when `force`), after verifying it.
     TakeOver {
         /// Session id.
         session: String,

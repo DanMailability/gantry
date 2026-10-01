@@ -1,5 +1,5 @@
 [package]
-name = "ccm"
+name = "gantry"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
