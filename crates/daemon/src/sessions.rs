@@ -1,7 +1,7 @@
 //! The daemon's view of Claude sessions: the index's records plus which pane runs which session.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -10,6 +10,8 @@ use claude_index::host::LocalHost;
 use claude_index::index::{Index, IndexState, SessionRecord};
 use claude_index::live::Activity;
 use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
+
+use crate::containers::Registry;
 
 /// Full rescan interval (also catches processes that died without removing their pid file).
 const RESCAN: Duration = Duration::from_secs(5);
@@ -40,24 +42,33 @@ pub fn still_claimed(gone: &Gone, records: &[SessionRecord]) -> bool {
     records.iter().any(|r| r.state == IndexState::Running { pid: gone.pid } && r.proc_start == gone.start)
 }
 
-/// Combine index records with panes. A running record whose process is a pane's process is managed by
-/// that pane. The session a pane was started with is managed by it while that pane has no running
-/// record of its own (Claude has not written its pid file yet); once it has one (e.g. after `/clear`),
-/// the start session is closed. A record whose process is `gone` counts as closed: the index has not
-/// noticed the exit yet.
-pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone]) -> Vec<SessionInfo> {
+/// What session matching knows about dev containers.
+pub struct ContainerView<'a> {
+    /// Known containers and mappings.
+    pub registry: &'a Registry,
+    /// Host pid → the pane whose `GANTRY_PANE` marker that container process carries.
+    pub marked: &'a HashMap<u32, PaneId>,
+    /// Whether a host directory exists.
+    pub dir_exists: &'a dyn Fn(&Path) -> bool,
+}
+
+/// Combine index records with panes. A running record whose process is a pane's process — or, in a container,
+/// carries a pane's marker — is managed by that pane. The session a pane was started with is managed by it while
+/// that pane has no running record of its own (Claude has not written its pid file yet); once it has one (e.g.
+/// after `/clear`), the start session is closed. A record whose process is `gone` counts as closed: the index has
+/// not noticed the exit yet. Container sessions report their host directory when it is known.
+pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone], view: &ContainerView) -> Vec<SessionInfo> {
     let index_state = |r: &SessionRecord| match r.state {
         IndexState::Running { pid } if gone.iter().any(|g| g.pid == pid && g.start == r.proc_start) => IndexState::Closed,
         state => state,
     };
     let by_pid: HashMap<u32, PaneId> = panes.iter().filter_map(|p| Some((p.pid?, p.pane))).collect();
-    let reporting: HashSet<PaneId> = records
-        .iter()
-        .filter_map(|r| match index_state(r) {
-            IndexState::Running { pid } => by_pid.get(&pid).copied(),
-            _ => None,
-        })
-        .collect();
+    let running_pane = |state: IndexState| match state {
+        IndexState::Running { pid } => by_pid.get(&pid).copied(),
+        IndexState::InContainer { pid: Some(pid) } => view.marked.get(&pid).copied(),
+        _ => None,
+    };
+    let reporting: HashSet<PaneId> = records.iter().filter_map(|r| running_pane(index_state(r))).collect();
     let by_arg: HashMap<&str, PaneId> = panes
         .iter()
         .filter(|p| !reporting.contains(&p.pane))
@@ -66,29 +77,33 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone]) 
     records
         .iter()
         .map(|r| {
-            let state = match index_state(r) {
-                IndexState::Running { pid } => match by_pid.get(&pid) {
-                    Some(pane) => SessionState::Managed { pane: *pane },
-                    None => SessionState::External { pid: Some(pid) },
-                },
-                IndexState::InContainer { pid } => SessionState::External { pid },
-                IndexState::Closed => match by_arg.get(r.id.as_str()) {
+            let state = match (index_state(r), running_pane(index_state(r))) {
+                (_, Some(pane)) => SessionState::Managed { pane },
+                (IndexState::Running { pid }, None) => SessionState::External { pid: Some(pid) },
+                (IndexState::InContainer { pid }, None) => SessionState::External { pid },
+                (IndexState::Closed, None) => match by_arg.get(r.id.as_str()) {
                     Some(pane) => SessionState::Managed { pane: *pane },
                     None => SessionState::Closed,
                 },
             };
             // A gone process's last status is not the new pane's.
             let status = if index_state(r) == r.state { status(r, state) } else { None };
+            let placed = view.registry.place(r, view.dir_exists);
+            let (cwd, cwd_exists) = match placed.as_ref().map(|(_, host)| host) {
+                Some(Some(host)) => (host.clone(), (view.dir_exists)(host)),
+                Some(None) => (r.cwd.clone(), false),
+                None => (r.cwd.clone(), r.cwd_exists),
+            };
             SessionInfo {
                 id: r.id.clone(),
-                cwd: r.cwd.clone(),
+                cwd,
                 title: r.title.clone(),
                 last_active_ms: r.last_active_ms,
                 state,
-                cwd_exists: r.cwd_exists,
+                cwd_exists,
                 status_since_ms: if status.is_some() { r.activity_since_ms } else { 0 },
                 status,
-                container: None,
+                container: placed.map(|(place, _)| place),
             }
         })
         .collect()
@@ -154,6 +169,13 @@ pub fn spawn_indexer(config: PathBuf, tx: tokio::sync::watch::Sender<Option<Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::message::ContainerPlace;
+
+    /// `resolve` with no containers known and no container processes marked.
+    fn plain(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone]) -> Vec<SessionInfo> {
+        let (registry, marked) = (Registry::default(), HashMap::new());
+        resolve(records, panes, gone, &ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true })
+    }
 
     fn record(id: &str, state: IndexState) -> SessionRecord {
         SessionRecord {
@@ -186,7 +208,7 @@ mod tests {
             record("boxed", IndexState::InContainer { pid: None }),
             record("old", IndexState::Closed),
         ];
-        let sessions = resolve(&records, &[pane(7, 100, None)], &[]);
+        let sessions = plain(&records, &[pane(7, 100, None)], &[]);
         assert_eq!(states(&sessions), vec![
             ("mine", SessionState::Managed { pane: 7 }),
             ("other", SessionState::External { pid: Some(200) }),
@@ -199,13 +221,13 @@ mod tests {
     #[test]
     fn a_pane_is_managed_by_its_launch_session_until_its_process_reports() {
         let records = [record("launched", IndexState::Closed)];
-        assert_eq!(states(&resolve(&records, &[pane(7, 100, Some("launched"))], &[])), vec![("launched", SessionState::Managed { pane: 7 })]);
+        assert_eq!(states(&plain(&records, &[pane(7, 100, Some("launched"))], &[])), vec![("launched", SessionState::Managed { pane: 7 })]);
     }
 
     #[test]
     fn after_clear_the_launch_session_is_closed() {
         let records = [record("launched", IndexState::Closed), record("after-clear", IndexState::Running { pid: 100 })];
-        assert_eq!(states(&resolve(&records, &[pane(7, 100, Some("launched"))], &[])), vec![
+        assert_eq!(states(&plain(&records, &[pane(7, 100, Some("launched"))], &[])), vec![
             ("launched", SessionState::Closed),
             ("after-clear", SessionState::Managed { pane: 7 }),
         ]);
@@ -219,7 +241,7 @@ mod tests {
         (asks.activity, asks.activity_since_ms) = (Some(Activity::Waiting { reason: Some("dialog open".into()) }), 60);
         let mut stale = record("old", IndexState::Closed);
         (stale.activity, stale.activity_since_ms) = (Some(Activity::Idle), 70);
-        let sessions = resolve(&[busy, asks, stale], &[pane(7, 100, None)], &[]);
+        let sessions = plain(&[busy, asks, stale], &[pane(7, 100, None)], &[]);
         let status: Vec<(&str, Option<SessionStatus>, u64)> =
             sessions.iter().map(|s| (s.id.as_str(), s.status.clone(), s.status_since_ms)).collect();
         assert_eq!(status, vec![
@@ -235,9 +257,9 @@ mod tests {
         running.proc_start = Some("5".into());
         let records = [running];
         let gone = |start: &str| vec![Gone { pid: 100, start: Some(start.into()) }];
-        assert_eq!(states(&resolve(&records, &[], &gone("5"))), vec![("s", SessionState::Closed)]);
+        assert_eq!(states(&plain(&records, &[], &gone("5"))), vec![("s", SessionState::Closed)]);
         // Same pid, other start time: a new process that reused the pid; not hidden.
-        assert_eq!(states(&resolve(&records, &[], &gone("6"))), vec![("s", SessionState::External { pid: Some(100) })]);
+        assert_eq!(states(&plain(&records, &[], &gone("6"))), vec![("s", SessionState::External { pid: Some(100) })]);
         assert!(still_claimed(&gone("5")[0], &records));
         assert!(!still_claimed(&gone("6")[0], &records));
     }
@@ -248,19 +270,72 @@ mod tests {
         old.proc_start = Some("5".into());
         let gone = [Gone { pid: 100, start: Some("5".into()) }];
         // After a take over, the new pane runs `claude --resume s` before Claude rewrites its pid file.
-        let sessions = resolve(&[old], &[pane(9, 300, Some("s"))], &gone);
+        let sessions = plain(&[old], &[pane(9, 300, Some("s"))], &gone);
         assert_eq!(states(&sessions), vec![("s", SessionState::Managed { pane: 9 })]);
         assert_eq!(sessions[0].status, None);
     }
 
     #[test]
     fn diff_reports_new_changed_and_removed_sessions() {
-        let infos = |records: &[SessionRecord]| resolve(records, &[], &[]);
+        let infos = |records: &[SessionRecord]| plain(records, &[], &[]);
         let old = infos(&[record("same", IndexState::Closed), record("changes", IndexState::Closed), record("goes", IndexState::Closed)]);
         let new = infos(&[record("same", IndexState::Closed), record("changes", IndexState::Running { pid: 5 }), record("arrives", IndexState::Closed)]);
         let (upserted, removed) = diff(&old, &new);
         assert_eq!(upserted.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["changes", "arrives"]);
         assert_eq!(removed, vec!["goes".to_string()]);
         assert_eq!(diff(&new, &new), (vec![], vec![]));
+    }
+
+    #[test]
+    fn a_container_process_carrying_a_panes_marker_is_managed_by_it() {
+        let records = [
+            record("boxed", IndexState::InContainer { pid: Some(9007) }),
+            record("vscode", IndexState::InContainer { pid: Some(9008) }),
+            record("launched", IndexState::Closed),
+        ];
+        let (registry, marked) = (Registry::default(), HashMap::from([(9007, 4)]));
+        let view = ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true };
+        // Pane 4 was started as `launched`, then `/clear`ed into `boxed`: the launch session is closed.
+        let sessions = resolve(&records, &[pane(4, 100, Some("launched"))], &[], &view);
+        assert_eq!(states(&sessions), vec![
+            ("boxed", SessionState::Managed { pane: 4 }),
+            ("vscode", SessionState::External { pid: Some(9008) }),
+            ("launched", SessionState::Closed),
+        ]);
+    }
+
+    #[test]
+    fn container_sessions_report_their_host_directory_and_place() {
+        use claude_index::containers::{Container, Docker, Mount};
+        struct OneContainer;
+        impl Docker for OneContainer {
+            fn list(&self) -> Result<Vec<Container>, String> {
+                Ok(vec![Container {
+                    id: "c1".into(),
+                    name: "n".into(),
+                    running: true,
+                    created: "1".into(),
+                    host_folder: "/home/u/app".into(),
+                    mounts: vec![Mount { source: "/home/u/app".into(), destination: "/workspaces/app".into() }],
+                    remote_user: None,
+                    config_dir: None,
+                }])
+            }
+            fn start(&self, _id: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut registry = Registry::default();
+        registry.refresh(&OneContainer).unwrap();
+        let mut boxed = record("boxed", IndexState::Closed);
+        boxed.cwd = "/workspaces/app/src".into();
+        let marked = HashMap::new();
+        let exists = |path: &std::path::Path| path == std::path::Path::new("/home/u/app/src");
+        let info = resolve(&[boxed], &[], &[], &ContainerView { registry: &registry, marked: &marked, dir_exists: &exists }).remove(0);
+        assert_eq!((info.cwd.as_path(), info.cwd_exists), (std::path::Path::new("/home/u/app/src"), true));
+        assert_eq!(
+            info.container,
+            Some(ContainerPlace { host_folder: Some("/home/u/app".into()), path: "/workspaces/app/src".into() })
+        );
     }
 }

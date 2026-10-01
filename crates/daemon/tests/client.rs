@@ -15,7 +15,7 @@ fn sh(script: &str) -> SpawnRequest {
 fn daemon_spawner(paths: Paths) -> impl FnOnce() -> std::io::Result<()> + Send + 'static {
     move || {
         let claude_dir = Some(paths.runtime_dir.with_file_name("claude"));
-        let options = DaemonOptions { paths, base_env: Some(std::env::vars().collect()), idle_timeout: Duration::from_secs(5), claude_dir };
+        let options = DaemonOptions { paths, base_env: Some(std::env::vars().collect()), idle_timeout: Duration::from_secs(5), claude_dir, docker: None };
         std::thread::spawn(move || run_daemon(options));
         Ok(())
     }

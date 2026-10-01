@@ -31,6 +31,7 @@ fn start(prepare: impl FnOnce(&Path, &Path)) -> Setup {
             base_env: Some(std::env::vars().collect()),
             idle_timeout: Duration::from_secs(5),
             claude_dir: Some(claude_dir),
+            docker: None,
         };
         std::thread::spawn(move || run_daemon(options));
         Ok(())

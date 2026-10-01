@@ -31,12 +31,15 @@ pub struct DaemonOptions {
     /// Claude config directory to index; `None` uses the panes' environment (`CLAUDE_CONFIG_DIR`, else
     /// `~/.claude`).
     pub claude_dir: Option<PathBuf>,
+    /// The `docker` program for dev containers; `None` turns container features off.
+    pub docker: Option<String>,
 }
 
 /// Run the daemon in the current thread until it stops.
 pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
     let paths = options.paths;
     let claude_dir = options.claude_dir;
+    let docker = options.docker;
     std::fs::create_dir_all(&paths.runtime_dir)?;
     #[cfg(unix)]
     {
@@ -65,7 +68,8 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
             None => tokio::task::spawn_blocking(login_env_or_current).await?,
         };
         let claude_dir = claude_dir.or_else(|| claude_index::config::config_dir(&base_env));
-        serve(listener, ServerOptions { base_env, owner_uid, idle_timeout: options.idle_timeout, claude_dir }).await
+        let containers_file = Some(paths.containers_file.clone());
+        serve(listener, ServerOptions { base_env, owner_uid, idle_timeout: options.idle_timeout, claude_dir, containers_file, docker }).await
     })?;
     drop(lock);
     Ok(DaemonOutcome::Stopped)
@@ -185,7 +189,7 @@ mod tests {
     }
 
     fn options(dir: &std::path::Path, idle: Duration) -> DaemonOptions {
-        DaemonOptions { paths: Paths::in_dir(dir, "t"), base_env: Some(std::env::vars().collect()), idle_timeout: idle, claude_dir: Some(dir.join("claude")) }
+        DaemonOptions { paths: Paths::in_dir(dir, "t"), base_env: Some(std::env::vars().collect()), idle_timeout: idle, claude_dir: Some(dir.join("claude")), docker: None }
     }
 
     #[test]

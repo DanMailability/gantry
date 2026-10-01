@@ -44,6 +44,8 @@ pub struct Paths {
     pub log_dir: PathBuf,
     /// Saved window layout (GUI-owned).
     pub layout_file: PathBuf,
+    /// Dev container mappings the daemon remembers (beside the layout).
+    pub containers_file: PathBuf,
     socket: SocketLocation,
 }
 
@@ -76,7 +78,8 @@ impl Paths {
         let socket = SocketLocation::File(runtime_dir.join("daemon.sock"));
         #[cfg(windows)]
         let socket = SocketLocation::Pipe(format!("gantry-{profile}-{unique}"));
-        Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, layout_file, socket }
+        let containers_file = layout_file.with_file_name("containers.json");
+        Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, layout_file, containers_file, socket }
     }
 
     /// Name to bind or connect to.
