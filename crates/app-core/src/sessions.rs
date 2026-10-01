@@ -8,12 +8,14 @@ use protocol::message::SessionInfo;
 #[derive(Default)]
 pub struct SessionStore {
     sessions: HashMap<String, SessionInfo>,
+    loaded: bool,
 }
 
 impl SessionStore {
     /// Replace everything with `sessions`.
     pub fn replace(&mut self, sessions: Vec<SessionInfo>) {
         self.sessions = sessions.into_iter().map(|s| (s.id.clone(), s)).collect();
+        self.loaded = true;
     }
 
     /// Insert or update `upserted`, then drop `removed`.
@@ -24,6 +26,11 @@ impl SessionStore {
         for id in removed {
             self.sessions.remove(id);
         }
+    }
+
+    /// Whether a full list has arrived (before that, an unknown id proves nothing).
+    pub fn loaded(&self) -> bool {
+        self.loaded
     }
 
     /// Session `id`.
@@ -57,5 +64,14 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["c", "d"]);
         assert_eq!(store.get("c").unwrap().title, "C2");
+    }
+
+    #[test]
+    fn the_store_is_loaded_once_a_full_list_arrives() {
+        let mut store = SessionStore::default();
+        store.apply(vec![info("a", "A")], &[]);
+        assert!(!store.loaded());
+        store.replace(Vec::new());
+        assert!(store.loaded());
     }
 }

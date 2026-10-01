@@ -158,8 +158,7 @@ impl SidebarView {
     }
 
     fn selected_index(&self) -> Option<usize> {
-        let key = self.selected.as_ref()?;
-        self.rows.iter().position(|row| &row.key() == key)
+        session_tree::find(&self.rows, self.selected.as_ref()?)
     }
 
     /// Move the selection to the next (or previous) selectable row; from nothing, to the first one.
@@ -226,10 +225,12 @@ impl SidebarView {
                 if !field::edit(&mut self.filter, keystroke) {
                     return;
                 }
-                self.selected = None;
                 self.rebuild(cx);
-                // Enter right after typing activates the first match.
-                self.move_selection(true);
+                // Enter right after typing opens the first matching session (not a directory row).
+                self.selected = session_tree::first_entry(&self.rows).map(|index| {
+                    self.scroll.scroll_to_item(index, ScrollStrategy::Center);
+                    self.rows[index].key()
+                });
             }
         }
         cx.stop_propagation();
@@ -245,7 +246,8 @@ impl SidebarView {
 
     fn render_row(&self, index: usize, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
         let row = &self.rows[index];
-        let selected = self.selected.as_ref() == Some(&row.key());
+        let key = row.key();
+        let selected = self.selected.as_ref() == Some(&key);
         let base = div()
             .id(index)
             .h(px(ROW_HEIGHT))
@@ -263,7 +265,11 @@ impl SidebarView {
             .when(selected, |el| el.bg(rgb(SELECTED)))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.focus_handle.focus(window, cx);
-                this.activate(index, event.modifiers().secondary(), cx);
+                // The list may have been rebuilt since it was drawn: act on the row that was
+                // clicked, by identity, or on nothing if it is gone.
+                if let Some(index) = session_tree::find(&this.rows, &key) {
+                    this.activate(index, event.modifiers().secondary(), cx);
+                }
             }));
         let muted = |text: String| div().flex_none().text_xs().text_color(rgb(MUTED)).child(text);
         let title = |text: String, color: u32| div().min_w_0().truncate().text_color(rgb(color)).child(text);

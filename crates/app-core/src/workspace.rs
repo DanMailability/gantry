@@ -4,9 +4,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use protocol::message::{PaneId, PaneInfo, SpawnRequest, claude_session};
+use protocol::message::{PaneId, PaneInfo, SessionState, SpawnRequest, claude_session};
 use serde::{Deserialize, Serialize};
 
+use crate::sessions::SessionStore;
 use crate::split_tree::{Axis, Direction, Node, NodeId};
 
 /// Program name of Claude Code.
@@ -88,6 +89,18 @@ impl Leaf {
         Leaf { pane: None, launch, session }
     }
 
+    /// What Continue / Restart does, given the daemon's sessions: focus the pane that already runs the
+    /// leaf's session, refuse while it runs outside ccm, else start `rerun` — resuming when the session is
+    /// known, or when the list has not arrived yet.
+    pub fn rerun_with(&self, sessions: &SessionStore) -> Rerun {
+        let known = self.session.as_deref().and_then(|id| sessions.get(id));
+        match known.map(|session| session.state) {
+            Some(SessionState::Managed { pane }) => Rerun::Focus(pane),
+            Some(SessionState::External { .. }) => Rerun::Busy,
+            _ => Rerun::Start(self.rerun(known.is_some() || !sessions.loaded())),
+        }
+    }
+
     /// What re-running this finished leaf starts. Claude: `--resume` its session when the daemon knows
     /// it (it has a transcript), else the same `--session-id` afresh; without a session (layouts from
     /// before session tracking) `--continue`. Other programs: the same command.
@@ -103,6 +116,17 @@ impl Leaf {
         };
         PaneLaunch { program: launch.program.clone(), args, cwd: launch.cwd.clone() }
     }
+}
+
+/// What Continue / Restart on a finished leaf should do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rerun {
+    /// Start this.
+    Start(PaneLaunch),
+    /// The session already runs in this pane: show it instead.
+    Focus(PaneId),
+    /// The session runs outside ccm; starting it again would run it twice.
+    Busy,
 }
 
 /// One tab.
@@ -274,6 +298,11 @@ impl Workspace {
     /// Leaf showing daemon pane `pane`.
     pub fn leaf_for_pane(&self, pane: PaneId) -> Option<NodeId> {
         self.leaves.iter().find(|(_, leaf)| leaf.pane == Some(pane)).map(|(id, _)| *id)
+    }
+
+    /// Leaf whose Claude session is `session`.
+    pub fn leaf_for_session(&self, session: &str) -> Option<NodeId> {
+        self.leaves.iter().find(|(_, leaf)| leaf.session.as_deref() == Some(session)).map(|(id, _)| *id)
     }
 
     /// Index of the tab containing `leaf`.
@@ -519,6 +548,37 @@ mod tests {
         assert_eq!(claude_leaf(None).rerun(true).cwd, PathBuf::from("/r"));
         let sh = Leaf::new(shell("/r"));
         assert_eq!(sh.rerun(true), sh.launch);
+    }
+
+    fn session_info(id: &str, state: protocol::message::SessionState) -> protocol::message::SessionInfo {
+        protocol::message::SessionInfo { id: id.into(), cwd: "/r".into(), title: String::new(), last_active_ms: 0, state, cwd_exists: true }
+    }
+
+    #[test]
+    fn rerun_never_runs_a_session_twice() {
+        use protocol::message::SessionState;
+        let leaf = claude_leaf(Some("x"));
+        let mut store = SessionStore::default();
+        // Before the first list: assume it may exist and resume.
+        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(true)));
+        store.replace(vec![]);
+        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(false)));
+        store.replace(vec![session_info("x", SessionState::Closed)]);
+        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(true)));
+        store.replace(vec![session_info("x", SessionState::Managed { pane: 4 })]);
+        assert_eq!(leaf.rerun_with(&store), Rerun::Focus(4));
+        store.replace(vec![session_info("x", SessionState::External { pid: Some(9) })]);
+        assert_eq!(leaf.rerun_with(&store), Rerun::Busy);
+        let sh = Leaf::new(shell("/r"));
+        assert_eq!(sh.rerun_with(&store), Rerun::Start(sh.launch.clone()));
+    }
+
+    #[test]
+    fn leaves_are_found_by_session() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(PaneLaunch::resume("x", "/r".into()));
+        ws.new_tab(shell("/r"));
+        assert_eq!((ws.leaf_for_session("x"), ws.leaf_for_session("y")), (Some(a), None));
     }
 
     #[test]

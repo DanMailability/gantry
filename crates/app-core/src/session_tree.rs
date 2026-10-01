@@ -224,6 +224,16 @@ pub fn age(now_ms: u64, then_ms: u64) -> String {
     }
 }
 
+/// Index of the row identified by `key`, if it is still there.
+pub fn find(rows: &[Row], key: &RowKey) -> Option<usize> {
+    rows.iter().position(|row| &row.key() == key)
+}
+
+/// The first session or shell row: what `Enter` right after typing a filter should open.
+pub fn first_entry(rows: &[Row]) -> Option<usize> {
+    rows.iter().position(|row| matches!(row.kind, RowKind::Session { .. } | RowKind::Shell { .. }))
+}
+
 /// The Folders view.
 pub fn folders(input: &TreeInput<'_>) -> Vec<Row> {
     let mut fuzzy = Fuzzy::new(input.filter);
@@ -609,6 +619,22 @@ mod tests {
         assert_eq!(fixture.outline(folders), vec!["Local", "  ▾ /p [2/0]", "    e", "      (Running outside ccm (pid 42))", "    box"]);
         fixture.details = Some("box".into());
         assert_eq!(fixture.outline(status)[2..], ["  box".to_string(), "    (Running in a container)".to_string()]);
+    }
+
+    #[test]
+    fn rows_are_found_by_identity_and_typing_selects_the_first_entry() {
+        let mut fixture = Fixture::of(vec![closed("old", "/p/q", 1), closed("new", "/p/r", 2)]);
+        fixture.filter = "title".into();
+        let rows = fixture.rows(folders);
+        // Directories come first in the Folders view; the first entry is a session.
+        let first = first_entry(&rows).unwrap();
+        assert!(matches!(&rows[first].kind, RowKind::Session { session, .. } if session.id == "old"));
+        let key = RowKey::Session("new".into());
+        let index = find(&rows, &key).unwrap();
+        assert_eq!(rows[index].key(), key);
+        // A row that disappeared (or moved) is looked up again, never taken by its old index.
+        assert_eq!(find(&rows[..index], &key), None);
+        assert_eq!(first_entry(&rows[..1]), None);
     }
 
     #[test]

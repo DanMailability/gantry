@@ -64,8 +64,8 @@ struct State {
     ever_connected: bool,
     /// Whether session messages are sent (an index runs).
     sessions_enabled: bool,
-    /// Latest index scan.
-    records: Arc<Vec<SessionRecord>>,
+    /// Latest index scan; `None` until the first scan finishes.
+    records: Option<Arc<Vec<SessionRecord>>>,
     /// Sessions as last sent to (or computed for) the client.
     sent: Vec<SessionInfo>,
 }
@@ -128,15 +128,13 @@ impl State {
     /// Send the session list (`full`) or what changed since the last one. Without a client only the
     /// baseline is updated; a connecting client always gets a full list.
     fn publish_sessions(&mut self, full: bool) {
-        if !self.sessions_enabled {
-            return;
-        }
+        let Some(records) = self.records.as_ref().filter(|_| self.sessions_enabled) else { return };
         let panes: Vec<PaneSession> = self
             .panes
             .iter()
             .map(|(id, pane)| PaneSession { pane: *id, pid: pane.pty.pid(), session_arg: pane.session_arg.clone() })
             .collect();
-        let sessions = resolve(&self.records, &panes);
+        let sessions = resolve(records, &panes);
         if full {
             self.control(&DaemonMessage::Sessions { sessions: sessions.clone() });
         } else {
@@ -199,15 +197,17 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         })
     };
     let sessions = claude_dir.map(|dir| {
-        let (tx, mut rx) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        let (tx, mut rx) = tokio::sync::watch::channel(None);
         spawn_indexer(dir, tx);
         let shared = shared.clone();
         tokio::spawn(async move {
             while rx.changed().await.is_ok() {
                 let records = rx.borrow_and_update().clone();
                 let mut state = shared.lock();
+                // The first scan is the first list a connected client gets.
+                let first = state.records.is_none();
                 state.records = records;
-                state.publish_sessions(false);
+                state.publish_sessions(first);
             }
         })
     });
@@ -477,6 +477,26 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sessions_are_sent_only_once_the_first_scan_is_done() {
+        use claude_index::index::IndexState;
+        let outbox = Outbox::new(1 << 20);
+        let mut state = State { sessions_enabled: true, ..State::default() };
+        state.client = Some(Client { id: 1, outbox: outbox.clone(), attached: HashSet::new(), kicked: Arc::new(Notify::new()) });
+        // A client connects (ListPanes) before the index has scanned: an empty list would claim no
+        // session exists, so nothing is sent yet.
+        state.publish_sessions(true);
+        let record = SessionRecord { id: "s".into(), cwd: "/".into(), title: "t".into(), last_active_ms: 1, state: IndexState::Closed, cwd_exists: true };
+        state.records = Some(Arc::new(vec![record]));
+        state.publish_sessions(true);
+        outbox.close();
+        let mut messages = Vec::new();
+        while let Some(frame) = outbox.next().await {
+            messages.push(frame.parse::<DaemonMessage>().unwrap().unwrap());
+        }
+        assert!(matches!(&messages[..], [DaemonMessage::Sessions { sessions }] if sessions.len() == 1), "{messages:?}");
+    }
 
     #[test]
     fn a_panic_while_holding_the_state_lock_does_not_wedge_the_daemon() {

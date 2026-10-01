@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use app_core::layout_store;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
-use app_core::workspace::{PaneLaunch, Restored, Workspace};
+use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::pty::default_shell;
 use gpui::{
@@ -275,19 +275,32 @@ impl WorkspaceView {
         }
     }
 
-    fn on_pane_event(&mut self, leaf: NodeId, event: PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event {
-            PaneEvent::Focused => self.focus_leaf(leaf, window, cx),
-            PaneEvent::Rerun => {
-                let session = self.workspace.leaves.get(&leaf).and_then(|entry| entry.session.clone());
-                let resumable = session.is_some_and(|id| self.sidebar.read(cx).sessions().get(&id).is_some());
-                let Some(entry) = self.workspace.leaves.get_mut(&leaf) else { return };
-                entry.launch = entry.rerun(resumable);
-                let launch = entry.launch.clone();
+    /// Continue / Restart a finished leaf — unless its session already runs: in another pane (show that
+    /// one) or outside ccm (do nothing; taking it over is a separate action).
+    fn rerun_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
+        match entry.rerun_with(self.sidebar.read(cx).sessions()) {
+            Rerun::Start(launch) => {
+                if let Some(entry) = self.workspace.leaves.get_mut(&leaf) {
+                    entry.launch = launch.clone();
+                }
                 self.slots[&leaf].view.update(cx, |view, cx| view.restarting(launch, cx));
                 self.spawn_leaf(leaf, None, cx);
                 self.save(cx);
             }
+            Rerun::Focus(pane) => {
+                if let Some(running) = self.workspace.leaf_for_pane(pane) {
+                    self.focus_leaf(running, window, cx);
+                }
+            }
+            Rerun::Busy => {}
+        }
+    }
+
+    fn on_pane_event(&mut self, leaf: NodeId, event: PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            PaneEvent::Focused => self.focus_leaf(leaf, window, cx),
+            PaneEvent::Rerun => self.rerun_leaf(leaf, window, cx),
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
             PaneEvent::TitleChanged => {
                 self.sync_shells(cx);
@@ -394,10 +407,21 @@ impl WorkspaceView {
                     }
                 }
                 Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
-                Activation::Resume { session, cwd } => {
-                    let axis = split.then_some(Axis::Horizontal);
-                    self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
-                }
+                // A session already in the layout is shown there (and started again if it finished),
+                // so one session never runs in two panes.
+                Activation::Resume { session, cwd } => match self.workspace.leaf_for_session(&session) {
+                    Some(leaf) => {
+                        self.focus_leaf(leaf, window, cx);
+                        let starting = self.pending.values().any(|waiting| *waiting == leaf);
+                        if self.workspace.leaves[&leaf].pane.is_none() && !starting {
+                            self.rerun_leaf(leaf, window, cx);
+                        }
+                    }
+                    None => {
+                        let axis = split.then_some(Axis::Horizontal);
+                        self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
+                    }
+                },
                 Activation::ToggleDetails(_) | Activation::ToggleDir(_) | Activation::ShowAll(_) | Activation::Nothing => {}
             },
             SidebarEvent::NewHere { dir, claude } => self.open_launch(new_launch(claude, dir), None, None, window, cx),

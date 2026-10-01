@@ -79,8 +79,8 @@ pub fn diff(old: &[SessionInfo], new: &[SessionInfo]) -> (Vec<SessionInfo>, Vec<
 }
 
 /// Index `config` on a thread of its own: rescan on change notifications (debounced) and every
-/// `RESCAN`, publishing each new list to `tx`. Stops once `tx` has no receivers.
-pub fn spawn_indexer(config: PathBuf, tx: tokio::sync::watch::Sender<Arc<Vec<SessionRecord>>>) {
+/// `RESCAN`, publishing the first list and then each changed one to `tx`. Stops once `tx` has no receivers.
+pub fn spawn_indexer(config: PathBuf, tx: tokio::sync::watch::Sender<Option<Arc<Vec<SessionRecord>>>>) {
     let spawned = std::thread::Builder::new().name("claude-index".into()).spawn(move || {
         let (wake_tx, wake) = std::sync::mpsc::channel();
         let _watcher = claude_index::watch::watch(&config, move || {
@@ -91,7 +91,8 @@ pub fn spawn_indexer(config: PathBuf, tx: tokio::sync::watch::Sender<Arc<Vec<Ses
         let mut index = Index::new(config, LocalHost::new());
         loop {
             let records = index.scan();
-            if **tx.borrow() != records && tx.send(Arc::new(records)).is_err() {
+            let changed = tx.borrow().as_deref().is_none_or(|old| *old != records);
+            if changed && tx.send(Some(Arc::new(records))).is_err() {
                 return;
             }
             if tx.is_closed() {
