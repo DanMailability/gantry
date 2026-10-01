@@ -29,6 +29,8 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 const CLIENT_DATA_BUDGET: usize = 4 << 20;
 const RESYNC_TICK: Duration = Duration::from_millis(100);
 const EXIT_DRAIN: Duration = Duration::from_millis(300);
+/// After a failed Docker lookup, new panes skip Docker for this long (a hung Docker would delay every new pane).
+const DOCKER_RETRY: Duration = Duration::from_secs(30);
 /// Least time between Docker lookups caused by container ids the registry does not know.
 const UNKNOWN_CONTAINER_REFRESH: Duration = Duration::from_secs(10);
 
@@ -104,6 +106,8 @@ struct State {
     last_unknown_refresh: Option<Instant>,
     /// Whether "Docker is unavailable" was logged already.
     docker_warned: bool,
+    /// When a Docker lookup last failed.
+    docker_failed_at: Option<Instant>,
 }
 
 struct Shared {
@@ -459,11 +463,13 @@ fn refresh_containers(shared: &Arc<Shared>) {
                 state.registry = registry;
                 state.publish_sessions(false);
             }
-            Err(err) if !state.docker_warned => {
-                state.docker_warned = true;
-                tracing::info!("dev containers are unavailable: {err}");
+            Err(err) => {
+                state.docker_failed_at = Some(Instant::now());
+                if !state.docker_warned {
+                    state.docker_warned = true;
+                    tracing::info!("dev containers are unavailable: {err}");
+                }
             }
-            Err(_) => {}
         }
     });
 }
@@ -652,19 +658,37 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
     start_pane(shared, client_id, request, spec, cwd, |_| command, None);
 }
 
-/// Answer `FindContainer`: refresh the dev containers (off the async threads) and name the one that mounts `dir`.
+/// The answer to `FindContainer` without asking Docker, when there is one: the container the last lookup found for
+/// `dir` (a launch looks it up again anyway), or none for a while after Docker failed. `None` = ask Docker.
+fn cached_answer(registry: &Registry, dir: &Path, failed_at: Option<Instant>, now: Instant) -> Option<Option<ContainerChoice>> {
+    if let Some(c) = containers::for_dir(registry.containers(), dir) {
+        return Some(Some(ContainerChoice { host_folder: c.host_folder.clone(), name: c.name.clone(), running: c.running }));
+    }
+    failed_at.filter(|at| now.duration_since(*at) < DOCKER_RETRY).map(|_| None)
+}
+
+/// Answer `FindContainer`: from the last lookup when it knows, else refresh the dev containers (off the async threads)
+/// and name the one that mounts `dir`.
 fn find_container(shared: &Arc<Shared>, request: u64, dir: PathBuf) {
     let Some(program) = shared.docker.clone() else {
         shared.lock().control(&DaemonMessage::ContainerFound { request, container: None });
         return;
     };
+    {
+        let state = shared.lock();
+        if let Some(container) = cached_answer(&state.registry, &dir, state.docker_failed_at, Instant::now()) {
+            state.control(&DaemonMessage::ContainerFound { request, container });
+            return;
+        }
+    }
     let shared = shared.clone();
     tokio::task::spawn_blocking(move || {
         let mut registry = shared.lock().registry.clone();
         let refreshed = registry.refresh(&DockerCli { program });
         let mut state = shared.lock();
-        if refreshed.is_ok() {
-            state.registry = registry;
+        match refreshed {
+            Ok(()) => state.registry = registry,
+            Err(_) => state.docker_failed_at = Some(Instant::now()),
         }
         let container = refreshed.ok().and_then(|()| containers::for_dir(state.registry.containers(), &dir)).map(|c| ContainerChoice {
             host_folder: c.host_folder.clone(),
@@ -906,5 +930,39 @@ mod tests {
             Marked { pid: 13, value: "i:x".into(), start: None },
         ];
         assert_eq!(pane_marks(&marked, "i", &[3, 4]), HashMap::from([(10, 3)]));
+    }
+
+    #[test]
+    fn new_panes_ask_docker_only_when_the_last_lookup_cannot_answer() {
+        use claude_index::containers::{Container, Mount};
+        struct One;
+        impl claude_index::containers::Docker for One {
+            fn list(&self) -> Result<Vec<Container>, String> {
+                Ok(vec![Container {
+                    id: "c1".into(),
+                    name: "box".into(),
+                    running: true,
+                    created: "1".into(),
+                    host_folder: "/h/app".into(),
+                    mounts: vec![Mount { source: "/h/app".into(), destination: "/workspaces/app".into() }],
+                    remote_user: None,
+                    config_dir: None,
+                }])
+            }
+            fn start(&self, _id: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut registry = Registry::default();
+        let now = Instant::now();
+        // Nothing known yet: ask Docker.
+        assert_eq!(cached_answer(&registry, Path::new("/h/app"), None, now), None);
+        registry.refresh(&One).unwrap();
+        let hit = cached_answer(&registry, Path::new("/h/app/src"), None, now).unwrap().unwrap();
+        assert_eq!((hit.name.as_str(), hit.host_folder.as_path(), hit.running), ("box", Path::new("/h/app"), true));
+        // A folder no known container mounts: ask Docker, unless it just failed.
+        assert_eq!(cached_answer(&registry, Path::new("/elsewhere"), None, now), None);
+        assert_eq!(cached_answer(&registry, Path::new("/elsewhere"), Some(now), now + Duration::from_secs(5)), Some(None));
+        assert_eq!(cached_answer(&registry, Path::new("/elsewhere"), Some(now), now + Duration::from_secs(60)), None);
     }
 }
