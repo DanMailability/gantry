@@ -50,3 +50,7 @@ calloop = { git = "https://github.com/zed-industries/calloop", rev = "eb6b4fd17b
 # Unoptimized GPUI renders slowly enough to mislead manual testing of the terminal.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Debug info stays out of the shipped binary; symbol names stay for backtraces.
+[profile.release]
+strip = "debuginfo"
