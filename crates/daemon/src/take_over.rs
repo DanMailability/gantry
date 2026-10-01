@@ -24,7 +24,7 @@ pub struct Target {
 /// The process running `session` outside ccm. Refused (with the reason) for sessions in containers, in ccm's own
 /// panes, not running, unknown, or without a recorded start time.
 pub fn target(sessions: &[SessionInfo], records: &[SessionRecord], session: &str) -> Result<Target, String> {
-    let info = sessions.iter().find(|s| s.id == session).ok_or_else(|| format!("unknown session {session}"))?;
+    let info = sessions.iter().find(|s| s.id == session).ok_or("unknown session")?;
     let pid = match info.state {
         SessionState::External { pid: Some(pid) } => pid,
         SessionState::External { pid: None } => return Err("it runs in a container; stop it there".into()),
@@ -35,7 +35,7 @@ pub fn target(sessions: &[SessionInfo], records: &[SessionRecord], session: &str
         .iter()
         .find(|r| r.id == session)
         .and_then(|r| r.proc_start.clone())
-        .ok_or("its pid file has no start time, so the process cannot be verified")?;
+        .ok_or("no start time; cannot verify it")?;
     Ok(Target { pid, start })
 }
 
@@ -43,7 +43,7 @@ pub fn target(sessions: &[SessionInfo], records: &[SessionRecord], session: &str
 /// `Ok(false)` when it is already gone (nothing was signalled).
 pub fn signal(target: &Target, force: bool, host: &impl Host) -> Result<bool, String> {
     match host.is_running(target.pid, Some(&target.start)) {
-        None => Err("ccm cannot verify processes on this platform yet".into()),
+        None => Err("cannot verify processes on this OS yet".into()),
         Some(false) => Ok(false),
         Some(true) => kill(target.pid, force).map(|()| true),
     }
@@ -53,12 +53,12 @@ pub fn signal(target: &Target, force: bool, host: &impl Host) -> Result<bool, St
 fn kill(pid: u32, force: bool) -> Result<(), String> {
     use rustix::process::{Pid, Signal, kill_process};
     let pid = i32::try_from(pid).ok().and_then(Pid::from_raw).ok_or_else(|| format!("invalid pid {pid}"))?;
-    kill_process(pid, if force { Signal::KILL } else { Signal::TERM }).map_err(|err| format!("could not signal the process: {err}"))
+    kill_process(pid, if force { Signal::KILL } else { Signal::TERM }).map_err(|err| format!("could not signal it: {err}"))
 }
 
 #[cfg(not(unix))]
 fn kill(_pid: u32, _force: bool) -> Result<(), String> {
-    Err("stopping processes is not supported on this platform yet".into())
+    Err("not supported on this OS yet".into())
 }
 
 /// Wait until `target` is gone (exited, or its pid reused by another process); false if it still runs after `timeout`.
@@ -144,15 +144,20 @@ mod tests {
         assert!(refused("box").contains("container"), "{}", refused("box"));
         assert!(refused("mine").contains("already runs in ccm"), "{}", refused("mine"));
         assert!(refused("old").contains("not running"), "{}", refused("old"));
-        assert!(refused("nostart").contains("cannot be verified"), "{}", refused("nostart"));
+        assert!(refused("nostart").contains("no start time"), "{}", refused("nostart"));
         assert!(refused("unknown").contains("unknown session"), "{}", refused("unknown"));
+        // Shown in a one-line dialog: keep every reason short.
+        for id in ["box", "mine", "old", "nostart", "unknown"] {
+            assert!(refused(id).chars().count() <= 38, "too long for the dialog: {}", refused(id));
+        }
     }
 
     #[test]
     fn signal_never_touches_a_process_it_cannot_verify() {
         let target = Target { pid: 42, start: "9".into() };
         // This host cannot check processes (macOS/Windows until M7): refuse.
-        assert!(signal(&target, false, &FakeHost(None)).unwrap_err().contains("cannot verify"));
+        let error = signal(&target, false, &FakeHost(None)).unwrap_err();
+        assert!(error.contains("cannot verify") && error.chars().count() <= 38, "{error}");
         // Gone, or pid 42 now belongs to a process with another start time: nothing to stop.
         assert_eq!(signal(&target, true, &FakeHost(Some(false))), Ok(false));
     }

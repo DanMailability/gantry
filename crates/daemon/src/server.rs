@@ -348,7 +348,7 @@ fn take_over_session(shared: &Arc<Shared>, session: String, force: bool) {
                     state.publish_sessions(false);
                     TakeOverOutcome::Exited
                 } else if force {
-                    TakeOverOutcome::Failed { error: "the process did not exit after SIGKILL".into() }
+                    TakeOverOutcome::Failed { error: "it did not exit after SIGKILL".into() }
                 } else {
                     TakeOverOutcome::StillRunning
                 }

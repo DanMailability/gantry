@@ -407,7 +407,7 @@ impl WorkspaceView {
         let answer = window.prompt(
             PromptLevel::Warning,
             "Take over this session?",
-            Some("The Claude running it outside ccm is stopped. Anything typed there but not sent is lost."),
+            Some("Unsent input outside ccm is lost."),
             &["Take over", "Cancel"],
             cx,
         );
@@ -444,7 +444,7 @@ impl WorkspaceView {
                 let answer = window.prompt(
                     PromptLevel::Warning,
                     "Claude is still running",
-                    Some("It did not stop within 5 seconds. Force quit stops it immediately."),
+                    Some("It ignored the stop request for 5 s."),
                     &["Force quit", "Cancel"],
                     cx,
                 );
