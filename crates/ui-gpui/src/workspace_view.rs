@@ -1,11 +1,12 @@
 //! The window's root view: tabs of split panes, routing daemon events to them, and saving the layout.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use app_core::attention::{Alert, AlertKind, AttentionTracker};
 use app_core::layout_store;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
@@ -15,7 +16,7 @@ use gpui::{
     Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, IntoElement, MouseButton, MouseMoveEvent, Pixels,
     PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
 };
-use protocol::message::{PaneId, SessionInfo, SessionState};
+use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
 
 use app_core::session_tree::{Activation, ShellEntry};
 
@@ -30,6 +31,7 @@ pub(crate) const ACCENT: u32 = 0x6cb6ff;
 pub(crate) const TEXT: u32 = 0xd6dde6;
 pub(crate) const MUTED: u32 = 0x8b949e;
 pub(crate) const SELECTED: u32 = 0x24324a;
+pub(crate) const AMBER: u32 = 0xe3b341;
 const BACKGROUND: u32 = 0x11141a;
 pub(crate) const TAB_BAR_HEIGHT: f32 = 34.0;
 /// Largest amount of output routed per UI update, so input and rendering keep running during a flood.
@@ -123,6 +125,11 @@ pub struct WorkspaceView {
     _sidebar_events: Subscription,
     /// The open launcher overlay.
     launcher: Option<(Entity<LauncherView>, Subscription)>,
+    /// Status changes seen so far, to tell which ones alert.
+    attention: AttentionTracker,
+    /// Leaves with an alert the user has not seen yet.
+    unseen: HashMap<NodeId, AlertKind>,
+    _activation: Subscription,
     _events: Task<()>,
 }
 
@@ -137,21 +144,23 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let Connection { client, events, .. } = connection;
-        let events_task = cx.spawn(async move |this, cx| {
+        let events_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 let batch = batch_events(first, &events, MAX_BATCH_BYTES);
-                if this.update(cx, |view, cx| view.on_events(batch, cx)).is_err() {
+                if this.update_in(cx, |view, window, cx| view.on_events(batch, window, cx)).is_err() {
                     return;
                 }
                 // Yield so keystrokes (e.g. Ctrl+C) are handled between batches.
                 cx.background_executor().timer(Duration::ZERO).await;
             }
-            let _ = this.update(cx, |view, cx| view.on_events(vec![ClientEvent::Disconnected], cx));
+            let _ = this.update_in(cx, |view, window, cx| view.on_events(vec![ClientEvent::Disconnected], window, cx));
         });
         let sidebar = cx.new(|cx| SidebarView::new(restored.workspace.sidebar.view, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
             this.on_sidebar_event(event.clone(), window, cx)
         });
+        // Coming back to the window counts as seeing its visible tab.
+        let activation = cx.observe_window_activation(window, |this, window, cx| this.clear_seen(window, cx));
         let mut this = WorkspaceView {
             workspace: restored.workspace,
             slots: HashMap::new(),
@@ -169,6 +178,9 @@ impl WorkspaceView {
             resizing_sidebar: false,
             _sidebar_events: sidebar_events,
             launcher: None,
+            attention: AttentionTracker::default(),
+            unseen: HashMap::new(),
+            _activation: activation,
             _events: events_task,
         };
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
@@ -209,7 +221,7 @@ impl WorkspaceView {
         self.client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows));
     }
 
-    fn on_events(&mut self, events: Vec<ClientEvent>, cx: &mut Context<Self>) {
+    fn on_events(&mut self, events: Vec<ClientEvent>, window: &mut Window, cx: &mut Context<Self>) {
         for event in events {
             match &event {
                 ClientEvent::Output { pane, .. } | ClientEvent::Resync { pane, .. } => {
@@ -243,13 +255,18 @@ impl WorkspaceView {
                 }
                 ClientEvent::Sessions { sessions } => {
                     self.track_sessions(sessions, cx);
+                    self.attention.reset(sessions);
                     let sessions = sessions.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(sessions, cx));
                 }
                 ClientEvent::SessionsChanged { upserted, removed } => {
                     self.track_sessions(upserted, cx);
+                    let alerts = self.attention.update(upserted, removed);
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(upserted, removed, cx));
+                    for alert in alerts {
+                        self.raise(alert, window, cx);
+                    }
                 }
                 // Handled by the take-over flow (M5 Task 9).
                 ClientEvent::TakeOverResult { .. } => {}
@@ -275,6 +292,37 @@ impl WorkspaceView {
         if changed {
             self.save(cx);
         }
+    }
+
+    /// Mark `alert`'s pane unseen — unless the user is looking at it (visible tab, active window).
+    fn raise(&mut self, alert: Alert, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(leaf) = self.workspace.leaf_for_pane(alert.pane) else { return };
+        if window.is_window_active() && self.workspace.is_visible(leaf) {
+            return;
+        }
+        self.unseen.insert(leaf, alert.kind);
+        self.sync_unseen(cx);
+    }
+
+    /// Forget alerts of the panes the user can see now.
+    fn clear_seen(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() {
+            return;
+        }
+        let before = self.unseen.len();
+        let workspace = &self.workspace;
+        self.unseen.retain(|leaf, _| !workspace.is_visible(*leaf));
+        if self.unseen.len() != before {
+            self.sync_unseen(cx);
+        }
+        cx.notify();
+    }
+
+    /// Tell the sidebar which sessions carry the unseen badge.
+    fn sync_unseen(&self, cx: &mut Context<Self>) {
+        let sessions: HashSet<String> =
+            self.unseen.keys().filter_map(|leaf| self.workspace.leaves.get(leaf)?.session.clone()).collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, cx));
     }
 
     /// Continue / Restart a finished leaf — unless its session already runs: in another pane (show that
@@ -344,6 +392,9 @@ impl WorkspaceView {
             self.client.kill(pane);
         }
         self.slots.remove(&leaf);
+        if self.unseen.remove(&leaf).is_some() {
+            self.sync_unseen(cx);
+        }
         self.pending.retain(|_, waiting| *waiting != leaf);
         self.focus_current(window, cx);
         self.save(cx);
@@ -374,7 +425,7 @@ impl WorkspaceView {
             }
             None => self.focus_handle.focus(window, cx),
         }
-        cx.notify();
+        self.clear_seen(window, cx);
     }
 
     /// Write the layout (atomically) and refresh the sidebar's shell entries.
@@ -671,11 +722,18 @@ impl WorkspaceView {
 
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
-        let titles: Vec<String> = self
+        let sessions = self.sidebar.read(cx).sessions();
+        let tabs: Vec<(String, Option<SessionStatus>, bool)> = self
             .workspace
             .tabs
             .iter()
-            .map(|tab| self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title()))
+            .enumerate()
+            .map(|(index, tab)| {
+                let title = self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title());
+                let status = self.workspace.tab_status(index, sessions).cloned();
+                let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
+                (title, status, unseen)
+            })
             .collect();
         div()
             .id("tab-bar")
@@ -688,7 +746,7 @@ impl WorkspaceView {
             .border_b_1()
             .border_color(rgb(BORDER))
             .text_sm()
-            .children(titles.into_iter().enumerate().map(|(index, title)| {
+            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen))| {
                 let active = index == self.workspace.active;
                 div()
                     .id(("tab", index))
@@ -704,7 +762,12 @@ impl WorkspaceView {
                     .border_color(rgb(BORDER))
                     .text_color(rgb(if active { TEXT } else { MUTED }))
                     .when(active, |tab| tab.bg(rgb(BACKGROUND)).border_t_2().border_color(rgb(ACCENT)))
+                    .when_some(status, |tab, status| {
+                        let (glyph, color) = status_glyph(Some(&status));
+                        tab.child(div().flex_none().mr_1().text_color(rgb(color)).child(glyph))
+                    })
                     .child(div().min_w_0().truncate().child(title))
+                    .when(unseen, |tab| tab.child(div().flex_none().ml_1().text_color(rgb(AMBER)).child("•")))
                     .child(
                         div()
                             .id(("close-tab", index))
@@ -783,6 +846,7 @@ impl WorkspaceView {
                 let view = self.slots.get(&leaf)?.view.clone();
                 let focused = leaf == tab.focused;
                 let title = view.read(cx).title();
+                let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 Some(
                     div()
                         .absolute()
@@ -797,7 +861,7 @@ impl WorkspaceView {
                                 .flex()
                                 .flex_col()
                                 .bg(rgb(BACKGROUND))
-                                .when(multiple, |pane| pane.child(pane_header(title, focused)))
+                                .when(multiple, |pane| pane.child(pane_header(title, focused, status)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -835,12 +899,22 @@ impl WorkspaceView {
     }
 }
 
+/// Glyph and color for a live session's status: ● needs input, ◐ busy, ✓ idle, · unknown.
+pub(crate) fn status_glyph(status: Option<&SessionStatus>) -> (&'static str, u32) {
+    match status {
+        Some(SessionStatus::NeedsInput { .. }) => ("●", AMBER),
+        Some(SessionStatus::Busy) => ("◐", ACCENT),
+        Some(SessionStatus::Idle) => ("✓", TEXT),
+        None => ("·", MUTED),
+    }
+}
+
 /// A new Claude session (or the user's shell) in `cwd`.
 pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
     if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd } }
 }
 
-fn pane_header(title: String, focused: bool) -> impl IntoElement {
+fn pane_header(title: String, focused: bool, status: Option<SessionStatus>) -> impl IntoElement {
     div()
         .h(px(22.))
         .px_2()
@@ -849,6 +923,10 @@ fn pane_header(title: String, focused: bool) -> impl IntoElement {
         .text_xs()
         .bg(rgb(PANEL))
         .text_color(rgb(if focused { ACCENT } else { MUTED }))
+        .when_some(status, |header, status| {
+            let (glyph, color) = status_glyph(Some(&status));
+            header.child(div().flex_none().mr_1().text_color(rgb(color)).child(glyph))
+        })
         .child(div().truncate().child(title))
 }
 

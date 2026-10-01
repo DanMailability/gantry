@@ -17,7 +17,7 @@ use gpui::{
 use protocol::message::{SessionInfo, SessionState};
 
 use crate::field;
-use crate::workspace_view::{ACCENT, BORDER, MUTED, PANEL, SELECTED, TAB_BAR_HEIGHT, TEXT};
+use crate::workspace_view::{ACCENT, AMBER, BORDER, MUTED, PANEL, SELECTED, TAB_BAR_HEIGHT, TEXT, status_glyph};
 
 const ROW_HEIGHT: f32 = 22.0;
 const INDENT: f32 = 12.0;
@@ -58,6 +58,8 @@ pub struct SidebarView {
     toggled: HashSet<PathBuf>,
     show_all: HashSet<PathBuf>,
     details: Option<String>,
+    /// Sessions with an alert the user has not seen.
+    unseen: HashSet<String>,
     rows: Vec<Row>,
     selected: Option<RowKey>,
     /// Directory context menu: its directory and where it opened.
@@ -95,6 +97,7 @@ impl SidebarView {
             toggled: HashSet::new(),
             show_all: HashSet::new(),
             details: None,
+            unseen: HashSet::new(),
             rows: Vec::new(),
             selected: None,
             menu: None,
@@ -121,6 +124,14 @@ impl SidebarView {
     pub fn apply(&mut self, upserted: Vec<SessionInfo>, removed: &[String], cx: &mut Context<Self>) {
         self.sessions.apply(upserted, removed);
         self.rebuild(cx);
+    }
+
+    /// Sessions to mark with the unseen badge.
+    pub fn set_unseen(&mut self, unseen: HashSet<String>, cx: &mut Context<Self>) {
+        if unseen != self.unseen {
+            self.unseen = unseen;
+            cx.notify();
+        }
     }
 
     /// The workspace's shell panes.
@@ -272,18 +283,22 @@ impl SidebarView {
                 }
             }));
         let muted = |text: String| div().flex_none().text_xs().text_color(rgb(MUTED)).child(text);
+        let count = |text: String, color: u32| div().flex_none().text_xs().text_color(rgb(color)).child(text);
         let title = |text: String, color: u32| div().min_w_0().truncate().text_color(rgb(color)).child(text);
         // Paths give way to titles: they shrink first and truncate.
         let path_label = |text: String| div().min_w_0().flex_shrink(4.).truncate().text_xs().text_color(rgb(MUTED)).child(text);
         match &row.kind {
             RowKind::Host { name } => base.text_color(rgb(MUTED)).child(format!("▾ {name}")),
             RowKind::Group { label, count } => base.text_xs().text_color(rgb(MUTED)).child(format!("{} · {count}", label.to_uppercase())),
-            RowKind::Dir { path, label, expanded, live, closed, .. } => {
+            RowKind::Dir { path, label, expanded, needs_input, busy, live, closed } => {
                 let path = path.clone();
+                let rest = live - needs_input - busy;
                 base.child(div().flex_none().text_color(rgb(MUTED)).child(if *expanded { "▾" } else { "▸" }))
                     .child(title(label.clone(), TEXT))
                     .child(div().flex_1())
-                    .when(*live > 0, |el| el.child(div().flex_none().text_xs().text_color(rgb(ACCENT)).child(format!("●{live}"))))
+                    .when(*needs_input > 0, |el| el.child(count(format!("●{needs_input}"), AMBER)))
+                    .when(*busy > 0, |el| el.child(count(format!("◐{busy}"), ACCENT)))
+                    .when(rest > 0, |el| el.child(muted(format!("○{rest}"))))
                     .when(*closed > 0, |el| el.child(muted(format!("◌{closed}"))))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -294,17 +309,17 @@ impl SidebarView {
                     )
             }
             RowKind::Session { session, age, path } => {
-                let (glyph, color) = match session.state {
-                    SessionState::Managed { .. } => ("●", ACCENT),
-                    SessionState::External { .. } => ("↗", TEXT),
-                    SessionState::Closed => ("◌", MUTED),
-                };
                 let closed = session.state == SessionState::Closed;
+                let (glyph, color) = if closed { ("◌", MUTED) } else { status_glyph(session.status.as_ref()) };
+                let external = matches!(session.state, SessionState::External { .. });
+                let unseen = self.unseen.contains(&session.id);
                 let right = if closed && !session.cwd_exists { "dir missing".to_string() } else { age.clone() };
                 base.child(div().flex_none().text_color(rgb(color)).child(glyph))
                     .child(title(session_title(session).to_string(), if closed { MUTED } else { TEXT }))
+                    .when(external, |el| el.child(muted("↗".to_string())))
                     .when_some(path.clone(), |el, path| el.child(path_label(path)))
                     .child(div().flex_1())
+                    .when(unseen, |el| el.child(count("•".to_string(), AMBER)))
                     .child(muted(right))
             }
             RowKind::Shell { entry, path } => base
