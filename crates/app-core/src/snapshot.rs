@@ -1,7 +1,5 @@
 //! Plain-data view of the terminal screen, ready for a renderer to paint.
 
-use unicode_bidi::{BidiClass, bidi_class};
-
 /// An 8-bit-per-channel color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb {
@@ -99,12 +97,12 @@ pub struct Span {
 
 /// Group a row into spans of identical style. Spacer cells are skipped.
 ///
-/// Wide characters and right-to-left characters always get their own span: the renderer pins each
-/// span to its cells, so a text shaper must never reorder glyphs across cells (bidi display is a
-/// separate step).
+/// Only ASCII text and frame characters (box drawing, blocks) merge into longer spans; every other character —
+/// wide, right-to-left, or likely drawn from a fallback font — is its own span. The renderer pins each span to its
+/// cells by counting glyphs, so a character that shapes into more or fewer glyphs than cells must not share a span.
 pub fn row_spans(row: &[CellView]) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
-    let mut last_isolated = false;
+    let mut last_kind = None;
     for (col, cell) in row.iter().enumerate() {
         if cell.spacer {
             continue;
@@ -113,9 +111,9 @@ pub fn row_spans(row: &[CellView]) -> Vec<Span> {
         if let Some(marks) = &cell.combining {
             text.extend(marks.iter());
         }
-        let isolated = cell.wide || is_rtl(cell.ch);
-        let merge_into_last = !isolated && !last_isolated;
-        last_isolated = isolated;
+        let kind = merge_kind(cell);
+        let merge_into_last = kind.is_some() && kind == last_kind;
+        last_kind = kind;
         if merge_into_last
             && let Some(last) = spans.last_mut()
             && last.style == cell.style
@@ -136,8 +134,23 @@ pub fn row_spans(row: &[CellView]) -> Vec<Span> {
     spans
 }
 
-fn is_rtl(ch: char) -> bool {
-    matches!(bidi_class(ch), BidiClass::R | BidiClass::AL)
+/// Which cells may share a span: ASCII with ASCII, frame characters with frame characters; `None` never merges.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergeKind {
+    Ascii,
+    Frame,
+}
+
+fn merge_kind(cell: &CellView) -> Option<MergeKind> {
+    if cell.wide || cell.combining.is_some() {
+        None
+    } else if cell.ch.is_ascii() {
+        Some(MergeKind::Ascii)
+    } else if matches!(cell.ch, '\u{2500}'..='\u{259F}') {
+        Some(MergeKind::Frame)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +215,22 @@ mod tests {
         let spans = row_spans(&[base]);
         assert_eq!(spans[0].text, "ש\u{05B8}");
         assert_eq!(spans[0].width_cols, 1);
+    }
+
+    #[test]
+    fn fallback_symbols_get_their_own_span() {
+        let row: Vec<_> = "a⏺✓b".chars().map(|c| cell(c, 1)).collect();
+        let summary: Vec<_> =
+            row_spans(&row).iter().map(|s| (s.start_col, s.width_cols, s.text.clone())).collect();
+        let expected: Vec<_> =
+            [(0, 1, "a"), (1, 1, "⏺"), (2, 1, "✓"), (3, 1, "b")].into_iter().map(|(c, w, t)| (c, w, t.to_string())).collect();
+        assert_eq!(summary, expected);
+    }
+
+    #[test]
+    fn ascii_text_and_frames_still_merge() {
+        let row: Vec<_> = "ab╭──╮cd".chars().map(|c| cell(c, 1)).collect();
+        let texts: Vec<_> = row_spans(&row).iter().map(|s| s.text.clone()).collect();
+        assert_eq!(texts, vec!["ab", "╭──╮", "cd"]);
     }
 }
