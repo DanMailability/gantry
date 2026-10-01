@@ -2,6 +2,9 @@
 //! pid files for live instances. Formats are undocumented, so every reader is defensive.
 
 pub mod config;
+pub mod host;
+pub mod index;
 pub mod live;
 pub mod transcript;
+pub mod watch;
 
