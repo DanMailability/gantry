@@ -14,7 +14,7 @@ use app_core::workspace::PaneLaunch;
 use daemon::client::{ClientEvent, DaemonClient};
 use protocol::message::PaneId;
 use gpui::{
-    App, BorderStyle, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
+    App, BorderStyle, Bounds, ClickEvent, ContentMask, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
     FontWeight, Hsla, Pixels, Point, StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, canvas,
     div, fill, font, outline, point, prelude::*, px, rgb, size,
 };
@@ -617,7 +617,9 @@ impl Render for TerminalView {
                         layout_view.update(cx, |view, cx| view.layout(bounds, metrics, cx));
                     },
                     move |bounds, (), window, cx| {
-                        paint_grid(&snapshot, bounds.origin, metrics, &font, font_size, focused, window, cx);
+                        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                            paint_grid(&snapshot, bounds.origin, metrics, &font, font_size, focused, window, cx);
+                        });
                         window.handle_input(&focus, ElementInputHandler::new(bounds, input_view), cx);
                     },
                 )
