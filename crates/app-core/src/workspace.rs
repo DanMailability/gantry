@@ -23,17 +23,25 @@ pub struct PaneLaunch {
     pub args: Vec<String>,
     /// Directory it runs in.
     pub cwd: PathBuf,
+    /// Host folder of the dev container it runs in; `None` = this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<PathBuf>,
 }
 
 impl PaneLaunch {
     /// A new Claude Code session, with its own `--session-id`, in `cwd`.
     pub fn claude(cwd: PathBuf) -> PaneLaunch {
-        PaneLaunch { program: CLAUDE.into(), args: vec!["--session-id".into(), uuid::Uuid::new_v4().to_string()], cwd }
+        PaneLaunch { program: CLAUDE.into(), args: vec!["--session-id".into(), uuid::Uuid::new_v4().to_string()], cwd, container: None }
     }
 
-    /// Claude Code resuming `session` in `cwd`.
-    pub fn resume(session: &str, cwd: PathBuf) -> PaneLaunch {
-        PaneLaunch { program: CLAUDE.into(), args: vec!["--resume".into(), session.into()], cwd }
+    /// Claude Code resuming `session` in `cwd`, in the dev container serving `container` (`None` = this machine).
+    pub fn resume(session: &str, cwd: PathBuf, container: Option<PathBuf>) -> PaneLaunch {
+        PaneLaunch { program: CLAUDE.into(), args: vec!["--resume".into(), session.into()], cwd, container }
+    }
+
+    /// The same launch, in the dev container serving `host_folder` (`None` = this machine).
+    pub fn in_container(self, host_folder: Option<PathBuf>) -> PaneLaunch {
+        PaneLaunch { container: host_folder, ..self }
     }
 
     /// The Claude session this command line names (`--session-id`, `--resume`, `-r`).
@@ -58,7 +66,15 @@ impl PaneLaunch {
 
     /// The daemon request that starts this, optionally in `cwd_from`'s current directory.
     pub fn request(&self, cwd_from: Option<PaneId>, cols: u16, rows: u16) -> SpawnRequest {
-        SpawnRequest { program: self.program.clone(), args: self.args.clone(), cwd: self.cwd.clone(), cols, rows, cwd_from }
+        SpawnRequest {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            cwd: self.cwd.clone(),
+            cols,
+            rows,
+            cwd_from,
+            container: self.container.clone(),
+        }
     }
 }
 
@@ -115,7 +131,7 @@ impl Leaf {
             Some(id) => vec!["--session-id".into(), id.clone()],
             None => vec!["--continue".into()],
         };
-        PaneLaunch { program: launch.program.clone(), args, cwd: launch.cwd.clone() }
+        PaneLaunch { program: launch.program.clone(), args, cwd: launch.cwd.clone(), container: launch.container.clone() }
     }
 }
 
@@ -410,7 +426,7 @@ pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], laun
     let mut orphans: Vec<&PaneInfo> = live.iter().filter(|info| !known.contains(&info.pane)).collect();
     orphans.sort_by_key(|info| (info.last_focused, info.pane));
     for info in orphans {
-        let leaf = workspace.new_tab(PaneLaunch { program: info.program.clone(), args: info.args.clone(), cwd: info.cwd.clone() });
+        let leaf = workspace.new_tab(PaneLaunch { program: info.program.clone(), args: info.args.clone(), cwd: info.cwd.clone(), container: info.container.clone() });
         workspace.pane_started(leaf, info.pane, info.cwd.clone());
         attach.push((leaf, info.pane));
     }
@@ -428,12 +444,28 @@ pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], laun
 mod tests {
     use super::*;
 
+    #[test]
+    fn layouts_saved_before_containers_load_as_local_launches() {
+        let json = r#"{"program":"claude","args":["--resume","s"],"cwd":"/r"}"#;
+        let launch: PaneLaunch = serde_json::from_str(json).unwrap();
+        assert_eq!(launch.container, None);
+        assert_eq!(serde_json::to_string(&launch).unwrap(), json);
+    }
+
+    #[test]
+    fn a_container_launch_reruns_and_requests_in_its_container() {
+        let launch = PaneLaunch::claude("/home/u/app".into()).in_container(Some("/home/u/app".into()));
+        let leaf = Leaf::new(launch);
+        assert_eq!(leaf.rerun(true).container, Some(PathBuf::from("/home/u/app")));
+        assert_eq!(leaf.launch.request(None, 80, 24).container, Some(PathBuf::from("/home/u/app")));
+    }
+
     fn shell(cwd: &str) -> PaneLaunch {
-        PaneLaunch { program: "/bin/bash".into(), args: vec![], cwd: cwd.into() }
+        PaneLaunch { program: "/bin/bash".into(), args: vec![], cwd: cwd.into(), container: None }
     }
 
     fn info(pane: PaneId, program: &str, last_focused: u64) -> PaneInfo {
-        PaneInfo { pane, program: program.into(), args: vec!["-l".into()], cwd: "/srv".into(), last_focused }
+        PaneInfo { pane, program: program.into(), args: vec!["-l".into()], cwd: "/srv".into(), last_focused, container: None }
     }
 
     #[test]
@@ -540,7 +572,7 @@ mod tests {
     }
 
     fn claude_leaf(session: Option<&str>) -> Leaf {
-        Leaf { pane: None, launch: PaneLaunch { program: "claude".into(), args: vec![], cwd: "/r".into() }, session: session.map(Into::into) }
+        Leaf { pane: None, launch: PaneLaunch { program: "claude".into(), args: vec![], cwd: "/r".into(), container: None }, session: session.map(Into::into) }
     }
 
     #[test]
@@ -557,7 +589,7 @@ mod tests {
 
     #[test]
     fn resume_launches_name_their_session() {
-        let launch = PaneLaunch::resume("abc", "/r".into());
+        let launch = PaneLaunch::resume("abc", "/r".into(), None);
         assert_eq!((launch.args.clone(), launch.session()), (vec!["--resume".to_string(), "abc".to_string()], Some("abc")));
         assert_eq!(shell("/r").session(), None);
     }
@@ -584,6 +616,7 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
+            container: None,
         }
     }
 
@@ -610,9 +643,9 @@ mod tests {
     fn leaves_and_tabs_show_the_status_of_the_session_their_pane_runs() {
         use protocol::message::{SessionInfo, SessionState, SessionStatus};
         let mut ws = Workspace::default();
-        let a = ws.new_tab(PaneLaunch::resume("a", "/r".into()));
+        let a = ws.new_tab(PaneLaunch::resume("a", "/r".into(), None));
         ws.pane_started(a, 1, "/r".into());
-        let b = ws.split(Axis::Horizontal, PaneLaunch::resume("b", "/r".into())).unwrap();
+        let b = ws.split(Axis::Horizontal, PaneLaunch::resume("b", "/r".into(), None)).unwrap();
         ws.pane_started(b, 2, "/r".into());
         let other = ws.new_tab(shell("/r"));
         let mut store = SessionStore::default();
@@ -631,7 +664,7 @@ mod tests {
     #[test]
     fn leaves_are_found_by_session() {
         let mut ws = Workspace::default();
-        let a = ws.new_tab(PaneLaunch::resume("x", "/r".into()));
+        let a = ws.new_tab(PaneLaunch::resume("x", "/r".into(), None));
         ws.new_tab(shell("/r"));
         assert_eq!((ws.leaf_for_session("x"), ws.leaf_for_session("y")), (Some(a), None));
     }
@@ -650,7 +683,7 @@ mod tests {
 
     #[test]
     fn restore_adopted_claude_panes_know_their_session() {
-        let live = [PaneInfo { pane: 4, program: "claude".into(), args: vec!["--resume".into(), "xyz".into()], cwd: "/srv".into(), last_focused: 1 }];
+        let live = [PaneInfo { pane: 4, program: "claude".into(), args: vec!["--resume".into(), "xyz".into()], cwd: "/srv".into(), last_focused: 1, container: None }];
         let restored = restore(None, "i", &live, &launch());
         let leaf = restored.attach[0].0;
         assert_eq!(restored.workspace.leaves[&leaf].session.as_deref(), Some("xyz"));

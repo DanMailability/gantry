@@ -373,6 +373,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
                     args: pane.args.clone(),
                     cwd: pane.cwd.clone(),
                     last_focused: pane.last_focused,
+                    container: None,
                 })
                 .collect();
             panes.sort_by(|a, b| b.last_focused.cmp(&a.last_focused).then(b.pane.cmp(&a.pane)));
@@ -409,6 +410,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             }
         }
         ClientMessage::TakeOver { session, force } => take_over_session(shared, session, force),
+        ClientMessage::FindContainer { request, .. } => shared.lock().control(&DaemonMessage::ContainerFound { request, container: None }),
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             if let Some(p) = state.panes.get_mut(&pane) {

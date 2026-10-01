@@ -75,6 +75,7 @@ fn spawn(conn: &Connection, program: &str, args: &[&str], cwd: &Path, needle: &s
         cols: 80,
         rows: 24,
         cwd_from: None,
+        container: None,
     };
     conn.client.spawn(1, spec);
     let deadline = Instant::now() + Duration::from_secs(10);

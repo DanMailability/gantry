@@ -88,6 +88,7 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone]) 
                 cwd_exists: r.cwd_exists,
                 status_since_ms: if status.is_some() { r.activity_since_ms } else { 0 },
                 status,
+                container: None,
             }
         })
         .collect()

@@ -300,6 +300,7 @@ impl WorkspaceView {
                     }
                 }
                 ClientEvent::TakeOverResult { session, outcome } => self.on_take_over(session.clone(), outcome.clone(), window, cx),
+                ClientEvent::ContainerFound { .. } => {}
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
                     for slot in self.slots.values() {
@@ -427,7 +428,7 @@ impl WorkspaceView {
             TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
                 Some(TakeOverTarget::NewPane { cwd, split }) => {
                     let axis = split.then_some(Axis::Horizontal);
-                    self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
+                    self.open_launch(PaneLaunch::resume(&session, cwd, None), axis, None, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
                     if let Some(launch) = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun(true)) {
@@ -596,7 +597,7 @@ impl WorkspaceView {
                     }
                     None => {
                         let axis = split.then_some(Axis::Horizontal);
-                        self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
+                        self.open_launch(PaneLaunch::resume(&session, cwd, None), axis, None, window, cx);
                     }
                 },
                 Activation::TakeOver { session, cwd } => {
@@ -1148,7 +1149,7 @@ pub(crate) fn round_button(
 
 /// A new Claude session (or the user's shell) in `cwd`.
 pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
-    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd } }
+    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd, container: None } }
 }
 
 impl Render for WorkspaceView {

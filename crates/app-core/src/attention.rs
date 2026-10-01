@@ -136,6 +136,7 @@ mod tests {
             cwd_exists: true,
             status,
             status_since_ms: since,
+            container: None,
         }
     }
 

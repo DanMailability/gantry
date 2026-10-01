@@ -104,6 +104,7 @@ fn sh(script: &str, cwd_from: Option<PaneId>) -> SpawnRequest {
         cols: 80,
         rows: 24,
         cwd_from,
+        container: None,
     }
 }
 
