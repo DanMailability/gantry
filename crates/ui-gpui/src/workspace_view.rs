@@ -933,7 +933,7 @@ impl WorkspaceView {
                             .rounded_full()
                             .text_xs()
                             .hover(|style| style.bg(rgba(0x00000026)))
-                            .child("✕")
+                            .child("×")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 let leaves = this.workspace.tabs.get(index).map(|tab| tab.root.leaves()).unwrap_or_default();

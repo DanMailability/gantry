@@ -130,7 +130,7 @@ pub fn window_controls(window: &Window, on_close: impl Fn(&gpui::ClickEvent, &mu
         .gap_2()
         .when(controls.minimize, |row| row.child(button("minimize", "–").on_click(|_, window, _| window.minimize_window())))
         .when(controls.maximize, |row| row.child(button("maximize", "□").on_click(|_, window, _| window.zoom_window())))
-        .child(button("close", "✕").on_click(on_close))
+        .child(button("close", "×").on_click(on_close))
 }
 
 #[cfg(test)]
