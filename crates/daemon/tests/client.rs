@@ -85,3 +85,56 @@ fn restart_daemon_stops_a_running_daemon() {
         }
     }
 }
+
+fn next_event(events: &async_channel::Receiver<ClientEvent>, wanted: impl Fn(&ClientEvent) -> bool) -> ClientEvent {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for an event");
+        let event = events.recv_blocking().unwrap();
+        if wanted(&event) {
+            return event;
+        }
+    }
+}
+
+#[test]
+fn connect_then_spawn_attach_and_kill() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "t");
+    let first = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
+    assert!(first.panes.is_empty());
+    first.client.spawn(7, sh("printf 'hello pane'; sleep 10"));
+    let ClientEvent::Spawned { request: 7, pane, cwd } = next_event(&first.events, |e| matches!(e, ClientEvent::Spawned { .. })) else {
+        unreachable!()
+    };
+    assert_eq!(cwd, std::env::temp_dir());
+    output_until(&first.events, "hello pane");
+    let instance = first.instance.clone();
+    drop(first); // detach
+    std::thread::sleep(Duration::from_millis(300));
+
+    let again = DaemonClient::connect(&paths, || panic!("daemon should still run")).unwrap();
+    assert_eq!(again.instance, instance);
+    assert_eq!(again.panes.len(), 1);
+    assert_eq!(again.panes[0].pane, pane);
+    assert_eq!(again.panes[0].args, vec!["-c".to_string(), "printf 'hello pane'; sleep 10".to_string()]);
+    again.client.attach(pane);
+    assert!(matches!(next_event(&again.events, |_| true), ClientEvent::Resync { pane: p, .. } if p == pane));
+    output_until(&again.events, "hello pane");
+    again.client.kill(pane);
+    assert!(matches!(next_event(&again.events, |e| matches!(e, ClientEvent::Exited { .. })), ClientEvent::Exited { pane: p, .. } if p == pane));
+}
+
+#[test]
+fn spawn_failure_is_an_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "t");
+    let conn = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
+    let mut spec = sh("true");
+    spec.program = "/nonexistent/ccm-test-program".into();
+    conn.client.spawn(3, spec);
+    assert!(matches!(
+        next_event(&conn.events, |e| matches!(e, ClientEvent::SpawnFailed { .. })),
+        ClientEvent::SpawnFailed { request: 3, .. }
+    ));
+}

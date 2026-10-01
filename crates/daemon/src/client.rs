@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use interprocess::local_socket::tokio::{Stream, prelude::*};
@@ -41,6 +42,22 @@ pub enum ClientEvent {
         pane: PaneId,
         /// Exit code.
         code: u32,
+    },
+    /// A `spawn` succeeded; the client is attached to the new pane.
+    Spawned {
+        /// Echoed request id.
+        request: u64,
+        /// New pane.
+        pane: PaneId,
+        /// Directory it started in.
+        cwd: PathBuf,
+    },
+    /// A `spawn` failed.
+    SpawnFailed {
+        /// Echoed request id.
+        request: u64,
+        /// Human-readable reason.
+        error: String,
     },
     /// Another GUI took over the daemon.
     TakenOver,
@@ -116,13 +133,21 @@ pub struct DaemonClient {
     outgoing: mpsc::UnboundedSender<Outgoing>,
 }
 
+/// A fresh daemon connection.
+pub struct Connection {
+    /// Handle for sending requests.
+    pub client: DaemonClient,
+    /// Daemon instance id (pane ids are only meaningful within it).
+    pub instance: String,
+    /// Live panes at connect time, most recently focused first.
+    pub panes: Vec<PaneInfo>,
+    /// Daemon events, in order.
+    pub events: async_channel::Receiver<ClientEvent>,
+}
+
 impl DaemonClient {
-    /// Connect (starting the daemon via `spawn` if needed), pick the startup pane, and begin streaming events.
-    pub fn start(
-        paths: &Paths,
-        launch: Launch,
-        spawn: impl FnOnce() -> io::Result<()> + Send + 'static,
-    ) -> Result<(DaemonClient, PaneId, async_channel::Receiver<ClientEvent>), StartError> {
+    /// Connect (starting the daemon via `spawn` if needed) and begin streaming events.
+    pub fn connect(paths: &Paths, spawn: impl FnOnce() -> io::Result<()> + Send + 'static) -> Result<Connection, StartError> {
         let paths = paths.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
@@ -135,10 +160,53 @@ impl DaemonClient {
                     return;
                 }
             };
-            runtime.block_on(run_connection(paths, launch, spawn, ready_tx, outgoing_rx, events_tx));
+            runtime.block_on(run_connection(paths, spawn, ready_tx, outgoing_rx, events_tx));
         });
-        let pane = ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
-        Ok((DaemonClient { outgoing }, pane, events))
+        let (instance, panes) = ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
+        Ok(Connection { client: DaemonClient { outgoing }, instance, panes, events })
+    }
+
+    /// Connect, pick the startup pane, and begin streaming events.
+    pub fn start(
+        paths: &Paths,
+        launch: Launch,
+        spawn: impl FnOnce() -> io::Result<()> + Send + 'static,
+    ) -> Result<(DaemonClient, PaneId, async_channel::Receiver<ClientEvent>), StartError> {
+        let Connection { client, panes, events, .. } = DaemonClient::connect(paths, spawn)?;
+        let pane = match choose_startup(&panes, &launch) {
+            Startup::Attach(pane) => {
+                client.attach(pane);
+                pane
+            }
+            Startup::Spawn(spec) => {
+                client.spawn(1, spec);
+                loop {
+                    match events.recv_blocking() {
+                        Ok(ClientEvent::Spawned { request: 1, pane, .. }) => break pane,
+                        Ok(ClientEvent::SpawnFailed { error, .. }) => return Err(StartError::SpawnFailed(error)),
+                        Ok(_) => {}
+                        Err(_) => return Err(StartError::Io(anyhow::anyhow!("daemon closed the connection"))),
+                    }
+                }
+            }
+        };
+        client.focus(pane);
+        Ok((client, pane, events))
+    }
+
+    /// Start a pane; answered by `Spawned`/`SpawnFailed` with the same `request`.
+    pub fn spawn(&self, request: u64, spec: SpawnRequest) {
+        self.send(&ClientMessage::Spawn { request, spec });
+    }
+
+    /// Start receiving a live pane's output (a `Resync` and replay come first).
+    pub fn attach(&self, pane: PaneId) {
+        self.send(&ClientMessage::Attach { pane });
+    }
+
+    /// Terminate a pane's process.
+    pub fn kill(&self, pane: PaneId) {
+        self.send(&ClientMessage::Kill { pane });
     }
 
     /// Send keyboard/paste input to a pane.
@@ -172,9 +240,8 @@ impl DaemonClient {
 
 async fn run_connection(
     paths: Paths,
-    launch: Launch,
     spawn: impl FnOnce() -> io::Result<()>,
-    ready: std::sync::mpsc::Sender<Result<PaneId, StartError>>,
+    ready: std::sync::mpsc::Sender<Result<(String, Vec<PaneInfo>), StartError>>,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
     events: async_channel::Sender<ClientEvent>,
 ) {
@@ -186,15 +253,15 @@ async fn run_connection(
         }
     };
     let (mut recv, mut send) = stream.split();
-    let startup = handshake(&mut recv, &mut send, &launch).await;
-    let pane = match startup {
-        Ok(pane) => pane,
+    match hello(&mut recv, &mut send).await {
+        Ok(hello) => {
+            let _ = ready.send(Ok(hello));
+        }
         Err(err) => {
             let _ = ready.send(Err(err));
             return;
         }
-    };
-    let _ = ready.send(Ok(pane));
+    }
     let writer = tokio::spawn(async move {
         while let Some(item) = outgoing.recv().await {
             match item {
@@ -215,6 +282,8 @@ async fn run_connection(
             Ok(Some(frame)) => match frame.parse::<DaemonMessage>() {
                 Some(Ok(DaemonMessage::Resync { pane, cols, rows })) => ClientEvent::Resync { pane, cols, rows },
                 Some(Ok(DaemonMessage::Exited { pane, code })) => ClientEvent::Exited { pane, code },
+                Some(Ok(DaemonMessage::Spawned { request, pane, cwd })) => ClientEvent::Spawned { request, pane, cwd },
+                Some(Ok(DaemonMessage::SpawnFailed { request, error })) => ClientEvent::SpawnFailed { request, error },
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");
@@ -232,42 +301,25 @@ async fn run_connection(
     writer.abort();
 }
 
-async fn handshake<R, W>(recv: &mut R, send: &mut W, launch: &Launch) -> Result<PaneId, StartError>
+/// `Hello` → `Welcome`, then `ListPanes` → `Panes`. Returns the daemon instance and its live panes.
+async fn hello<R, W>(recv: &mut R, send: &mut W) -> Result<(String, Vec<PaneInfo>), StartError>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     let io = |err: io::Error| StartError::Io(err.into());
     write_frame(send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.map_err(io)?;
-    match next_message(recv).await? {
-        DaemonMessage::Welcome { .. } => {}
+    let instance = match next_message(recv).await? {
+        DaemonMessage::Welcome { instance, .. } => instance,
         DaemonMessage::VersionMismatch { daemon_protocol } => return Err(StartError::VersionMismatch { daemon_protocol }),
         other => return Err(StartError::Io(anyhow::anyhow!("unexpected handshake reply {other:?}"))),
-    }
+    };
     write_frame(send, &Frame::control(&ClientMessage::ListPanes)).await.map_err(io)?;
-    let panes = loop {
+    loop {
         if let DaemonMessage::Panes { panes } = next_message(recv).await? {
-            break panes;
+            return Ok((instance, panes));
         }
-    };
-    let pane = match choose_startup(&panes, launch) {
-        Startup::Attach(pane) => {
-            write_frame(send, &Frame::control(&ClientMessage::Attach { pane })).await.map_err(io)?;
-            pane
-        }
-        Startup::Spawn(spec) => {
-            write_frame(send, &Frame::control(&ClientMessage::Spawn { request: 1, spec })).await.map_err(io)?;
-            loop {
-                match next_message(recv).await? {
-                    DaemonMessage::Spawned { request: 1, pane, .. } => break pane,
-                    DaemonMessage::SpawnFailed { error, .. } => return Err(StartError::SpawnFailed(error)),
-                    _ => {}
-                }
-            }
-        }
-    };
-    write_frame(send, &Frame::control(&ClientMessage::Focus { pane })).await.map_err(io)?;
-    Ok(pane)
+    }
 }
 
 async fn next_message<R: tokio::io::AsyncRead + Unpin>(recv: &mut R) -> Result<DaemonMessage, StartError> {
