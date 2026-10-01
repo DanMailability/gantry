@@ -41,21 +41,18 @@ fn key_bindings() -> Vec<KeyBinding> {
     #[cfg(not(target_os = "macos"))]
     let m = "ctrl-shift";
     let context = Some("Terminal");
-    let mut bindings = vec![
-        KeyBinding::new(&format!("{m}-c"), Copy, context),
-        KeyBinding::new(&format!("{m}-v"), Paste, context),
-        KeyBinding::new(&format!("{m}-="), ZoomIn, context),
-        KeyBinding::new(&format!("{m}-+"), ZoomIn, context),
-        KeyBinding::new(&format!("{m}--"), ZoomOut, context),
-        KeyBinding::new(&format!("{m}-0"), ZoomReset, context),
-    ];
-    // GPUI reports Shift+symbol/digit as the shifted character without Shift,
-    // so Ctrl+Shift+= / - / 0 arrive as ctrl-+ / ctrl-_ / ctrl-) (US layout).
+    let mut bindings =
+        vec![KeyBinding::new(&format!("{m}-c"), Copy, context), KeyBinding::new(&format!("{m}-v"), Paste, context)];
+    #[cfg(target_os = "macos")]
+    let z = "cmd";
     #[cfg(not(target_os = "macos"))]
+    let z = "ctrl";
+    // Like GNOME Terminal; `ctrl-+` is what Ctrl+Shift+= reports. Ctrl+Shift+- (ctrl-_) stays undo in the pane.
     bindings.extend([
-        KeyBinding::new("ctrl-+", ZoomIn, context),
-        KeyBinding::new("ctrl-_", ZoomOut, context),
-        KeyBinding::new("ctrl-)", ZoomReset, context),
+        KeyBinding::new(&format!("{z}-="), ZoomIn, context),
+        KeyBinding::new(&format!("{z}-+"), ZoomIn, context),
+        KeyBinding::new(&format!("{z}--"), ZoomOut, context),
+        KeyBinding::new(&format!("{z}-0"), ZoomReset, context),
     ]);
     bindings
 }
@@ -756,10 +753,13 @@ mod tests {
     }
 
     #[test]
-    fn zoom_shortcuts_match_linux_shifted_symbols() {
+    fn zoom_is_on_plain_ctrl_and_ctrl_underscore_reaches_the_pane() {
+        assert_eq!(action_for(keystroke("=", false, Some("="))), Some("terminal::ZoomIn"));
         assert_eq!(action_for(keystroke("+", false, Some("+"))), Some("terminal::ZoomIn"));
-        assert_eq!(action_for(keystroke("_", false, Some("_"))), Some("terminal::ZoomOut"));
-        assert_eq!(action_for(keystroke(")", false, Some(")"))), Some("terminal::ZoomReset"));
+        assert_eq!(action_for(keystroke("-", false, Some("-"))), Some("terminal::ZoomOut"));
+        assert_eq!(action_for(keystroke("0", false, Some("0"))), Some("terminal::ZoomReset"));
+        // Ctrl+Shift+- arrives as ctrl-_ on Linux: readline/Claude undo.
+        assert_eq!(action_for(keystroke("_", false, Some("_"))), None);
     }
 
     #[test]
