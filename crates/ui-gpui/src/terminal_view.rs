@@ -107,6 +107,25 @@ pub enum PaneState {
     Disconnected,
 }
 
+/// What happens to input typed into a pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputFate {
+    /// Write it to the process.
+    Send,
+    /// Keep it until the process starts.
+    Hold,
+    /// Discard it (no process will read it).
+    Drop,
+}
+
+fn input_fate(state: &PaneState) -> InputFate {
+    match state {
+        PaneState::Live => InputFate::Send,
+        PaneState::Starting => InputFate::Hold,
+        PaneState::Exited(_) | PaneState::Failed(_) | PaneState::Disconnected => InputFate::Drop,
+    }
+}
+
 /// Something the workspace should react to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneEvent {
@@ -141,6 +160,8 @@ pub struct TerminalView {
     hovered_link: Option<(u16, Range<usize>)>,
     /// Display order of each viewport row in the last frame (`None`: drawn as stored).
     row_orders: Vec<Option<RowOrder>>,
+    /// Input typed while Starting, sent on attach.
+    held_input: Vec<u8>,
 }
 
 impl EventEmitter<PaneEvent> for TerminalView {}
@@ -173,6 +194,7 @@ impl TerminalView {
             mouse_position: None,
             hovered_link: None,
             row_orders: Vec::new(),
+            held_input: Vec::new(),
         }
     }
 
@@ -185,6 +207,9 @@ impl TerminalView {
         self.title = None;
         if let Some((cols, rows, width, height)) = resize_on_attach(self.grid_size, self.cell) {
             self.client.resize(pane, cols, rows, width, height);
+        }
+        if !self.held_input.is_empty() {
+            self.client.input(pane, &std::mem::take(&mut self.held_input));
         }
         cx.notify();
     }
@@ -216,18 +241,21 @@ impl TerminalView {
     pub fn exited(&mut self, code: Option<u32>, cx: &mut Context<Self>) {
         self.pane = None;
         self.state = PaneState::Exited(code);
+        self.held_input.clear();
         cx.notify();
     }
 
     /// The process could not be started.
     pub fn failed(&mut self, error: String, cx: &mut Context<Self>) {
         self.state = PaneState::Failed(error);
+        self.held_input.clear();
         cx.notify();
     }
 
     /// The daemon connection is gone.
     pub fn disconnected(&mut self, cx: &mut Context<Self>) {
         self.state = PaneState::Disconnected;
+        self.held_input.clear();
         cx.notify();
     }
 
@@ -254,8 +282,14 @@ impl TerminalView {
     }
 
     fn write_pty(&mut self, bytes: &[u8]) {
-        if let (Some(pane), PaneState::Live) = (self.pane, &self.state) {
-            self.client.input(pane, bytes);
+        match input_fate(&self.state) {
+            InputFate::Send => {
+                if let Some(pane) = self.pane {
+                    self.client.input(pane, bytes);
+                }
+            }
+            InputFate::Hold => self.held_input.extend_from_slice(bytes),
+            InputFate::Drop => {}
         }
     }
 
@@ -310,7 +344,7 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_running() {
+        if input_fate(&self.state) == InputFate::Drop {
             if event.keystroke.key == "enter" && matches!(self.state, PaneState::Exited(_) | PaneState::Failed(_)) {
                 cx.emit(PaneEvent::Rerun);
             }
@@ -492,7 +526,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.is_running() {
+        if input_fate(&self.state) == InputFate::Drop {
             return;
         }
         self.send_input(text.as_bytes(), cx);
@@ -744,6 +778,19 @@ mod tests {
     fn the_pane_font_falls_back_to_fonts_gpui_keeps() {
         let fallbacks = pane_font().fallbacks.expect("Linux panes have a fallback chain");
         assert_eq!(fallbacks.fallback_list(), ["Adwaita Mono", "Symbola"]);
+    }
+
+    #[test]
+    fn input_is_held_while_starting_and_sent_when_live() {
+        assert_eq!(input_fate(&PaneState::Starting), InputFate::Hold);
+        assert_eq!(input_fate(&PaneState::Live), InputFate::Send);
+    }
+
+    #[test]
+    fn held_input_is_dropped_when_the_pane_fails() {
+        for state in [PaneState::Exited(Some(1)), PaneState::Failed("x".into()), PaneState::Disconnected] {
+            assert_eq!(input_fate(&state), InputFate::Drop);
+        }
     }
 
     #[test]
