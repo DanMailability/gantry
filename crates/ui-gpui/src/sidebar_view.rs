@@ -27,7 +27,7 @@ use crate::theme::{
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
-/// Ages ("5m") are recomputed this often.
+/// Ages ("5m") and project roots are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const FIND_SHORTCUT: &str = "⌘F";
@@ -79,7 +79,7 @@ pub struct SidebarView {
     menu: Option<(PathBuf, Point<Pixels>)>,
     scroll: UniformListScrollHandle,
     home: Option<PathBuf>,
-    /// Project of each directory seen (looked up once: it stats parent directories).
+    /// Project of each directory seen (it stats parent directories; cleared on every refresh).
     projects: RefCell<HashMap<PathBuf, PathBuf>>,
     _refresh: Task<()>,
 }
@@ -98,7 +98,12 @@ impl SidebarView {
         let refresh = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(REFRESH).await;
-                if this.update(cx, |this, cx| this.rebuild(cx)).is_err() {
+                // Also forget project roots, so a repository created (or removed) since shows up.
+                let refreshed = this.update(cx, |this, cx| {
+                    this.projects.borrow_mut().clear();
+                    this.rebuild(cx);
+                });
+                if refreshed.is_err() {
                     return;
                 }
             }

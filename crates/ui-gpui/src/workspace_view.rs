@@ -881,14 +881,17 @@ impl WorkspaceView {
             .map(|bar| {
                 if sidebar.visible {
                     // The brand sits above the sidebar; the tabs start where the panes do.
-                    bar.child(
-                        div()
-                            .flex_none()
-                            .w(px(sidebar.width + SIDEBAR_EDGE))
-                            .pl(px(18.))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Gantry"),
-                    )
+                    let brand = div()
+                        .id("brand")
+                        .flex_none()
+                        .h_full()
+                        .w(px(sidebar.width + SIDEBAR_EDGE))
+                        .pl(px(18.))
+                        .flex()
+                        .items_center()
+                        .font_weight(FontWeight::BOLD)
+                        .child("Gantry");
+                    bar.child(if client_decorations { moves_window(brand) } else { brand })
                 } else {
                     bar.pl_2()
                 }
@@ -946,19 +949,7 @@ impl WorkspaceView {
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
             .when(client_decorations, |bar| {
                 bar.child(
-                    div()
-                        .id("drag-area")
-                        .flex_1()
-                        .min_w(px(40.))
-                        .h_full()
-                        .on_mouse_down(MouseButton::Left, |event, window, _| {
-                            if event.click_count >= 2 {
-                                window.zoom_window();
-                            } else {
-                                window.start_window_move();
-                            }
-                        })
-                        .on_mouse_down(MouseButton::Right, |event, window, _| window.show_window_menu(event.position)),
+                    moves_window(div().id("drag-area").flex_1().min_w(px(40.)).h_full()),
                 )
                 .child(window_frame::window_controls(
                     window,
@@ -1121,6 +1112,19 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool) -> im
         .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
 }
 
+/// Title-bar behaviour for an empty stretch of the tab bar (client-side decorations): drag moves the window,
+/// double-click maximizes, right-click opens the window menu.
+fn moves_window(area: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+    area.on_mouse_down(MouseButton::Left, |event, window, _| {
+        if event.click_count >= 2 {
+            window.zoom_window();
+        } else {
+            window.start_window_move();
+        }
+    })
+    .on_mouse_down(MouseButton::Right, |event, window, _| window.show_window_menu(event.position))
+}
+
 /// A small round icon button in the tab bar.
 pub(crate) fn round_button(
     id: &'static str,
@@ -1172,17 +1176,21 @@ impl Render for WorkspaceView {
                         .child(self.sidebar.clone()),
                 )
                 .child(
-                    div()
-                        .id("sidebar-edge")
-                        .flex_none()
-                        .w(px(SIDEBAR_EDGE))
-                        .h_full()
-                        .bg(rgb(LINE))
-                        .cursor(CursorStyle::ResizeLeftRight)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.resizing_sidebar = true;
-                            cx.stop_propagation();
-                        })),
+                    // A hairline, grabbed through a wider invisible handle that overlaps the sidebar.
+                    div().relative().flex_none().w(px(SIDEBAR_EDGE)).h_full().bg(rgb(LINE)).child(
+                        div()
+                            .id("sidebar-edge")
+                            .absolute()
+                            .top_0()
+                            .left(px(-5.))
+                            .w(px(7.))
+                            .h_full()
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.resizing_sidebar = true;
+                                cx.stop_propagation();
+                            })),
+                    ),
                 )
             })
             .child(div().flex_1().min_w_0().h_full().flex().flex_col().p(px(PANE_GAP / 2.)).child(self.render_active_tab(cx)));
