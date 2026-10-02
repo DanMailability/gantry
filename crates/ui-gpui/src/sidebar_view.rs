@@ -135,6 +135,11 @@ impl SidebarView {
         sidebar
     }
 
+    /// The project a directory belongs to (its git repository, else the directory).
+    pub(crate) fn project_of(&self, cwd: &Path) -> PathBuf {
+        self.roots.of(cwd)
+    }
+
     /// The daemon's sessions as last received.
     pub fn sessions(&self) -> &SessionStore {
         &self.sessions

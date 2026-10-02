@@ -33,7 +33,7 @@ use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::settings_store::{SettingsStore, dir_name};
 use crate::settings_view::SettingsView;
-use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, side_line, theme};
 use crate::window_frame;
 
 pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
@@ -140,8 +140,9 @@ struct PendingOpen {
     cwd_from: Option<PaneId>,
 }
 
-/// What the tab bar draws for a tab: title, status, unseen alert, in a container, config dir name, is the Settings tab.
-type TabView = (String, Option<SessionStatus>, bool, bool, Option<String>, bool);
+/// What the tab bar draws for a tab: title, status, unseen alert, in a container, config dir name, is the Settings tab,
+/// project colour.
+type TabView = (String, Option<SessionStatus>, bool, bool, Option<String>, bool, Option<u32>);
 
 /// Root view of the Gantry window.
 pub struct WorkspaceView {
@@ -469,6 +470,14 @@ impl WorkspaceView {
         let recorded = entry.session.as_deref().and_then(|id| self.sidebar.read(cx).sessions().get(id)).and_then(|info| info.claude_dir.clone());
         let path = recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone());
         dir_name(cx.global::<SettingsStore>().settings(), path.as_deref())
+    }
+
+    /// The colour of the project `leaf` belongs to (its session's directory, else the pane's), if project colours are on.
+    fn leaf_project_color(&self, leaf: NodeId, cx: &App) -> Option<u32> {
+        let entry = self.workspace.leaves.get(&leaf)?;
+        let sidebar = self.sidebar.read(cx);
+        let cwd = entry.session.as_deref().and_then(|id| sidebar.sessions().get(id)).map_or(entry.launch.cwd.as_path(), |info| info.cwd.as_path());
+        theme(cx).project(&sidebar.project_of(cwd))
     }
 
     /// Start `launch` in the finished `leaf`.
@@ -842,16 +851,7 @@ impl WorkspaceView {
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
-            MenuAction::CloseTab(index) => {
-                match self.workspace.tabs.get(index) {
-                    Some(tab) if tab.settings => self.close_settings(window, cx),
-                    Some(tab) => {
-                        let leaves = tab.root.leaves();
-                        self.confirm_close(leaves, window, cx);
-                    }
-                    None => {}
-                }
-            }
+            MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
             MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, None),
             MenuAction::NewClaudeWith { dir, dir_name } => {
                 self.remember_pick(&dir, &dir_name, cx);
@@ -1220,6 +1220,18 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Close tab `index`: the Settings tab right away, any other after `confirm_close` of its leaves.
+    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.tabs.get(index) {
+            Some(tab) if tab.settings => self.close_settings(window, cx),
+            Some(tab) => {
+                let leaves = tab.root.leaves();
+                self.confirm_close(leaves, window, cx);
+            }
+            None => {}
+        }
+    }
+
     /// Close `leaves`, asking first if any still runs a process.
     fn confirm_close(&mut self, leaves: Vec<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
         let running = self.running_panes(&leaves, cx);
@@ -1293,7 +1305,8 @@ impl WorkspaceView {
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
                 let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
                 let dir = self.leaf_dir_name(tab.focused, cx);
-                (title, status, unseen, container, dir, tab.settings)
+                let project = if tab.settings { None } else { self.leaf_project_color(tab.focused, cx) };
+                (title, status, unseen, container, dir, tab.settings, project)
             })
             .collect();
         let sidebar = &self.workspace.sidebar;
@@ -1330,18 +1343,26 @@ impl WorkspaceView {
             })
             // The tabs scroll sideways when even their narrowest widths don't fit, so the buttons and window
             // controls after them stay visible.
-            .child(div().id("tabs").min_w_0().flex_shrink(1.).h_full().flex().flex_row().items_center().gap(theme.ui(6.)).overflow_x_scroll().children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings))| {
+            .child(div().id("tabs").min_w_0().flex_shrink(1.).h_full().flex().flex_row().items_center().gap(theme.ui(6.)).overflow_x_scroll().children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings, project))| {
                 let dragged = DraggedTab { index, title: title.clone() };
                 let line = theme.tokens.line;
                 let active = index == self.workspace.active;
                 // Claude tabs are filled with what their most urgent session needs; shells stay plain.
                 let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
-                let ink = colors.map_or(if active || settings { theme.tokens.text } else { theme.tokens.muted }, |colors| colors.ink);
-                let fill = colors.and_then(|colors| colors.fill).or((active || settings).then_some(theme.tokens.raised));
+                // The Settings tab stands out: light on Mist, dark on Mist light.
+                let ink = if settings {
+                    theme.tokens.ground
+                } else {
+                    colors.map_or(if active { theme.tokens.text } else { theme.tokens.muted }, |colors| colors.ink)
+                };
+                let fill = if settings { Some(theme.tokens.text) } else { colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised)) };
+                let can_drag = self.workspace.can_drag(index);
                 div()
                     .id(("tab", index))
+                    .relative()
                     .h(theme.ui(32.))
-                    .pl_3()
+                    .when(project.is_some(), |tab| tab.pl(theme.ui(16.)))
+                    .when(project.is_none(), |tab| tab.pl_3())
                     .pr_1()
                     .max_w(theme.ui(220.))
                     // Tabs shrink (titles truncate, tags clip away) down to what the dot, a short title and × need.
@@ -1359,7 +1380,8 @@ impl WorkspaceView {
                     .when_some(fill, |tab, fill| tab.bg(rgb(fill)))
                     .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(theme.tokens.raised))))
                     .cursor_pointer()
-                    .when_some(colors, |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
+                    .when_some(project, |tab, color| tab.child(side_line(color, &theme)))
+                    .when_some(colors.filter(|_| !settings), |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
                     .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
                     .child(div().min_w(theme.ui(24.)).truncate().child(title))
                     .when(container, |tab| tab.child(container_chip(ink)))
@@ -1381,18 +1403,17 @@ impl WorkspaceView {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                match this.workspace.tabs.get(index) {
-                                    Some(tab) if tab.settings => this.close_settings(window, cx),
-                                    Some(tab) => {
-                                        let leaves = tab.root.leaves();
-                                        this.confirm_close(leaves, window, cx);
-                                    }
-                                    None => {}
-                                }
+                                this.close_tab_at(index, window, cx);
                             })),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
-                    .on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone()))
+                    .when(can_drag, |tab| tab.on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone())))
+                    // A middle click closes the tab, like ×; it must not start a drag or select the tab.
+                    .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab_at(index, window, cx);
+                    }))
                     .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(line)))
                     .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
                     .on_mouse_down(
@@ -1499,6 +1520,7 @@ impl WorkspaceView {
                 let unseen = self.unseen.contains_key(&leaf);
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
                 let dir = self.leaf_dir_name(leaf, cx);
+                let project = self.leaf_project_color(leaf, cx);
                 Some(
                     div()
                         .absolute()
@@ -1518,7 +1540,7 @@ impl WorkspaceView {
                                 .bg(rgb(theme.tokens.terminal))
                                 .border_2()
                                 .border_color(rgb(if focused && multiple { theme.tokens.accent } else { theme.tokens.line }))
-                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, dir, &theme)))
+                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, dir, project, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1557,7 +1579,7 @@ impl WorkspaceView {
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
-fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, dir: Option<String>, theme: &Theme) -> impl IntoElement {
+fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, dir: Option<String>, project: Option<u32>, theme: &Theme) -> impl IntoElement {
     let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
     let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
         Tone::NeedsInput => "Needs input",
@@ -1566,10 +1588,13 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
         _ => "Idle",
     });
     div()
+        .relative()
         .flex_none()
         .h(theme.ui(28.))
         .mb(theme.ui(4.))
-        .px_3()
+        .when(project.is_some(), |header| header.pl(theme.ui(16.)))
+        .when(project.is_none(), |header| header.pl_3())
+        .pr_3()
         .flex()
         .items_center()
         .gap_2()
@@ -1578,6 +1603,7 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
         .font_weight(FontWeight::SEMIBOLD)
         .bg(rgb(colors.and_then(|colors| colors.fill).unwrap_or(theme.tokens.raised)))
         .text_color(rgb(colors.map_or(theme.tokens.text, |colors| colors.ink)))
+        .when_some(project, |header, color| header.child(side_line(color, theme)))
         .when_some(colors, |header, colors| header.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| header.child(container_chip(colors.map_or(theme.tokens.text, |colors| colors.ink))))
