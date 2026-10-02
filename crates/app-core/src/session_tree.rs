@@ -110,6 +110,19 @@ impl Arrivals {
     }
 }
 
+/// One tab of the layout, for grouping split tabs in the Active list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabEntry {
+    /// Position in the tab bar (0-based; shown as `index + 1`).
+    pub index: usize,
+    /// Its title, as the tab bar shows it.
+    pub title: String,
+    /// The leaf with focus in it.
+    pub focused: NodeId,
+    /// Its leaves in screen order (left/top first: `Node::leaves()`).
+    pub leaves: Vec<NodeId>,
+}
+
 /// Everything the Active list is built from.
 pub struct ActiveInput<'a> {
     /// Claude sessions.
@@ -126,6 +139,8 @@ pub struct ActiveInput<'a> {
     pub details: Option<&'a str>,
     /// Sessions with an alert the user has not seen.
     pub unseen: &'a HashSet<String>,
+    /// Tabs of the layout; those with several panes are listed as a heading with their panes under it.
+    pub tabs: &'a [TabEntry],
     /// The project a directory belongs to (see [`project_root`]).
     pub project_of: &'a dyn Fn(&Path) -> PathBuf,
     /// Current time, ms since the Unix epoch.
@@ -166,6 +181,10 @@ impl ProjectRoots {
 pub struct Row {
     /// What it shows.
     pub kind: RowKind,
+    /// Listed under a tab heading (drawn indented).
+    pub in_tab: bool,
+    /// The row's own project, when it is listed under another project's tab heading.
+    pub project_label: Option<String>,
 }
 
 /// What a row shows.
@@ -202,6 +221,19 @@ pub enum RowKind {
         /// Right-hand note.
         note: String,
     },
+    /// A tab with more than one pane; its panes follow it (with `in_tab`).
+    Tab {
+        /// Position in the tab bar (0-based).
+        index: usize,
+        /// Its title, as the tab bar shows it.
+        title: String,
+        /// How many panes it has.
+        panes: usize,
+        /// The leaf with focus in it.
+        focused: NodeId,
+        /// Its first leaf (top-left).
+        first: NodeId,
+    },
     /// Details of an external session.
     Detail {
         /// Session id.
@@ -227,6 +259,8 @@ pub enum RowKey {
     Session(String),
     /// A pane the session list does not know.
     Leaf(NodeId),
+    /// A tab heading, by the tab's first leaf.
+    Tab(NodeId),
     /// Details of a session.
     Detail(String),
     /// "Take over…" of a session.
@@ -263,12 +297,18 @@ pub enum Activation {
 }
 
 impl Row {
+    /// A row that is not under a tab heading.
+    pub fn new(kind: RowKind) -> Row {
+        Row { kind, in_tab: false, project_label: None }
+    }
+
     /// Identity of this row.
     pub fn key(&self) -> RowKey {
         match &self.kind {
             RowKind::Project { path, .. } => RowKey::Project(path.clone()),
             RowKind::Session { session, .. } => RowKey::Session(session.id.clone()),
             RowKind::Pane { entry, .. } => RowKey::Leaf(entry.leaf),
+            RowKind::Tab { first, .. } => RowKey::Tab(*first),
             RowKind::Detail { session, .. } => RowKey::Detail(session.clone()),
             RowKind::TakeOver { session, .. } => RowKey::TakeOver(session.clone()),
         }
@@ -284,6 +324,7 @@ impl Row {
         match &self.kind {
             RowKind::Project { path, .. } => Activation::ToggleProject(path.clone()),
             RowKind::Pane { entry, .. } => Activation::FocusLeaf(entry.leaf),
+            RowKind::Tab { focused, .. } => Activation::FocusLeaf(*focused),
             RowKind::Session { session, leaf, .. } => match (session.state, leaf) {
                 (SessionState::External { .. }, _) => Activation::ToggleDetails(session.id.clone()),
                 (_, Some(leaf)) => Activation::FocusLeaf(*leaf),
@@ -413,30 +454,86 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
     keys.sort_by_key(|(_, order)| *order);
     arrivals.update(&keys.into_iter().map(|(key, _)| key.clone()).collect::<Vec<_>>());
 
+    // A tab with several panes is one item, placed in the project of its first leaf that has an entry.
+    let leaf_cwd: HashMap<NodeId, &Path> = entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, entry.cwd))).collect();
+    let mut groups: Vec<Group<'_>> = Vec::new();
+    let mut group_of: HashMap<NodeId, usize> = HashMap::new();
+    for tab in input.tabs.iter().filter(|tab| tab.leaves.len() >= 2) {
+        let Some(cwd) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf)) else { continue };
+        let place = tab.leaves.iter().filter(|leaf| leaf_cwd.contains_key(leaf)).map(|leaf| arrivals.of(&EntryKey::Leaf(*leaf))).min().unwrap_or(0);
+        for leaf in &tab.leaves {
+            group_of.insert(*leaf, groups.len());
+        }
+        groups.push(Group { tab, project: (input.project_of)(cwd), place, members: Vec::new() });
+    }
+
     let mut fuzzy = Fuzzy::new(input.filter);
     let filtering = fuzzy.is_some();
     let mut by_project: HashMap<PathBuf, Vec<Entry<'_>>> = HashMap::new();
     for entry in entries {
-        if keep(&mut fuzzy, entry.title, entry.cwd, input.home) {
-            by_project.entry((input.project_of)(entry.cwd)).or_default().push(entry);
+        if !keep(&mut fuzzy, entry.title, entry.cwd, input.home) {
+            continue;
+        }
+        match leaf_of(&entry.key).and_then(|leaf| group_of.get(&leaf)) {
+            Some(&group) => groups[group].members.push(entry),
+            None => by_project.entry((input.project_of)(entry.cwd)).or_default().push(entry),
         }
     }
-    let mut projects: Vec<(PathBuf, Vec<Entry<'_>>)> = by_project.into_iter().collect();
-    for (_, entries) in &mut projects {
-        entries.sort_by_key(|entry| std::cmp::Reverse(arrivals.of(&entry.key)));
+    let mut items_of: HashMap<PathBuf, Vec<Item<'_>>> = HashMap::new();
+    for (path, entries) in by_project {
+        items_of.insert(path, entries.into_iter().map(Item::Single).collect());
+    }
+    for mut group in groups.into_iter().filter(|group| !group.members.is_empty()) {
+        let position = |entry: &Entry<'_>| group.tab.leaves.iter().position(|leaf| Some(*leaf) == leaf_of(&entry.key));
+        group.members.sort_by_key(position);
+        items_of.entry(group.project.clone()).or_default().push(Item::Group(group));
+    }
+    let mut projects: Vec<(PathBuf, Vec<Item<'_>>)> = items_of.into_iter().collect();
+    for (_, items) in &mut projects {
+        items.sort_by_key(|item| {
+            std::cmp::Reverse(match item {
+                Item::Single(entry) => arrivals.of(&entry.key),
+                Item::Group(group) => group.place,
+            })
+        });
     }
     // Sessions decide; a project with only shells or new leaves counts as now.
-    let latest = |entries: &[Entry<'_>]| {
-        let sessions = entries.iter().filter(|entry| matches!(entry.kind, EntryKind::Session { .. }));
+    let latest = |items: &[Item<'_>]| {
+        let sessions = items.iter().flat_map(Item::entries).filter(|entry| matches!(entry.kind, EntryKind::Session { .. }));
         sessions.map(|entry| entry.activity).max().unwrap_or(u64::MAX)
     };
     projects.sort_by(|(a_path, a), (b_path, b)| latest(b).cmp(&latest(a)).then_with(|| a_path.cmp(b_path)));
-    let paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
+    // Rows of a group that belong to another project are labelled with it, so name those projects too.
+    let mut paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
+    for (_, items) in &projects {
+        for entry in items.iter().flat_map(Item::entries) {
+            let own = (input.project_of)(entry.cwd);
+            if !paths.contains(&own) {
+                paths.push(own);
+            }
+        }
+    }
     let labels = labels(&paths, input.home);
 
     let mut rows = Vec::new();
-    for (path, entries) in projects {
-        let rendered: Vec<Row> = entries.iter().map(|entry| entry_row(entry, input)).collect();
+    for (path, items) in projects {
+        let mut rendered: Vec<Row> = Vec::new();
+        for item in &items {
+            match item {
+                Item::Single(entry) => rendered.push(entry_row(entry, input)),
+                Item::Group(group) => {
+                    let tab = group.tab;
+                    rendered.push(Row::new(RowKind::Tab { index: tab.index, title: tab.title.clone(), panes: tab.leaves.len(), focused: tab.focused, first: tab.leaves[0] }));
+                    for entry in &group.members {
+                        let mut row = entry_row(entry, input);
+                        row.in_tab = true;
+                        let own = (input.project_of)(entry.cwd);
+                        row.project_label = (own != path).then(|| labels[&own].clone());
+                        rendered.push(row);
+                    }
+                }
+            }
+        }
         let mut counts = ToneCounts::default();
         for row in &rendered {
             match &row.kind {
@@ -446,7 +543,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
             }
         }
         let expanded = filtering || !input.toggled.contains(&path);
-        rows.push(Row { kind: RowKind::Project { label: labels[&path].clone(), path, expanded, counts } });
+        rows.push(Row::new(RowKind::Project { label: labels[&path].clone(), path, expanded, counts }));
         if expanded {
             for row in rendered {
                 let details = match &row.kind {
@@ -463,6 +560,39 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
     rows
 }
 
+/// A split tab and its kept entries, to be listed together.
+struct Group<'a> {
+    tab: &'a TabEntry,
+    /// The project it is listed under.
+    project: PathBuf,
+    /// Where it sorts: the oldest arrival among its leaves.
+    place: u64,
+    /// Entries that passed the filter, in screen order.
+    members: Vec<Entry<'a>>,
+}
+
+/// What a project lists: an entry, or a split tab with its entries.
+enum Item<'a> {
+    Single(Entry<'a>),
+    Group(Group<'a>),
+}
+
+impl<'a> Item<'a> {
+    fn entries(&self) -> &[Entry<'a>] {
+        match self {
+            Item::Single(entry) => std::slice::from_ref(entry),
+            Item::Group(group) => &group.members,
+        }
+    }
+}
+
+fn leaf_of(key: &EntryKey) -> Option<NodeId> {
+    match key {
+        EntryKey::Leaf(leaf) => Some(*leaf),
+        EntryKey::Session(_) => None,
+    }
+}
+
 /// The row of one entry: its tone and its note.
 fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
     match &entry.kind {
@@ -476,7 +606,7 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
                     (tone, format!("{} · {age}", tone_word(tone)))
                 }
             };
-            Row { kind: RowKind::Session { session: (*session).clone(), tone, note, leaf: leaf.map(|pane| pane.leaf) } }
+            Row::new(RowKind::Session { session: (*session).clone(), tone, note, leaf: leaf.map(|pane| pane.leaf) })
         }
         EntryKind::Pane(pane) => {
             let (tone, note) = match (pane.claude, pane.ended) {
@@ -485,7 +615,7 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
                 (false, true) => (Tone::Closed, "Exited"),
                 (false, false) => (Tone::Idle, "shell"),
             };
-            Row { kind: RowKind::Pane { entry: (*pane).clone(), tone, note: note.into() } }
+            Row::new(RowKind::Pane { entry: (*pane).clone(), tone, note: note.into() })
         }
     }
 }
@@ -505,9 +635,9 @@ fn tone_word(tone: Tone) -> &'static str {
 /// An external session's details and, for host sessions whose folder exists, "Take over…".
 fn push_details(rows: &mut Vec<Row>, session: &SessionInfo) {
     if let Some(text) = detail_text(session) {
-        rows.push(Row { kind: RowKind::Detail { session: session.id.clone(), text } });
+        rows.push(Row::new(RowKind::Detail { session: session.id.clone(), text }));
         if matches!(session.state, SessionState::External { pid: Some(_) }) && session.cwd_exists {
-            rows.push(Row { kind: RowKind::TakeOver { session: session.id.clone(), cwd: session.cwd.clone() } });
+            rows.push(Row::new(RowKind::TakeOver { session: session.id.clone(), cwd: session.cwd.clone() }));
         }
     }
 }
@@ -620,6 +750,7 @@ mod tests {
         toggled: HashSet<PathBuf>,
         details: Option<String>,
         unseen: HashSet<String>,
+        tabs: Vec<TabEntry>,
         arrivals: Arrivals,
     }
 
@@ -638,6 +769,7 @@ mod tests {
                 toggled: &self.toggled,
                 details: self.details.as_deref(),
                 unseen: &self.unseen,
+                tabs: &self.tabs,
                 project_of: &project_of,
                 now_ms: NOW,
             };
@@ -653,6 +785,7 @@ mod tests {
                     RowKind::Pane { entry, note, .. } => format!("  leaf {} ({note})", entry.leaf),
                     RowKind::Detail { text, .. } => format!("    ({text})"),
                     RowKind::TakeOver { .. } => "    Take over…".into(),
+                    RowKind::Tab { index, title, panes, .. } => format!("  tab {} {title} ({panes} panes)", index + 1),
                 })
                 .collect()
         }
@@ -907,5 +1040,106 @@ mod tests {
         assert_eq!(display_path(Path::new("/home/meow"), home), "/home/meow");
         let minute = 60_000;
         assert_eq!([0, 5 * minute, 3 * 60 * minute, 2 * DAY_MS, 42 * DAY_MS].map(|ago| age(NOW, NOW - ago)), ["now", "5m", "3h", "2d", "6w"]);
+    }
+
+    fn tab(index: usize, focused: NodeId, leaves: &[NodeId]) -> TabEntry {
+        TabEntry { index, title: format!("tab title {index}"), focused, leaves: leaves.to_vec() }
+    }
+
+    fn titled_shell(leaf: NodeId, cwd: &str, title: &str) -> PaneEntry {
+        PaneEntry { title: title.into(), ..shell_pane(leaf, cwd) }
+    }
+
+    fn keys(rows: &[Row]) -> Vec<RowKey> {
+        rows.iter().map(Row::key).collect()
+    }
+
+    fn row_of<'a>(rows: &'a [Row], key: &RowKey) -> &'a Row {
+        &rows[find(rows, key).unwrap()]
+    }
+
+    #[test]
+    fn split_tab_groups_panes_in_screen_order() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 1, &[2, 1])];
+        let rows = fixture.rows();
+        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(2), RowKey::Leaf(2), RowKey::Leaf(1)]);
+        assert!(matches!(&rows[1].kind, RowKind::Tab { index: 0, panes: 2, first: 2, focused: 1, .. }), "{:?}", rows[1]);
+        assert!(!rows[1].in_tab);
+        assert!(rows[2].in_tab && rows[3].in_tab);
+    }
+
+    #[test]
+    fn one_pane_tab_is_a_plain_row() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 1, &[1])];
+        let rows = fixture.rows();
+        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Leaf(1)]);
+        assert!(!rows[1].in_tab);
+    }
+
+    #[test]
+    fn cross_project_tab_sits_under_first_leaf_project() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/beta")]);
+        fixture.tabs = vec![tab(0, 1, &[1, 2])];
+        let rows = fixture.rows();
+        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(1), RowKey::Leaf(1), RowKey::Leaf(2)]);
+        assert_eq!(rows[2].project_label, None);
+        assert_eq!(rows[3].project_label.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn other_project_keeps_heading_for_its_own_rows() {
+        let mut fixture = Fixture::of(vec![external("e", "/r/beta", 5)], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/beta")]);
+        fixture.tabs = vec![tab(0, 1, &[1, 2])];
+        let rows = fixture.rows();
+        let beta = find(&rows, &RowKey::Project("/r/beta".into())).unwrap();
+        assert_eq!(keys(&rows[beta..]), vec![RowKey::Project("/r/beta".into()), RowKey::Session("e".into())]);
+        assert!(find(&rows, &RowKey::Leaf(2)).unwrap() < beta);
+    }
+
+    #[test]
+    fn group_order_is_stable_across_focus_and_tab_moves() {
+        let panes = (1..=4).map(|leaf| shell_pane(leaf, "/r/alpha")).collect();
+        let mut fixture = Fixture::of(vec![], panes);
+        fixture.tabs = vec![tab(0, 1, &[1, 2]), tab(1, 3, &[3, 4])];
+        let before = keys(&fixture.rows());
+        assert_eq!(&before[1..3], [RowKey::Tab(3), RowKey::Leaf(3)]);
+        fixture.tabs = vec![tab(1, 2, &[1, 2]), tab(0, 4, &[3, 4])];
+        assert_eq!(keys(&fixture.rows()), before);
+        fixture.panes.extend([shell_pane(5, "/r/alpha"), shell_pane(6, "/r/alpha")]);
+        fixture.tabs.push(tab(2, 5, &[5, 6]));
+        let rows = fixture.rows();
+        assert_eq!(keys(&rows)[..3], [RowKey::Project("/r/alpha".into()), RowKey::Tab(5), RowKey::Leaf(5)]);
+    }
+
+    #[test]
+    fn splitting_a_tab_keeps_its_place() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(3, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 1, &[1]), tab(1, 3, &[3])];
+        assert_eq!(keys(&fixture.rows())[1..], [RowKey::Leaf(3), RowKey::Leaf(1)]);
+        fixture.panes.push(shell_pane(4, "/r/alpha"));
+        fixture.tabs = vec![tab(0, 1, &[1, 4]), tab(1, 3, &[3])];
+        assert_eq!(keys(&fixture.rows())[1..], [RowKey::Leaf(3), RowKey::Tab(1), RowKey::Leaf(1), RowKey::Leaf(4)]);
+    }
+
+    #[test]
+    fn filter_keeps_group_heading_with_matching_panes() {
+        let mut fixture = Fixture::of(vec![], vec![titled_shell(1, "/r/alpha", "Alpha task"), titled_shell(2, "/r/beta", "Beta task")]);
+        fixture.tabs = vec![tab(0, 1, &[1, 2])];
+        fixture.filter = "beta".into();
+        let rows = fixture.rows();
+        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(1), RowKey::Leaf(2)]);
+        assert_eq!(rows[2].project_label.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn tab_row_key_and_activation() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 2, &[1, 2])];
+        let rows = fixture.rows();
+        let heading = row_of(&rows, &RowKey::Tab(1));
+        assert!(heading.selectable());
+        assert_eq!(heading.activation(), Activation::FocusLeaf(2));
     }
 }

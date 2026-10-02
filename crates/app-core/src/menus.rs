@@ -189,7 +189,7 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool) -> Option<Vec<MenuIte
             items.push(MenuItem::Separator);
             items.push(close_item(pane.leaf, alone));
         }
-        RowKind::Project { .. } | RowKind::Detail { .. } | RowKind::TakeOver { .. } => return None,
+        RowKind::Project { .. } | RowKind::Tab { .. } | RowKind::Detail { .. } | RowKind::TakeOver { .. } => return None,
     }
     Some(items)
 }
@@ -224,7 +224,7 @@ mod tests {
     }
 
     fn session_row(state: SessionState, tone: Tone, leaf: Option<NodeId>) -> Row {
-        Row { kind: RowKind::Session { session: session(state), tone, note: String::new(), leaf } }
+        Row::new(RowKind::Session { session: session(state), tone, note: String::new(), leaf })
     }
 
     fn pane_row(claude: bool, ended: bool) -> Row {
@@ -232,7 +232,7 @@ mod tests {
             leaf: 7, cwd: "/r/app".into(), title: "p".into(), session: claude.then(|| "new".to_string()), claude, ended,
             alone: true, container: None,
         };
-        Row { kind: RowKind::Pane { entry, tone: if ended { Tone::Closed } else { Tone::Idle }, note: String::new() } }
+        Row::new(RowKind::Pane { entry, tone: if ended { Tone::Closed } else { Tone::Idle }, note: String::new() })
     }
 
     const ALONE: &dyn Fn(NodeId) -> bool = &|_| true;
@@ -305,13 +305,13 @@ mod tests {
         assert_eq!(labels(&items), ["New Claude here", "New shell here", "Recent sessions here", "│", "Copy folder path", "Open folder", "Open in VS Code"]);
         let MenuItem::Entry(recents) = &items[2] else { panic!() };
         assert_eq!((recents.action.clone(), recents.shortcut), (MenuAction::RecentsFor("/r/app".into()), Some(Shortcut::Recents)));
-        let row = Row { kind: RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true, counts: ToneCounts::default() } };
+        let row = Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true, counts: ToneCounts::default() });
         assert_eq!(row_menu(&row, ALONE), None, "headings are built with project_menu (they need the container)");
     }
 
     #[test]
     fn detail_rows_have_no_menu() {
-        let row = Row { kind: RowKind::Detail { session: "s".into(), text: "x".into() } };
+        let row = Row::new(RowKind::Detail { session: "s".into(), text: "x".into() });
         assert_eq!(row_menu(&row, ALONE), None);
     }
 
