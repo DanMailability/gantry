@@ -69,6 +69,10 @@ pub struct PaneEntry {
     pub claude: bool,
     /// Its process ended; the pane shows Continue / Restart.
     pub ended: bool,
+    /// Its tab has no other pane.
+    pub alone: bool,
+    /// Host folder of the dev container it runs in.
+    pub container: Option<PathBuf>,
 }
 
 /// What keeps an Active entry's place in the list: its leaf, or (outside Gantry) its session.
@@ -601,7 +605,7 @@ mod tests {
     }
 
     fn pane(leaf: NodeId, cwd: &str, session: Option<&str>) -> PaneEntry {
-        PaneEntry { leaf, cwd: cwd.into(), title: format!("pane {leaf}"), session: session.map(String::from), claude: session.is_some(), ended: false }
+        PaneEntry { leaf, cwd: cwd.into(), title: format!("pane {leaf}"), session: session.map(String::from), claude: session.is_some(), ended: false, alone: true, container: None }
     }
 
     fn shell_pane(leaf: NodeId, cwd: &str) -> PaneEntry {

@@ -643,6 +643,8 @@ impl WorkspaceView {
                     session: leaf.session.clone(),
                     claude: leaf.launch.is_claude(),
                     ended: view.is_some_and(|view| view.has_ended()),
+                    alone: self.workspace.tab_of(*id).is_some_and(|tab| self.workspace.tabs[tab].root.leaves().len() == 1),
+                    container: leaf.launch.container.clone(),
                 }
             })
             .collect();

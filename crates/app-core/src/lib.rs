@@ -5,6 +5,7 @@ pub mod bidi;
 pub mod fuzzy;
 pub mod input;
 pub mod launcher;
+pub mod menus;
 pub mod layout_store;
 pub mod layout;
 pub mod mouse;
