@@ -14,7 +14,7 @@ use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use daemon::pty::default_shell;
 use gpui::{
-    Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
+    App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
     PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
 use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
@@ -958,6 +958,13 @@ impl WorkspaceView {
         }
     }
 
+    /// A dragged tab was dropped on tab `to`: it takes that place.
+    fn drop_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.workspace.move_tab_to(from, to);
+        self.save(cx);
+        cx.notify();
+    }
+
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let sessions = self.sidebar.read(cx).sessions();
@@ -1008,6 +1015,7 @@ impl WorkspaceView {
                 }
             })
             .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container))| {
+                let dragged = DraggedTab { index, title: title.clone() };
                 let active = index == self.workspace.active;
                 // Claude tabs are filled with what their most urgent session needs; shells stay plain.
                 let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
@@ -1049,6 +1057,8 @@ impl WorkspaceView {
                             .text_xs()
                             .hover(|style| style.bg(rgba(0x00000026)))
                             .child("×")
+                            // Pressing × must not start dragging the tab.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 let leaves = this.workspace.tabs.get(index).map(|tab| tab.root.leaves()).unwrap_or_default();
@@ -1056,6 +1066,9 @@ impl WorkspaceView {
                             })),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
+                    .on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone()))
+                    .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(LINE)))
+                    .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
             }))
             .child(round_button("new-claude", "+", cx.listener(|this, _, _, _| this.open(true, None))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
@@ -1365,6 +1378,31 @@ impl Render for WorkspaceView {
                 )
             });
         window_frame::frame(window, root)
+    }
+}
+
+/// A tab being dragged: its index, and the title its floating copy shows.
+#[derive(Clone)]
+struct DraggedTab {
+    index: usize,
+    title: String,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(32.))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded(px(RADIUS - 2.))
+            .border_2()
+            .border_color(rgb(ACCENT))
+            .bg(rgb(RAISED))
+            .text_sm()
+            .font_family(UI_FONT)
+            .text_color(rgb(TEXT))
+            .child(self.title.clone())
     }
 }
 
