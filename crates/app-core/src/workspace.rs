@@ -11,6 +11,7 @@ use crate::attention::most_urgent;
 use crate::sessions::SessionStore;
 use crate::settings::{Settings, ShellSettings, expand_home};
 use crate::split_tree::{Axis, Direction, Node, NodeId};
+use crate::theme_colors::ProjectColor;
 
 /// Program name of Claude Code.
 pub const CLAUDE: &str = "claude";
@@ -60,6 +61,27 @@ pub struct ResolvedDir {
     pub command: String,
     /// Arguments placed before Gantry's own.
     pub args: Vec<String>,
+    /// Picked badge colour.
+    pub color: Option<ProjectColor>,
+}
+
+/// A config dir's mark on sessions, tabs and pane headers: the first letter of its name on its colour.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirBadge {
+    /// The dir's name.
+    pub name: String,
+    /// Its first letter, upper-cased.
+    pub letter: String,
+    /// The picked colour, else the automatic colour of its path.
+    pub color: ProjectColor,
+}
+
+impl ResolvedDir {
+    /// Its badge.
+    pub fn badge(&self) -> DirBadge {
+        let letter = self.name.chars().next().map(|first| first.to_uppercase().collect()).unwrap_or_default();
+        DirBadge { name: self.name.clone(), letter, color: self.color.unwrap_or_else(|| ProjectColor::auto(&self.path)) }
+    }
 }
 
 impl ClaudeDirs {
@@ -67,12 +89,12 @@ impl ClaudeDirs {
     pub fn from_settings(settings: &Settings, daemon_dir: Option<&Path>, home: Option<&Path>) -> ClaudeDirs {
         if settings.claude_dirs.is_empty() {
             let path = daemon_dir.map(Path::to_path_buf).or_else(|| home.map(|home| home.join(".claude"))).unwrap_or_default();
-            return ClaudeDirs { dirs: vec![ResolvedDir { name: "Default".into(), path, command: CLAUDE.into(), args: Vec::new() }], default: 0 };
+            return ClaudeDirs { dirs: vec![ResolvedDir { name: "Default".into(), path, command: CLAUDE.into(), args: Vec::new(), color: None }], default: 0 };
         }
         let dirs: Vec<ResolvedDir> = settings
             .claude_dirs
             .iter()
-            .map(|dir| ResolvedDir { name: dir.name.clone(), path: expand_home(&dir.path, home), command: dir.command.clone(), args: dir.args.clone() })
+            .map(|dir| ResolvedDir { name: dir.name.clone(), path: expand_home(&dir.path, home), command: dir.command.clone(), args: dir.args.clone(), color: dir.color })
             .collect();
         let default = settings.default_claude_dir.as_deref().and_then(|name| dirs.iter().position(|dir| dir.name == name)).unwrap_or(0);
         ClaudeDirs { dirs, default }
@@ -714,6 +736,36 @@ pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], laun
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::ClaudeDir;
+
+    #[test]
+    fn a_dirs_badge_is_its_upper_cased_first_letter_on_its_colour() {
+        let dir = |name: &str, color| ResolvedDir { name: name.into(), path: "/c/one".into(), command: "claude".into(), args: vec![], color };
+        assert_eq!(dir("work", None).badge().letter, "W");
+        assert_eq!(dir("élan", None).badge().letter, "É");
+        assert_eq!(dir("Private", Some(ProjectColor::Pink)).badge(), DirBadge { name: "Private".into(), letter: "P".into(), color: ProjectColor::Pink });
+    }
+
+    #[test]
+    fn an_unpicked_dir_colour_follows_its_path_not_its_name() {
+        let dir = |name: &str| ResolvedDir { name: name.into(), path: "/c/one".into(), command: "claude".into(), args: vec![], color: None };
+        assert_eq!(dir("Work").badge().color, ProjectColor::auto(Path::new("/c/one")));
+        assert_eq!(dir("Work").badge().color, dir("Renamed").badge().color);
+    }
+
+    #[test]
+    fn resolved_dirs_carry_the_picked_colour() {
+        let settings = Settings {
+            claude_dirs: vec![
+                ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![], color: Some(ProjectColor::Lime) },
+                ClaudeDir { name: "B".into(), path: "/b".into(), command: "claude".into(), args: vec![], color: None },
+            ],
+            ..Settings::default()
+        };
+        let dirs = ClaudeDirs::from_settings(&settings, None, None);
+        assert_eq!(dirs.dirs[0].color, Some(ProjectColor::Lime));
+        assert_eq!(dirs.dirs[1].color, None);
+    }
 
     #[test]
     fn layouts_saved_before_containers_load_as_local_launches() {
@@ -1262,8 +1314,8 @@ mod tests {
         use crate::settings::ClaudeDir;
         Settings {
             claude_dirs: vec![
-            ClaudeDir { name: "Personal".into(), path: "~/.claude".into(), command: "claude".into(), args: vec![] },
-            ClaudeDir { name: "Work".into(), path: "~/.claude-work".into(), command: "claude-w".into(), args: vec!["--model".into(), "opus".into()] },
+            ClaudeDir { name: "Personal".into(), path: "~/.claude".into(), command: "claude".into(), args: vec![], color: None },
+            ClaudeDir { name: "Work".into(), path: "~/.claude-work".into(), command: "claude-w".into(), args: vec!["--model".into(), "opus".into()], color: None },
         ],
             ..Settings::default()
         }
@@ -1276,7 +1328,7 @@ mod tests {
     #[test]
     fn implicit_default_when_no_dirs() {
         let dirs = ClaudeDirs::from_settings(&Settings::default(), Some(Path::new("/d/.claude")), Some(Path::new("/d")));
-        assert_eq!(dirs.dirs, vec![ResolvedDir { name: "Default".into(), path: "/d/.claude".into(), command: "claude".into(), args: vec![] }]);
+        assert_eq!(dirs.dirs, vec![ResolvedDir { name: "Default".into(), path: "/d/.claude".into(), command: "claude".into(), args: vec![], color: None }]);
         let launch = PaneLaunch::claude_with("/r".into(), &dirs.dirs[0], Some(Path::new("/d/.claude")), None);
         assert_eq!((launch.program.as_str(), launch.env.is_empty(), launch.claude_dir), ("claude", true, None));
     }

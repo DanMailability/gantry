@@ -691,7 +691,7 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
 }
 
 /// The word for a live tone in a row's note.
-fn tone_word(tone: Tone) -> &'static str {
+pub fn tone_word(tone: Tone) -> &'static str {
     match tone {
         Tone::NeedsInput => "Needs input",
         Tone::Working => "Working",

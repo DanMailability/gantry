@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn the_dir_name_is_shown_only_with_two_or_more_dirs() {
         use app_core::settings::ClaudeDir;
-        let dir = |name: &str, path: &str| ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![] };
+        let dir = |name: &str, path: &str| ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![], color: None };
         let mut settings = Settings { claude_dirs: vec![dir("Personal", "/c/one")], ..Settings::default() };
         assert_eq!(dir_name(&settings, Some(Path::new("/c/one"))), None);
         settings.claude_dirs.push(dir("Work", "/c/two"));

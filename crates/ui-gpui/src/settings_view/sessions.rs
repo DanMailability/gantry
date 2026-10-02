@@ -116,7 +116,7 @@ fn dir_rows(settings: &Settings, daemon_dir: Option<&Path>, home: Option<&Path>)
         return settings.claude_dirs.clone();
     }
     let path = daemon_dir.map(|dir| display_path(dir, home)).unwrap_or_else(|| "~/.claude".into());
-    vec![ClaudeDir { name: "Default".into(), path: PathBuf::from(path), command: "claude".into(), args: Vec::new() }]
+    vec![ClaudeDir { name: "Default".into(), path: PathBuf::from(path), command: "claude".into(), args: Vec::new(), color: None }]
 }
 
 /// Make the implicit Default a real entry, so it can be edited or sit beside others.
@@ -145,7 +145,7 @@ fn add_dir(settings: &mut Settings, picked: &Path, daemon_dir: Option<&Path>, ho
     if settings.claude_dirs.iter().any(|dir| dir.path == path) {
         return;
     }
-    settings.claude_dirs.push(ClaudeDir { name, path, command: "claude".into(), args: Vec::new() });
+    settings.claude_dirs.push(ClaudeDir { name, path, command: "claude".into(), args: Vec::new(), color: None });
 }
 
 /// Rename dir `index`; false when the name is empty or taken. The default and the folder memory follow the rename.
@@ -461,7 +461,7 @@ mod tests {
     }
 
     fn dir(name: &str, path: &str) -> ClaudeDir {
-        ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![] }
+        ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![], color: None }
     }
 
     #[test]
