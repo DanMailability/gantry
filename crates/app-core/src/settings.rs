@@ -512,7 +512,24 @@ impl Reader {
     }
 
     fn favorites(&mut self, raw: &Map<String, Value>) -> Vec<PathBuf> {
-        self.strings(raw, "", "favorites").into_iter().map(PathBuf::from).collect()
+        match raw.get("favorites") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| match item {
+                    Value::String(path) => Some(PathBuf::from(path)),
+                    _ => {
+                        self.problem(&format!("favorites[{index}]"), "expected a folder; dropped".into());
+                        None
+                    }
+                })
+                .collect(),
+            Some(_) => {
+                self.problem("favorites", "expected a list of strings".into());
+                Vec::new()
+            }
+        }
     }
 
     fn event(&mut self, parent: &Map<String, Value>, key: &str, default: EventAlerts) -> EventAlerts {
@@ -719,10 +736,24 @@ fn put(map: &mut Map<String, Value>, path: &[&str], value: Option<Value>) {
 }
 
 /// Write `settings` to `path` atomically: `raw` with every known key replaced by its value in `settings`, and
-/// known keys equal to their default removed (an object left empty is removed too). Unknown keys stay.
+/// known keys equal to their default removed (an object left empty is removed too). Unknown keys stay. The
+/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `shortcuts`) are only rewritten when `settings`
+/// differs from what `raw` loads as, so hand-written entries that failed validation, and unknown fields in them,
+/// survive other changes.
 pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::Result<()> {
+    let loaded = Reader { problems: Vec::new() }.settings(raw);
+    let untouched = |key: &str| match key {
+        "claudeDirs" => settings.claude_dirs == loaded.claude_dirs,
+        "favorites" => settings.favorites == loaded.favorites,
+        "folderClaudeDirs" => settings.folder_claude_dirs == loaded.folder_claude_dirs,
+        "shortcuts" => settings.shortcuts == loaded.shortcuts,
+        _ => false,
+    };
     let mut out = raw.clone();
     for (key, value, changed) in leaves(settings) {
+        if key.len() == 1 && untouched(key[0]) {
+            continue;
+        }
         put(&mut out, &key, changed.then_some(value));
     }
     let mut text = serde_json::to_string_pretty(&Value::Object(out)).map_err(io::Error::other)?;
@@ -908,6 +939,52 @@ mod tests {
         let loaded = load(&path);
         assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
         assert_eq!(loaded.settings, Some(settings));
+    }
+
+    #[test]
+    fn a_dropped_claude_dir_survives_an_unrelated_save() {
+        let text = r#"{"claudeDirs": [
+            {"name": "A", "path": "/a", "comment": "mine"},
+            {"name": "A", "path": "/b", "command": "wrapped"}
+        ]}"#;
+        let loaded = parse(text);
+        assert_eq!(loaded.problems.len(), 1);
+        let mut settings = loaded.settings.unwrap();
+        settings.alerts.volume = 0.7;
+        settings.shortcuts.clear();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written = read_json(&path);
+        assert_eq!(written["claudeDirs"], serde_json::from_str::<Value>(text).unwrap()["claudeDirs"], "dropped entry and the unknown field stay");
+        assert_eq!(written["alerts"]["volume"], 0.7);
+    }
+
+    #[test]
+    fn favorites_keep_the_valid_items_with_one_problem_per_bad_one() {
+        let loaded = parse(r#"{"favorites": ["/a", "/b", 3]}"#);
+        assert_eq!(loaded.problems.len(), 1);
+        let mut settings = loaded.settings.unwrap();
+        assert_eq!(settings.favorites, [PathBuf::from("/a"), PathBuf::from("/b")]);
+        settings.alerts.volume = 0.7;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        assert_eq!(read_json(&path)["favorites"], serde_json::json!(["/a", "/b", 3]));
+    }
+
+    #[test]
+    fn a_changed_whole_leaf_key_is_written() {
+        let loaded = parse(r#"{"favorites": ["/a"], "claudeDirs": [{"name": "A", "path": "/a", "comment": 1}]}"#);
+        let mut settings = loaded.settings.unwrap();
+        settings.favorites.push("/b".into());
+        settings.claude_dirs[0].command = "w".into();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written = read_json(&path);
+        assert_eq!(written["favorites"], serde_json::json!(["/a", "/b"]));
+        assert_eq!(written["claudeDirs"][0]["command"], "w");
     }
 
     #[test]
