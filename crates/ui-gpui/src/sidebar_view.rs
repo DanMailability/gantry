@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
-    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
+    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
     session_title,
 };
 use app_core::sessions::SessionStore;
@@ -68,6 +68,7 @@ pub struct SidebarView {
     panes: Vec<PaneEntry>,
     tabs: Vec<TabEntry>,
     arrivals: Arrivals,
+    order: ProjectOrder,
     filter: TextField,
     toggled: HashSet<PathBuf>,
     details: Option<String>,
@@ -116,6 +117,7 @@ impl SidebarView {
             panes: Vec::new(),
             tabs: Vec::new(),
             arrivals: Arrivals::default(),
+            order: ProjectOrder::default(),
             filter: TextField::default(),
             toggled: HashSet::new(),
             details: None,
@@ -194,9 +196,9 @@ impl SidebarView {
             };
             // Until the session list arrives, number nothing: panes and sessions must get their arrival
             // numbers together, so that at startup leaves land above outside sessions.
-            let mut unloaded = Arrivals::default();
-            let arrivals = if self.sessions.loaded() { &mut self.arrivals } else { &mut unloaded };
-            session_tree::active(&input, arrivals)
+            let mut unloaded = (Arrivals::default(), ProjectOrder::default());
+            let (arrivals, order) = if self.sessions.loaded() { (&mut self.arrivals, &mut self.order) } else { (&mut unloaded.0, &mut unloaded.1) };
+            session_tree::active(&input, arrivals, order)
         };
         self.rows = rows;
         // A selection whose row is gone falls back to the focused pane's row.
