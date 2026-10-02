@@ -138,10 +138,34 @@ impl PaneLaunch {
         dirs: &ClaudeDirs,
         daemon_dir: Option<&Path>,
     ) -> PaneLaunch {
+        Self::session_with("--resume", session, cwd, container, session_dir, dirs, daemon_dir)
+    }
+
+    /// Like `resume_with`, for a session with no transcript yet: starts it afresh under the same id (`--session-id`).
+    pub fn restart_with(
+        session: &str,
+        cwd: PathBuf,
+        container: Option<PathBuf>,
+        session_dir: Option<&Path>,
+        dirs: &ClaudeDirs,
+        daemon_dir: Option<&Path>,
+    ) -> PaneLaunch {
+        Self::session_with("--session-id", session, cwd, container, session_dir, dirs, daemon_dir)
+    }
+
+    fn session_with(
+        flag: &str,
+        session: &str,
+        cwd: PathBuf,
+        container: Option<PathBuf>,
+        session_dir: Option<&Path>,
+        dirs: &ClaudeDirs,
+        daemon_dir: Option<&Path>,
+    ) -> PaneLaunch {
         let configured = session_dir.and_then(|path| dirs.by_path(path));
         let dir = configured.unwrap_or(&dirs.dirs[dirs.default]);
         let mut args = dir.args.clone();
-        args.extend(["--resume".into(), session.into()]);
+        args.extend([flag.into(), session.into()]);
         let recorded = ResolvedDir { path: session_dir.map_or_else(|| dir.path.clone(), Path::to_path_buf), ..dir.clone() };
         Self::claude_in(cwd, args, &recorded, daemon_dir, container)
     }
@@ -240,12 +264,26 @@ impl Leaf {
     /// What Continue / Restart does, given the daemon's sessions: focus the pane that already runs the
     /// leaf's session, refuse while it runs outside Gantry, else start `rerun` — resuming when the session is
     /// known, or when the list has not arrived yet.
-    pub fn rerun_with(&self, sessions: &SessionStore) -> Rerun {
+    pub fn rerun_with(&self, sessions: &SessionStore, dirs: &ClaudeDirs, daemon_dir: Option<&Path>) -> Rerun {
         let known = self.session.as_deref().and_then(|id| sessions.get(id));
         match known.map(|session| session.state) {
             Some(SessionState::Managed { pane }) => Rerun::Focus(pane),
             Some(SessionState::External { .. }) => Rerun::Busy,
-            _ => Rerun::Start(self.rerun(known.is_some() || !sessions.loaded())),
+            _ => Rerun::Start(self.rerun_resolved(known.is_some() || !sessions.loaded(), known.and_then(|info| info.claude_dir.as_deref()), dirs, daemon_dir)),
+        }
+    }
+
+    /// `rerun`, but a Claude leaf with a session is launched through its config dir's current command, arguments and
+    /// environment: `session_dir` (where the session was recorded), else the dir the leaf ran with.
+    pub fn rerun_resolved(&self, resumable: bool, session_dir: Option<&Path>, dirs: &ClaudeDirs, daemon_dir: Option<&Path>) -> PaneLaunch {
+        let launch = &self.launch;
+        let Some(id) = self.session.as_deref().filter(|_| launch.is_claude()) else { return self.rerun(resumable) };
+        let session_dir = session_dir.or(launch.claude_dir.as_deref());
+        let (cwd, container) = (launch.cwd.clone(), launch.container.clone());
+        if resumable {
+            PaneLaunch::resume_with(id, cwd, container, session_dir, dirs, daemon_dir)
+        } else {
+            PaneLaunch::restart_with(id, cwd, container, session_dir, dirs, daemon_dir)
         }
     }
 
@@ -930,19 +968,61 @@ mod tests {
     fn rerun_never_runs_a_session_twice() {
         use protocol::message::SessionState;
         let leaf = claude_leaf(Some("x"));
+        let dirs = ClaudeDirs::from_settings(&Settings::default(), Some(Path::new("/d/.claude")), None);
+        let daemon = Some(Path::new("/d/.claude"));
+        let again = |resumable| leaf.rerun_resolved(resumable, None, &dirs, daemon);
         let mut store = SessionStore::default();
         // Before the first list: assume it may exist and resume.
-        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(true)));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
         store.replace(vec![]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(false)));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(false)));
         store.replace(vec![session_info("x", SessionState::Closed)]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(true)));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
         store.replace(vec![session_info("x", SessionState::Managed { pane: 4 })]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Focus(4));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Focus(4));
         store.replace(vec![session_info("x", SessionState::External { pid: Some(9) })]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Busy);
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Busy);
         let sh = Leaf::new(shell("/r"));
-        assert_eq!(sh.rerun_with(&store), Rerun::Start(sh.launch.clone()));
+        assert_eq!(sh.rerun_with(&store, &dirs, daemon), Rerun::Start(sh.launch.clone()));
+    }
+
+    #[test]
+    fn continue_uses_the_dirs_current_command() {
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let old = ClaudeDirs::from_settings(&two_dirs_settings(), daemon, Some(Path::new("/home/me")));
+        let mut leaf = Leaf::new(PaneLaunch::claude_with("/r".into(), &old.dirs[1], daemon, None));
+        leaf.session = Some("sid".into());
+        let mut settings = two_dirs_settings();
+        settings.claude_dirs[1].command = "claude-new".into();
+        settings.claude_dirs[1].args = vec!["--model".into(), "sonnet".into()];
+        let dirs = ClaudeDirs::from_settings(&settings, daemon, Some(Path::new("/home/me")));
+        let mut store = SessionStore::default();
+        store.replace(vec![]);
+        let Rerun::Start(restart) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!((restart.program.as_str(), restart.args.clone()), ("claude-new", vec!["--model".to_string(), "sonnet".into(), "--session-id".into(), "sid".into()]));
+        store.replace(vec![session_info("sid", protocol::message::SessionState::Closed)]);
+        let Rerun::Start(resume) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!((resume.program.as_str(), resume.args.clone()), ("claude-new", vec!["--model".to_string(), "sonnet".into(), "--resume".into(), "sid".into()]));
+        assert_eq!(resume.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
+    }
+
+    #[test]
+    fn continue_of_an_orphan_follows_the_sessions_tagged_dir() {
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let dirs = ClaudeDirs::from_settings(&two_dirs_settings(), daemon, Some(Path::new("/home/me")));
+        let mut leaf = claude_leaf(Some("sid"));
+        assert!(leaf.launch.env.is_empty() && leaf.launch.claude_dir.is_none());
+        let mut info = session_info("sid", protocol::message::SessionState::Closed);
+        info.claude_dir = Some("/home/me/.claude-work".into());
+        let mut store = SessionStore::default();
+        store.replace(vec![info]);
+        let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!(launch.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
+        assert_eq!(launch.claude_dir, Some(PathBuf::from("/home/me/.claude-work")));
+        leaf.launch.claude_dir = Some("/home/me/.claude-work".into());
+        store.replace(vec![]);
+        let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!(launch.env.len(), 1, "falls back to the leaf's own dir when the session is unknown");
     }
 
     #[test]

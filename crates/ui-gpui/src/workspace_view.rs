@@ -487,7 +487,7 @@ impl WorkspaceView {
     fn rerun_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
         let session = entry.session.clone();
-        match entry.rerun_with(self.sidebar.read(cx).sessions()) {
+        match entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref()) {
             Rerun::Start(launch) => self.start_leaf(leaf, launch, cx),
             Rerun::Focus(pane) => {
                 if let Some(running) = self.workspace.leaf_for_pane(pane) {
@@ -538,7 +538,9 @@ impl WorkspaceView {
                     self.open_launch(launch, axis, None, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
-                    if let Some(launch) = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun(true)) {
+                    let session_dir = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.claude_dir.clone());
+                    let launch = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun_resolved(true, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref()));
+                    if let Some(launch) = launch {
                         self.start_leaf(leaf, launch, cx);
                         self.focus_leaf(leaf, window, cx);
                     }
