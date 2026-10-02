@@ -21,7 +21,7 @@ use gpui::{
 };
 use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::menus::{self, MenuAction, MenuEntry, MenuItem, Shortcut};
+use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
@@ -770,6 +770,7 @@ impl WorkspaceView {
                 }
             }
             MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
+            MenuAction::NewClaudeWith { .. } | MenuAction::PinFavorite(_) | MenuAction::UnpinFavorite(_) => {}
             MenuAction::RecentsFor(project) => self.show_recents(Some(project), window, cx),
             MenuAction::Continue(leaf) => {
                 self.focus_leaf(leaf, window, cx);
@@ -813,13 +814,13 @@ impl WorkspaceView {
     fn open_tab_menu(&mut self, index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.workspace.tabs.get(index) else { return };
         let items = if tab.settings {
-            vec![MenuItem::Entry(MenuEntry { label: "Close tab", shortcut: Some(Shortcut::Close), accent: false, action: MenuAction::CloseTab(index) })]
+            vec![MenuItem::Entry(MenuEntry { label: "Close tab".into(), shortcut: Some(Shortcut::Close), accent: false, action: MenuAction::CloseTab(index) })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
             let sessions = self.sidebar.read(cx).sessions();
             let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
             let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
-            menus::tab_menu(index, &leaf.launch.cwd, vscode)
+            menus::tab_menu(index, &leaf.launch.cwd, vscode, &MenuContext::default())
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);

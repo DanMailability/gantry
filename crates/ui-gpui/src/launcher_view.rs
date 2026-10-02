@@ -13,6 +13,7 @@ use gpui::{
 use protocol::message::SessionInfo;
 
 use crate::field;
+use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS_LARGE, RADIUS_SMALL, theme};
 
 /// What the launcher asks the workspace to do.
@@ -43,6 +44,7 @@ pub struct LauncherView {
     items: Vec<LauncherItem>,
     selected: usize,
     scroll: UniformListScrollHandle,
+    favorites: Vec<PathBuf>,
 }
 
 impl EventEmitter<LauncherEvent> for LauncherView {}
@@ -64,6 +66,7 @@ impl LauncherView {
             items: Vec::new(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
+            favorites: cx.global::<SettingsStore>().settings().favorites.clone(),
         };
         launcher.refresh();
         launcher
@@ -71,13 +74,14 @@ impl LauncherView {
 
     fn refresh(&mut self) {
         let sessions: Vec<&SessionInfo> = self.sessions.iter().collect();
-        self.items = launcher::items(&sessions, self.query.text(), self.home.as_deref());
+        self.items = launcher::items(&sessions, self.query.text(), self.home.as_deref(), &self.favorites);
         self.selected = 0;
     }
 
     fn choose(&mut self, index: usize, claude: bool, cx: &mut Context<Self>) {
         match self.items.get(index) {
-            Some(LauncherItem::Dir(dir)) => cx.emit(LauncherEvent::Open { dir: dir.clone(), claude }),
+            Some(LauncherItem::Dir { path, exists: true, .. }) => cx.emit(LauncherEvent::Open { dir: path.clone(), claude }),
+            Some(LauncherItem::Dir { .. }) => {}
             Some(LauncherItem::Browse) => cx.emit(LauncherEvent::Browse { claude }),
             None => {}
         }
@@ -104,7 +108,14 @@ impl LauncherView {
 
     fn render_item(&self, index: usize, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
         let label = match &self.items[index] {
-            LauncherItem::Dir(dir) => display_path(dir, self.home.as_deref()),
+            LauncherItem::Dir { path, favorite, exists } => {
+                let shown = display_path(path, self.home.as_deref());
+                match (favorite, exists) {
+                    (true, true) => format!("★ {shown}"),
+                    (true, false) => format!("★ {shown}  not found"),
+                    (false, _) => shown,
+                }
+            }
             LauncherItem::Browse => "Browse…".into(),
         };
         let selected = index == self.selected;

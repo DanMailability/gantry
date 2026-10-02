@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use app_core::menus::{self, MenuAction};
+use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
     self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
     session_title,
@@ -299,9 +299,9 @@ impl SidebarView {
                         RowKind::Session { session, .. } => session.container.as_ref().filter(|place| place.host_folder.is_some()),
                         _ => None,
                     });
-                Some(menus::project_menu(path, container))
+                Some(menus::project_menu(path, container, &MenuContext::default()))
             }
-            _ => menus::row_menu(row, &alone),
+            _ => menus::row_menu(row, &alone, &MenuContext::default()),
         };
         let Some(items) = items else { return };
         let focus = cx.focus_handle();

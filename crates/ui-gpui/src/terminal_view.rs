@@ -686,7 +686,7 @@ impl Render for TerminalView {
                 cell.style.underline = true;
             }
         }
-        self.row_orders = to_display(&mut snapshot);
+        self.row_orders = to_display(&mut snapshot, cx.global::<SettingsStore>().settings().window.right_to_left);
         let hovering_link = self.hovered_link.is_some();
         let focused = self.focus_handle.is_focused(window);
         let background = to_hsla(snapshot.background);

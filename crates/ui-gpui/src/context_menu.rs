@@ -48,6 +48,7 @@ pub(crate) fn render(
     let on_dismiss = Rc::new(on_dismiss);
     let dismiss_key = on_dismiss.clone();
     let rows = menu.items.iter().enumerate().map(|(index, item)| match item {
+        MenuItem::Submenu { .. } => div().into_any_element(),
         MenuItem::Separator => div().h(px(1.)).mx_2().my_1().bg(rgb(theme.tokens.line)).into_any_element(),
         MenuItem::Entry(entry) => {
             let action = entry.action.clone();
@@ -63,7 +64,7 @@ pub(crate) fn render(
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(theme.tokens.line)))
                 .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
-                .child(div().flex_1().child(entry.label))
+                .child(div().flex_1().child(entry.label.clone()))
                 .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut))))
                 .on_click(move |_, window, cx| on_pick(&action, window, cx))
                 .into_any_element()

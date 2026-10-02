@@ -41,6 +41,17 @@ pub enum MenuAction {
     ClosePane(NodeId),
     /// Close every pane of a tab.
     CloseTab(usize),
+    /// Start a new Claude session in a folder with the named config dir (and remember it for the folder).
+    NewClaudeWith {
+        /// The folder.
+        dir: PathBuf,
+        /// Name of the config dir.
+        dir_name: String,
+    },
+    /// Pin a folder as a favorite.
+    PinFavorite(PathBuf),
+    /// Unpin a favorite folder.
+    UnpinFavorite(PathBuf),
     /// Start a new Claude session or shell in a folder.
     NewHere {
         /// The folder.
@@ -65,7 +76,7 @@ pub enum MenuAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuEntry {
     /// Its text.
-    pub label: &'static str,
+    pub label: String,
     /// The shortcut hint shown beside it.
     pub shortcut: Option<Shortcut>,
     /// Drawn in the accent colour (the row's main action).
@@ -79,20 +90,58 @@ pub struct MenuEntry {
 pub enum MenuItem {
     /// A pickable entry.
     Entry(MenuEntry),
+    /// An entry that opens a list of entries beside it.
+    Submenu {
+        /// Its text.
+        label: String,
+        /// The entries.
+        items: Vec<MenuItem>,
+    },
     /// A line between groups.
     Separator,
 }
 
-fn entry(label: &'static str, action: MenuAction) -> MenuItem {
-    MenuItem::Entry(MenuEntry { label, shortcut: None, accent: false, action })
+/// What the menus need to know beyond the row: the Claude config dirs and whether the folder is a favorite.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MenuContext {
+    /// Each config dir as (name, is the default, remembered for this folder). Fewer than two: no choice is offered.
+    pub dirs: Vec<(String, bool, bool)>,
+    /// Whether the folder is pinned as a favorite.
+    pub favorite: bool,
 }
 
-fn with_shortcut(label: &'static str, shortcut: Shortcut, action: MenuAction) -> MenuItem {
-    MenuItem::Entry(MenuEntry { label, shortcut: Some(shortcut), accent: false, action })
+fn entry(label: &str, action: MenuAction) -> MenuItem {
+    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: None, accent: false, action })
 }
 
-fn accented(label: &'static str, action: MenuAction) -> MenuItem {
-    MenuItem::Entry(MenuEntry { label, shortcut: None, accent: true, action })
+fn with_shortcut(label: &str, shortcut: Shortcut, action: MenuAction) -> MenuItem {
+    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: Some(shortcut), accent: false, action })
+}
+
+fn accented(label: &str, action: MenuAction) -> MenuItem {
+    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: None, accent: true, action })
+}
+
+/// "New Claude here with ▸" and the config dirs, when there are two or more.
+fn claude_with(dir: &Path, context: &MenuContext) -> Option<MenuItem> {
+    if context.dirs.len() < 2 {
+        return None;
+    }
+    let items = context
+        .dirs
+        .iter()
+        .map(|(name, default, remembered)| {
+            let mut label = name.clone();
+            if *default {
+                label.push_str(" (default)");
+            }
+            if *remembered {
+                label.push_str(" ✓ this folder");
+            }
+            entry(&label, MenuAction::NewClaudeWith { dir: dir.to_path_buf(), dir_name: name.clone() })
+        })
+        .collect();
+    Some(MenuItem::Submenu { label: "New Claude here with".into(), items })
 }
 
 /// Copy folder path · Open folder · Open in VS Code.
@@ -125,12 +174,14 @@ pub fn vscode_args(folder: &Path, container: Option<&ContainerPlace>, pane_conta
 }
 
 /// A tab's menu; `dir` is its focused pane's directory.
-pub fn tab_menu(tab: usize, dir: &Path, vscode: Vec<String>) -> Vec<MenuItem> {
+/// `context.dirs` is empty for a dev container tab.
+pub fn tab_menu(tab: usize, dir: &Path, vscode: Vec<String>, context: &MenuContext) -> Vec<MenuItem> {
     let mut items = vec![
         with_shortcut("Split right", Shortcut::SplitRight, MenuAction::Split { tab, axis: Axis::Horizontal }),
         with_shortcut("Split down", Shortcut::SplitDown, MenuAction::Split { tab, axis: Axis::Vertical }),
-        MenuItem::Separator,
     ];
+    items.extend(claude_with(dir, context));
+    items.push(MenuItem::Separator);
     items.extend(folder_items(dir, vscode));
     items.push(MenuItem::Separator);
     items.push(with_shortcut("Close tab", Shortcut::Close, MenuAction::CloseTab(tab)));
@@ -144,7 +195,7 @@ fn close_item(leaf: NodeId, alone: &dyn Fn(NodeId) -> bool) -> MenuItem {
 
 /// A sidebar row's menu; `None` for rows without one (headings use [`project_menu`], details and "Take over…" rows
 /// have none). `alone(leaf)` = that leaf's tab has no other pane.
-pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool) -> Option<Vec<MenuItem>> {
+pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext) -> Option<Vec<MenuItem>> {
     let mut items = Vec::new();
     match &row.kind {
         RowKind::Session { session, tone, leaf, .. } => {
@@ -162,6 +213,9 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool) -> Option<Vec<MenuIte
                 }
                 _ => {
                     items.push(entry("New Claude here", MenuAction::NewHere { dir: session.cwd.clone(), claude: true }));
+                    if session.container.is_none() {
+                        items.extend(claude_with(&session.cwd, context));
+                    }
                     items.push(MenuItem::Separator);
                 }
             }
@@ -179,6 +233,9 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool) -> Option<Vec<MenuIte
                 (claude, _) => {
                     let label = if claude { "New Claude here" } else { "New shell here" };
                     items.push(entry(label, MenuAction::NewHere { dir: pane.cwd.clone(), claude }));
+                    if claude && pane.container.is_none() {
+                        items.extend(claude_with(&pane.cwd, context));
+                    }
                 }
             }
             items.push(MenuItem::Separator);
@@ -195,13 +252,21 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool) -> Option<Vec<MenuIte
 }
 
 /// A project heading's menu; `container` = the dev container one of its sessions runs in, if any.
-pub fn project_menu(path: &Path, container: Option<&ContainerPlace>) -> Vec<MenuItem> {
-    let mut items = vec![
-        entry("New Claude here", MenuAction::NewHere { dir: path.to_path_buf(), claude: true }),
-        entry("New shell here", MenuAction::NewHere { dir: path.to_path_buf(), claude: false }),
+pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &MenuContext) -> Vec<MenuItem> {
+    let mut items = vec![entry("New Claude here", MenuAction::NewHere { dir: path.to_path_buf(), claude: true })];
+    if container.is_none() {
+        items.extend(claude_with(path, context));
+    }
+    items.push(entry("New shell here", MenuAction::NewHere { dir: path.to_path_buf(), claude: false }));
+    items.push(if context.favorite {
+        entry("Unpin", MenuAction::UnpinFavorite(path.to_path_buf()))
+    } else {
+        entry("Pin as favorite", MenuAction::PinFavorite(path.to_path_buf()))
+    });
+    items.extend([
         with_shortcut("Recent sessions here", Shortcut::Recents, MenuAction::RecentsFor(path.to_path_buf())),
         MenuItem::Separator,
-    ];
+    ]);
     items.extend(folder_items(path, vscode_args(path, container, None)));
     items
 }
@@ -212,8 +277,25 @@ mod tests {
     use crate::session_tree::{PaneEntry, Row, RowKind, ToneCounts, Tone};
     use protocol::message::{SessionInfo, SessionState};
 
-    fn labels(items: &[MenuItem]) -> Vec<&'static str> {
-        items.iter().map(|item| match item { MenuItem::Entry(entry) => entry.label, MenuItem::Separator => "│" }).collect()
+    fn labels(items: &[MenuItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                MenuItem::Entry(entry) => entry.label.clone(),
+                MenuItem::Submenu { label, .. } => format!("{label} ▸"),
+                MenuItem::Separator => "│".into(),
+            })
+            .collect()
+    }
+
+    fn two_dirs(remembered: Option<usize>) -> MenuContext {
+        let dirs = ["Personal", "Work"].iter().enumerate().map(|(n, name)| (name.to_string(), n == 0, remembered == Some(n))).collect();
+        MenuContext { dirs, favorite: false }
+    }
+
+    fn submenu_labels(items: &[MenuItem]) -> Vec<String> {
+        let Some(MenuItem::Submenu { items, .. }) = items.iter().find(|item| matches!(item, MenuItem::Submenu { .. })) else { return vec![] };
+        labels(items)
     }
 
     fn session(state: SessionState) -> SessionInfo {
@@ -239,7 +321,7 @@ mod tests {
 
     #[test]
     fn a_tab_offers_splits_folder_items_and_close() {
-        let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()]);
+        let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default());
         assert_eq!(labels(&items), ["Split right", "Split down", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
         let MenuItem::Entry(first) = &items[0] else { panic!() };
         assert_eq!((first.action.clone(), first.shortcut), (MenuAction::Split { tab: 2, axis: Axis::Horizontal }, Some(Shortcut::SplitRight)));
@@ -250,7 +332,7 @@ mod tests {
     #[test]
     fn a_live_claude_row_offers_new_here_copy_and_close() {
         let row = session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
-        let items = row_menu(&row, ALONE).unwrap();
+        let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
         assert_eq!(labels(&items), ["New Claude here", "│", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
         let MenuItem::Entry(copy) = &items[2] else { panic!() };
         assert_eq!(copy.action, MenuAction::Copy("s1".into()));
@@ -260,40 +342,40 @@ mod tests {
     fn close_says_pane_in_a_split_and_tab_when_alone() {
         let row = session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
         let split: &dyn Fn(NodeId) -> bool = &|_| false;
-        let items = row_menu(&row, split).unwrap();
+        let items = row_menu(&row, split, &MenuContext::default()).unwrap();
         let MenuItem::Entry(close) = items.last().unwrap() else { panic!() };
-        assert_eq!((close.label, close.action.clone()), ("Close pane", MenuAction::ClosePane(4)));
+        assert_eq!((close.label.as_str(), close.action.clone()), ("Close pane", MenuAction::ClosePane(4)));
     }
 
     #[test]
     fn an_outside_session_offers_take_over_only_with_a_host_pid_and_folder() {
         let row = session_row(SessionState::External { pid: Some(42) }, Tone::Elsewhere, None);
-        let items = row_menu(&row, ALONE).unwrap();
+        let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
         assert_eq!(labels(&items), ["Take over…", "│", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code"]);
         let MenuItem::Entry(take) = &items[0] else { panic!() };
         assert!(take.accent);
         assert_eq!(take.action, MenuAction::TakeOver { session: "s1".into(), cwd: "/r/app".into() });
         let boxed = session_row(SessionState::External { pid: None }, Tone::Elsewhere, None);
-        assert_eq!(labels(&row_menu(&boxed, ALONE).unwrap())[0], "Copy session id");
+        assert_eq!(labels(&row_menu(&boxed, ALONE, &MenuContext::default()).unwrap())[0], "Copy session id");
     }
 
     #[test]
     fn an_exited_claude_offers_continue() {
         let row = session_row(SessionState::Closed, Tone::Closed, Some(4));
-        let items = row_menu(&row, ALONE).unwrap();
+        let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
         assert_eq!(labels(&items), ["Continue", "│", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
         let MenuItem::Entry(cont) = &items[0] else { panic!() };
         assert_eq!((cont.accent, cont.action.clone()), (true, MenuAction::Continue(4)));
-        let items = row_menu(&pane_row(true, true), ALONE).unwrap();
+        let items = row_menu(&pane_row(true, true), ALONE, &MenuContext::default()).unwrap();
         assert_eq!(labels(&items)[0], "Continue");
     }
 
     #[test]
     fn a_new_claude_pane_and_a_shell_have_their_menus() {
-        assert_eq!(labels(&row_menu(&pane_row(true, false), ALONE).unwrap()), [
+        assert_eq!(labels(&row_menu(&pane_row(true, false), ALONE, &MenuContext::default()).unwrap()), [
             "New Claude here", "│", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab",
         ]);
-        let shell = row_menu(&pane_row(false, false), ALONE).unwrap();
+        let shell = row_menu(&pane_row(false, false), ALONE, &MenuContext::default()).unwrap();
         assert_eq!(labels(&shell), ["New shell here", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
         let MenuItem::Entry(new) = &shell[0] else { panic!() };
         assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false });
@@ -301,18 +383,18 @@ mod tests {
 
     #[test]
     fn a_project_heading_offers_new_sessions_and_recents() {
-        let items = project_menu(Path::new("/r/app"), None);
-        assert_eq!(labels(&items), ["New Claude here", "New shell here", "Recent sessions here", "│", "Copy folder path", "Open folder", "Open in VS Code"]);
-        let MenuItem::Entry(recents) = &items[2] else { panic!() };
+        let items = project_menu(Path::new("/r/app"), None, &MenuContext::default());
+        assert_eq!(labels(&items), ["New Claude here", "New shell here", "Pin as favorite", "Recent sessions here", "│", "Copy folder path", "Open folder", "Open in VS Code"]);
+        let MenuItem::Entry(recents) = &items[3] else { panic!() };
         assert_eq!((recents.action.clone(), recents.shortcut), (MenuAction::RecentsFor("/r/app".into()), Some(Shortcut::Recents)));
         let row = Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true, counts: ToneCounts::default() });
-        assert_eq!(row_menu(&row, ALONE), None, "headings are built with project_menu (they need the container)");
+        assert_eq!(row_menu(&row, ALONE, &MenuContext::default()), None, "headings are built with project_menu (they need the container)");
     }
 
     #[test]
     fn detail_rows_have_no_menu() {
         let row = Row::new(RowKind::Detail { session: "s".into(), text: "x".into() });
-        assert_eq!(row_menu(&row, ALONE), None);
+        assert_eq!(row_menu(&row, ALONE, &MenuContext::default()), None);
     }
 
     #[test]
@@ -342,8 +424,59 @@ mod tests {
         let mut row = session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
         let RowKind::Session { session, .. } = &mut row.kind else { panic!() };
         session.container = Some(ContainerPlace { host_folder: Some("/tmp/a".into()), path: "/workspaces/a".into() });
-        let items = row_menu(&row, ALONE).unwrap();
+        let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
         let code = items.iter().find_map(|item| match item { MenuItem::Entry(e) if e.label == "Open in VS Code" => Some(e.action.clone()), _ => None });
         assert_eq!(code, Some(MenuAction::OpenInVsCode(vec!["--folder-uri".into(), "vscode-remote://dev-container+2f746d702f61/workspaces/a".into()])));
+    }
+
+    #[test]
+    fn the_dir_submenu_needs_two_dirs_and_a_host_folder() {
+        let live = session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
+        let one = MenuContext { dirs: vec![("Default".into(), true, false)], favorite: false };
+        assert!(submenu_labels(&row_menu(&live, ALONE, &one).unwrap()).is_empty());
+        let items = row_menu(&live, ALONE, &two_dirs(None)).unwrap();
+        assert_eq!(labels(&items)[..3], ["New Claude here", "New Claude here with ▸", "│"]);
+        assert_eq!(submenu_labels(&items), ["Personal (default)", "Work"]);
+        // Closed rows offer Continue instead of New Claude here, so no choice either.
+        let closed = session_row(SessionState::Closed, Tone::Closed, Some(4));
+        assert!(submenu_labels(&row_menu(&closed, ALONE, &two_dirs(None)).unwrap()).is_empty());
+        // A container session is not offered a pick.
+        let mut boxed = live.clone();
+        let RowKind::Session { session, .. } = &mut boxed.kind else { panic!() };
+        session.container = Some(ContainerPlace { host_folder: Some("/tmp/a".into()), path: "/workspaces/a".into() });
+        assert!(submenu_labels(&row_menu(&boxed, ALONE, &two_dirs(None)).unwrap()).is_empty());
+        let place = ContainerPlace { host_folder: Some("/tmp/a".into()), path: "/workspaces/a".into() };
+        assert!(submenu_labels(&project_menu(Path::new("/r/app"), Some(&place), &two_dirs(None))).is_empty());
+        // A shell pane has no Claude to pick for.
+        assert!(submenu_labels(&row_menu(&pane_row(false, false), ALONE, &two_dirs(None)).unwrap()).is_empty());
+        assert_eq!(submenu_labels(&row_menu(&pane_row(true, false), ALONE, &two_dirs(None)).unwrap()).len(), 2);
+    }
+
+    #[test]
+    fn the_submenu_marks_the_default_and_the_remembered_dir() {
+        let items = project_menu(Path::new("/r/app"), None, &two_dirs(Some(1)));
+        assert_eq!(submenu_labels(&items), ["Personal (default)", "Work ✓ this folder"]);
+        let Some(MenuItem::Submenu { items, .. }) = items.iter().find(|item| matches!(item, MenuItem::Submenu { .. })) else { panic!() };
+        let MenuItem::Entry(work) = &items[1] else { panic!() };
+        assert_eq!(work.action, MenuAction::NewClaudeWith { dir: "/r/app".into(), dir_name: "Work".into() });
+        let remembered_default = project_menu(Path::new("/r/app"), None, &two_dirs(Some(0)));
+        assert_eq!(submenu_labels(&remembered_default)[0], "Personal (default) ✓ this folder");
+    }
+
+    #[test]
+    fn a_tab_menu_offers_the_choice_after_the_splits() {
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &two_dirs(None));
+        assert_eq!(labels(&items)[..4], ["Split right", "Split down", "New Claude here with ▸", "│"]);
+    }
+
+    #[test]
+    fn a_project_menu_pins_and_unpins() {
+        let pinned = MenuContext { favorite: true, ..MenuContext::default() };
+        let items = project_menu(Path::new("/r/app"), None, &pinned);
+        assert_eq!(labels(&items)[..4], ["New Claude here", "New shell here", "Unpin", "Recent sessions here"]);
+        let MenuItem::Entry(unpin) = &items[2] else { panic!() };
+        assert_eq!(unpin.action, MenuAction::UnpinFavorite("/r/app".into()));
+        let MenuItem::Entry(pin) = &project_menu(Path::new("/r/app"), None, &MenuContext::default())[2] else { panic!() };
+        assert_eq!(pin.action, MenuAction::PinFavorite("/r/app".into()));
     }
 }

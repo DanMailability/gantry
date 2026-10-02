@@ -9,11 +9,6 @@ use protocol::message::{SessionInfo, SessionState};
 use crate::fuzzy::Fuzzy;
 use crate::session_tree::{age, display_path, keep, labels, newest_first, session_title};
 
-/// Sessions shown per project before "Show N more" (no search, all projects).
-pub const PER_PROJECT: usize = 5;
-/// Project chips shown before "More…".
-pub const CHIPS: usize = 6;
-
 /// Everything the pop-up is built from.
 pub struct RecentsInput<'a> {
     /// Claude sessions.
@@ -32,6 +27,10 @@ pub struct RecentsInput<'a> {
     pub project_of: &'a dyn Fn(&Path) -> PathBuf,
     /// Current time, ms since the Unix epoch.
     pub now_ms: u64,
+    /// Sessions shown per project before "Show N more" (no search, all projects).
+    pub per_project: usize,
+    /// Project chips shown before "More…".
+    pub chips: usize,
 }
 
 /// One row of the pop-up's list.
@@ -141,7 +140,7 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
         if matching.is_empty() {
             continue;
         }
-        let cap = if limited && !input.expanded.contains(&path) { PER_PROJECT } else { usize::MAX };
+        let cap = if limited && !input.expanded.contains(&path) { input.per_project } else { usize::MAX };
         let display = display_path(&path, input.home);
         items.push(RecentItem::Heading { label: labels[&path].clone(), display, path: path.clone() });
         for session in matching.iter().take(cap) {
@@ -154,7 +153,7 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
     items
 }
 
-/// The project chips: All, the [`CHIPS`] projects with the newest sessions (plus the picked one), then More….
+/// The project chips: All, the `input.chips` projects with the newest sessions (plus the picked one), then More….
 pub fn chips(input: &RecentsInput<'_>) -> Vec<Chip> {
     let grouped = grouped(input);
     let mut paths: Vec<PathBuf> = grouped.iter().map(|(path, _)| path.clone()).collect();
@@ -167,7 +166,7 @@ pub fn chips(input: &RecentsInput<'_>) -> Vec<Chip> {
     let count = |path: &Path| grouped.iter().find(|(p, _)| p == path).map_or(0, |(_, sessions)| sessions.len());
     let total = grouped.iter().map(|(_, sessions)| sessions.len()).sum();
     let mut chips = vec![Chip { target: ChipTarget::All, label: "All projects".into(), count: total }];
-    let mut shown: Vec<&PathBuf> = paths.iter().take(CHIPS).collect();
+    let mut shown: Vec<&PathBuf> = paths.iter().take(input.chips).collect();
     if let Some(picked) = input.project
         && !shown.iter().any(|path| path.as_path() == picked)
     {
@@ -176,7 +175,7 @@ pub fn chips(input: &RecentsInput<'_>) -> Vec<Chip> {
     for path in shown {
         chips.push(Chip { target: ChipTarget::Project(path.clone()), label: labels[path].clone(), count: count(path) });
     }
-    if grouped.len() > CHIPS {
+    if grouped.len() > input.chips {
         chips.push(Chip { target: ChipTarget::More, label: "More…".into(), count: 0 });
     }
     chips
@@ -229,13 +228,28 @@ mod tests {
         cwd.ancestors().find(|dir| dir.parent() == Some(Path::new("/r"))).unwrap_or(cwd).to_path_buf()
     }
 
-    #[derive(Default)]
     struct Fixture {
         sessions: Vec<SessionInfo>,
         open: HashSet<String>,
         query: String,
         project: Option<PathBuf>,
         expanded: HashSet<PathBuf>,
+        per_project: usize,
+        chips: usize,
+    }
+
+    impl Default for Fixture {
+        fn default() -> Self {
+            Fixture {
+                sessions: Vec::new(),
+                open: HashSet::new(),
+                query: String::new(),
+                project: None,
+                expanded: HashSet::new(),
+                per_project: 5,
+                chips: 6,
+            }
+        }
     }
 
     impl Fixture {
@@ -254,6 +268,8 @@ mod tests {
                 expanded: &self.expanded,
                 project_of: &project_of,
                 now_ms: NOW,
+                per_project: self.per_project,
+                chips: self.chips,
             })
         }
 
@@ -356,5 +372,14 @@ mod tests {
         let gone = SessionInfo { cwd_exists: false, ..closed("gone", "/r/a", 1) };
         let fixture = Fixture::of(vec![gone]);
         assert_eq!(fixture.outline(), vec!["# a", "gone"]);
+    }
+
+    #[test]
+    fn sizes_come_from_the_input() {
+        let sessions: Vec<SessionInfo> = (0..4).map(|n| closed(&format!("s{n}"), "/r/a", n + 1)).chain([closed("t", "/r/b", 9)]).collect();
+        let one = Fixture { per_project: 1, ..Fixture::of(sessions.clone()) };
+        assert_eq!(one.outline(), vec!["# a", "s0", "+3", "# b", "t"]);
+        let no_chips = Fixture { chips: 0, ..Fixture::of(sessions) };
+        assert_eq!(no_chips.chip_labels(), vec!["All projects 5", "More… 0"]);
     }
 }
