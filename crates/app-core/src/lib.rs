@@ -9,6 +9,7 @@ pub mod layout_store;
 pub mod layout;
 pub mod mouse;
 pub mod palette;
+pub mod recents;
 pub mod replay;
 pub mod paste;
 pub mod scroll;

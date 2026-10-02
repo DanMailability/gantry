@@ -533,7 +533,6 @@ pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>) -> HashMap<PathBuf,
         .collect()
 }
 
-#[allow(dead_code)] // used by `recents` (Task 4)
 pub(crate) fn newest_first(a: &&SessionInfo, b: &&SessionInfo) -> std::cmp::Ordering {
     b.last_active_ms.cmp(&a.last_active_ms).then_with(|| a.id.cmp(&b.id))
 }
