@@ -696,7 +696,7 @@ impl Render for SettingsView {
             .items_start()
             .gap(theme.ui(8.))
             .px_3()
-            .child(muted(&theme, format!("Saved to {path}")).max_w_full().truncate())
+            .child(muted(&theme, format!("Saved to {path}")).max_w_full())
             .child(self.open_settings_button(0, window, cx));
         let menu = div()
             .flex_none()

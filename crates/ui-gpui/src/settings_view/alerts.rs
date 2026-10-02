@@ -31,8 +31,8 @@ impl Event {
 
     fn description(self) -> &'static str {
         match self {
-            Event::NeedsInput => "Claude asks for permission or a reply",
-            Event::Finished => "Busy, then idle",
+            Event::NeedsInput => "Claude asks for permission or a reply.",
+            Event::Finished => "Busy, then idle.",
         }
     }
 

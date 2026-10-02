@@ -368,7 +368,8 @@ impl SettingsView {
                     let remove = self.link("dir-remove", index, "Remove", true, change(move |settings| remove_dir(settings, index)), window, cx);
                     actions_slot(theme).child(make_default).child(remove)
                 };
-                row_shell(theme, div().child(name).child(path), command, trailing)
+                // One trailing width for every dir, so the command fields line up.
+                row_shell(theme, div().child(name).child(path), command, trailing.w(theme.ui(170.)).justify_end())
             })
             .collect();
 
