@@ -774,11 +774,9 @@ impl WorkspaceView {
     }
 
     /// Write the layout (atomically) and refresh the sidebar's pane entries. With "Start with one new tab" the
-    /// saved layout is left alone, so switching back restores it.
+    /// finished leaves dropped at startup are written back too, so switching back restores them.
     fn save(&self, cx: &mut Context<Self>) {
-        if cx.global::<SettingsStore>().settings().window.restore_layout
-            && let Err(err) = layout_store::save(&self.layout_file, &self.workspace)
-        {
+        if let Err(err) = layout_store::save(&self.layout_file, &self.workspace) {
             tracing::warn!("saving the layout failed: {err}");
         }
         self.sync_panes(cx);

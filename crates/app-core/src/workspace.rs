@@ -362,6 +362,10 @@ pub struct Workspace {
     /// Sidebar visibility and width.
     #[serde(default)]
     pub sidebar: SidebarState,
+    /// Finished tabs and leaves that "Start with one new tab" dropped at startup; written back into every saved copy
+    /// so that switching to "Restore tabs and panes" brings them back.
+    #[serde(skip)]
+    dropped: Vec<(Tab, Vec<(NodeId, Leaf)>)>,
     next_id: NodeId,
 }
 
@@ -408,10 +412,14 @@ impl Workspace {
         }
     }
 
-    /// A copy without the Settings tab, for saving.
+    /// A copy without the Settings tab, and with the tabs dropped at startup appended, for saving.
     pub fn saveable(&self) -> Workspace {
         let mut saved = self.clone();
         saved.close_settings();
+        for (tab, leaves) in std::mem::take(&mut saved.dropped) {
+            saved.tabs.push(tab);
+            saved.leaves.extend(leaves);
+        }
         saved
     }
 
@@ -447,6 +455,23 @@ impl Workspace {
             }
         }
         self.leaves.remove(&leaf)
+    }
+
+    /// The tabs to keep aside for `dead` leaves: a tab whose leaves are all dead whole, a dead leaf of a tab with live
+    /// ones as a tab of its own.
+    fn park(&self, dead: &[NodeId]) -> Vec<(Tab, Vec<(NodeId, Leaf)>)> {
+        let mut parked = Vec::new();
+        for tab in self.tabs.iter().filter(|tab| !tab.settings) {
+            let leaves = tab.root.leaves();
+            let (gone, kept): (Vec<NodeId>, Vec<NodeId>) = leaves.into_iter().partition(|leaf| dead.contains(leaf));
+            let pair = |id: NodeId| (id, self.leaves[&id].clone());
+            if kept.is_empty() {
+                parked.push((tab.clone(), gone.into_iter().map(pair).collect()));
+            } else {
+                parked.extend(gone.into_iter().map(|id| (Tab { root: Node::Leaf(id), focused: id, settings: false }, vec![pair(id)])));
+            }
+        }
+        parked
     }
 
     /// The visible tab.
@@ -626,8 +651,8 @@ pub struct Restored {
 /// Rebuild the workspace at startup. Leaves keep their live pane; leaves whose pane is gone (or
 /// belongs to another daemon instance) become dead; live panes missing from the layout become new
 /// tabs (most recently focused last, and active); an explicit launch opens a new focused tab; an
-/// empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped (live panes
-/// still reattach).
+/// empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped from the workspace (live panes
+/// still reattach) but kept aside for `saveable`.
 pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], launch: &Launch, restore_layout: bool) -> Restored {
     let mut workspace = saved.unwrap_or_default();
     let same_daemon = workspace.instance == instance;
@@ -640,6 +665,7 @@ pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], laun
     }
     if !restore_layout {
         let dead: Vec<NodeId> = workspace.leaves.iter().filter(|(_, leaf)| leaf.pane.is_none()).map(|(id, _)| *id).collect();
+        workspace.dropped = workspace.park(&dead);
         for leaf in dead {
             workspace.close(leaf);
         }
@@ -1316,6 +1342,36 @@ mod tests {
         assert!(restored.spawn.is_empty() && restored.workspace.is_consistent());
         let none = restore(Some(Workspace { instance: "i1".into(), ..Workspace::default() }), "i1", &[], &launch(), false);
         assert_eq!(none.spawn.len(), 1, "no tab left: one new tab");
+    }
+
+    #[test]
+    fn restore_without_layout_keeps_dead_leaves_for_saving_and_live_launches() {
+        let mut saved = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let a = saved.new_tab(PaneLaunch { claude_dir: Some("/w".into()), env: vec![("CLAUDE_CONFIG_DIR".into(), "/w".into())], ..shell("/a") });
+        saved.pane_started(a, 1, "/a".into());
+        let b = saved.split(Axis::Vertical, shell("/b")).unwrap();
+        saved.pane_started(b, 2, "/b".into());
+        let c = saved.new_tab(shell("/c"));
+        saved.pane_started(c, 3, "/c".into());
+        let d = saved.split(Axis::Vertical, shell("/d")).unwrap();
+        saved.pane_started(d, 4, "/d".into());
+        saved.sidebar.visible = false;
+        let mut restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false).workspace;
+        restored.sidebar.width = 300.0;
+        let kept = restored.saveable();
+        assert!(kept.is_consistent());
+        assert_eq!(kept.leaves.keys().copied().collect::<Vec<_>>(), vec![a, b, c, d]);
+        assert_eq!(kept.tabs.len(), 3, "the live tab, the dead leaf of the mixed tab, the dead split tab");
+        assert_eq!(kept.tabs[2].root.leaves(), vec![c, d]);
+        assert_eq!((kept.leaves[&a].launch.claude_dir.clone(), kept.leaves[&a].launch.env.len()), (Some("/w".into()), 1));
+        assert_eq!((kept.sidebar.visible, kept.sidebar.width), (false, 300.0));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("layout.json");
+        crate::layout_store::save(&file, &restored).unwrap();
+        let back = restore(crate::layout_store::load(&file).unwrap(), "i1", &[info(1, "bash", 5)], &launch(), true);
+        assert_eq!(back.workspace.leaves.len(), 4, "switching back restores the finished leaves");
+        assert!(!back.workspace.sidebar.visible);
+        assert_eq!(restored.leaves.len(), 1, "the running workspace only has the live leaf");
     }
 
     #[test]
