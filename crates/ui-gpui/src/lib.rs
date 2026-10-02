@@ -8,6 +8,7 @@ pub mod recents_view;
 pub mod sidebar_view;
 pub mod terminal_view;
 mod settings_store;
+mod settings_view;
 mod theme;
 pub mod workspace_view;
 mod window_frame;

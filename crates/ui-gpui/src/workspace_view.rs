@@ -21,7 +21,7 @@ use gpui::{
 };
 use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::menus::{self, MenuAction};
+use app_core::menus::{self, MenuAction, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
@@ -31,6 +31,7 @@ use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
 use crate::settings_store::SettingsStore;
+use crate::settings_view::SettingsView;
 use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
 use crate::window_frame;
 
@@ -53,7 +54,7 @@ mod workspace_actions {
             FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
             ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
             ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher,
-            OpenRecents
+            OpenRecents, OpenSettings
         ]
     );
 }
@@ -67,9 +68,9 @@ pub fn bind_keys(cx: &mut gpui::App) {
 fn key_bindings() -> Vec<gpui::KeyBinding> {
     use gpui::KeyBinding;
     #[cfg(target_os = "macos")]
-    let (m, prev_tab, next_tab, tab_n) = ("cmd", "cmd-shift-[", "cmd-shift-]", "cmd");
+    let (m, prev_tab, next_tab, tab_n, settings_key) = ("cmd", "cmd-shift-[", "cmd-shift-]", "cmd", "cmd-,");
     #[cfg(not(target_os = "macos"))]
-    let (m, prev_tab, next_tab, tab_n) = ("ctrl-shift", "ctrl-pageup", "ctrl-pagedown", "alt");
+    let (m, prev_tab, next_tab, tab_n, settings_key) = ("ctrl-shift", "ctrl-pageup", "ctrl-pagedown", "alt", "ctrl-,");
     let context = Some("Workspace");
     vec![
         KeyBinding::new(&format!("{m}-t"), NewClaudeTab, context),
@@ -103,6 +104,7 @@ fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new(&format!("{m}-f"), FindSession, context),
         KeyBinding::new(&format!("{m}-o"), OpenLauncher, context),
         KeyBinding::new(&format!("{m}-r"), OpenRecents, context),
+        KeyBinding::new(settings_key, OpenSettings, context),
     ]
 }
 
@@ -160,6 +162,8 @@ pub struct WorkspaceView {
     launcher: Option<(Entity<LauncherView>, Subscription)>,
     /// The open recent sessions overlay.
     recents: Option<(Entity<RecentsView>, Subscription)>,
+    /// The Settings page, while its tab is open.
+    settings: Option<Entity<SettingsView>>,
     /// The open right-click menu of a tab.
     tab_menu: Option<OpenMenu>,
     /// Take-over requests waiting for the daemon, by session.
@@ -243,6 +247,7 @@ impl WorkspaceView {
             _sidebar_events: sidebar_events,
             launcher: None,
             recents: None,
+            settings: None,
             tab_menu: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
@@ -652,6 +657,13 @@ impl WorkspaceView {
 
     /// Give keyboard focus to the workspace's focused leaf (or the empty window).
     fn focus_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.workspace.active_tab().is_some_and(|tab| tab.settings).then(|| self.settings.clone()).flatten();
+        if let Some(settings) = settings {
+            settings.focus_handle(cx).focus(window, cx);
+            self.sidebar.update(cx, |sidebar, cx| sidebar.set_focused(None, cx));
+            self.clear_seen(window, cx);
+            return;
+        }
         match self.workspace.focused().and_then(|leaf| self.slots.get(&leaf).map(|slot| (leaf, slot))) {
             Some((leaf, slot)) => {
                 slot.view.focus_handle(cx).focus(window, cx);
@@ -677,7 +689,11 @@ impl WorkspaceView {
     /// Tab `index`'s title as the tab bar and the sidebar show it: the focused pane's, without the Claude glyph
     /// while the tab has a session status.
     fn tab_title(&self, index: usize, cx: &App) -> String {
-        let title = self.workspace.tabs.get(index).and_then(|tab| self.slots.get(&tab.focused)).map_or_else(String::new, |slot| slot.view.read(cx).title());
+        let Some(tab) = self.workspace.tabs.get(index) else { return String::new() };
+        if tab.settings {
+            return "Settings".to_string();
+        }
+        let title = self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title());
         if self.workspace.tab_status(index, self.sidebar.read(cx).sessions()).is_some() { without_claude_glyph(&title).to_string() } else { title }
     }
 
@@ -705,6 +721,7 @@ impl WorkspaceView {
             .tabs
             .iter()
             .enumerate()
+            .filter(|(_, tab)| !tab.settings)
             .map(|(index, tab)| TabEntry {
                 index,
                 title: self.tab_title(index, cx),
@@ -730,9 +747,13 @@ impl WorkspaceView {
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => {
-                if let Some(tab) = self.workspace.tabs.get(index) {
-                    let leaves = tab.root.leaves();
-                    self.confirm_close(leaves, window, cx);
+                match self.workspace.tabs.get(index) {
+                    Some(tab) if tab.settings => self.close_settings(window, cx),
+                    Some(tab) => {
+                        let leaves = tab.root.leaves();
+                        self.confirm_close(leaves, window, cx);
+                    }
+                    None => {}
                 }
             }
             MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
@@ -778,11 +799,15 @@ impl WorkspaceView {
     /// Open tab `index`'s right-click menu at `position` (it acts on that tab, not the visible one).
     fn open_tab_menu(&mut self, index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.workspace.tabs.get(index) else { return };
-        let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
-        let sessions = self.sidebar.read(cx).sessions();
-        let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
-        let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
-        let items = menus::tab_menu(index, &leaf.launch.cwd, vscode);
+        let items = if tab.settings {
+            vec![MenuItem::Entry(MenuEntry { label: "Close tab", shortcut: Some(Shortcut::Close), accent: false, action: MenuAction::CloseTab(index) })]
+        } else {
+            let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
+            let sessions = self.sidebar.read(cx).sessions();
+            let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
+            let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
+            menus::tab_menu(index, &leaf.launch.cwd, vscode)
+        };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         self.tab_menu = Some(OpenMenu { items, position, focus });
@@ -983,7 +1008,9 @@ impl WorkspaceView {
     fn split_down_claude(&mut self, _: &SplitDownClaude, _: &mut Window, _: &mut Context<Self>) { self.open(true, Some(Axis::Vertical)) }
     fn split_down_shell(&mut self, _: &SplitDownShell, _: &mut Window, _: &mut Context<Self>) { self.open(false, Some(Axis::Vertical)) }
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(leaf) = self.workspace.focused() {
+        if self.workspace.active_tab().is_some_and(|tab| tab.settings) {
+            self.close_settings(window, cx);
+        } else if let Some(leaf) = self.workspace.focused() {
             self.confirm_close(vec![leaf], window, cx);
         }
     }
@@ -1054,6 +1081,25 @@ impl WorkspaceView {
         self.select_tab(8, window, cx)
     }
 
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.open_settings();
+        if self.settings.is_none() {
+            self.settings = Some(cx.new(|cx| SettingsView::new(window, cx)));
+        }
+        self.focus_current(window, cx);
+        self.save(cx);
+        cx.notify();
+    }
+
+    /// Close the Settings tab and drop its page; no confirmation, it runs nothing.
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.close_settings();
+        self.settings = None;
+        self.focus_current(window, cx);
+        self.save(cx);
+        cx.notify();
+    }
+
     /// Close `leaves`, asking first if any still runs a process.
     fn confirm_close(&mut self, leaves: Vec<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
         let running = self.running_panes(&leaves, cx);
@@ -1116,7 +1162,7 @@ impl WorkspaceView {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let theme = theme(cx).clone();
         let sessions = self.sidebar.read(cx).sessions();
-        let tabs: Vec<(String, Option<SessionStatus>, bool, bool)> = self
+        let tabs: Vec<(String, Option<SessionStatus>, bool, bool, bool)> = self
             .workspace
             .tabs
             .iter()
@@ -1126,7 +1172,7 @@ impl WorkspaceView {
                 let status = self.workspace.tab_status(index, sessions).cloned();
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
                 let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
-                (title, status, unseen, container)
+                (title, status, unseen, container, tab.settings)
             })
             .collect();
         let sidebar = &self.workspace.sidebar;
@@ -1161,14 +1207,14 @@ impl WorkspaceView {
                     bar.pl_2()
                 }
             })
-            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container))| {
+            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, settings))| {
                 let dragged = DraggedTab { index, title: title.clone() };
                 let line = theme.tokens.line;
                 let active = index == self.workspace.active;
                 // Claude tabs are filled with what their most urgent session needs; shells stay plain.
                 let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
-                let ink = colors.map_or(if active { theme.tokens.text } else { theme.tokens.muted }, |colors| colors.ink);
-                let fill = colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised));
+                let ink = colors.map_or(if active || settings { theme.tokens.text } else { theme.tokens.muted }, |colors| colors.ink);
+                let fill = colors.and_then(|colors| colors.fill).or((active || settings).then_some(theme.tokens.raised));
                 div()
                     .id(("tab", index))
                     .h(theme.ui(32.))
@@ -1190,6 +1236,7 @@ impl WorkspaceView {
                     .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(theme.tokens.raised))))
                     .cursor_pointer()
                     .when_some(colors, |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
+                    .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
                     .child(div().min_w_0().truncate().child(title))
                     .when(container, |tab| tab.child(container_chip(ink)))
                     .when(unseen, |tab| tab.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(ink))))
@@ -1209,8 +1256,14 @@ impl WorkspaceView {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                let leaves = this.workspace.tabs.get(index).map(|tab| tab.root.leaves()).unwrap_or_default();
-                                this.confirm_close(leaves, window, cx);
+                                match this.workspace.tabs.get(index) {
+                                    Some(tab) if tab.settings => this.close_settings(window, cx),
+                                    Some(tab) => {
+                                        let leaves = tab.root.leaves();
+                                        this.confirm_close(leaves, window, cx);
+                                    }
+                                    None => {}
+                                }
                             })),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
@@ -1228,6 +1281,7 @@ impl WorkspaceView {
                     )
             }))
             .child(round_button("new-claude", "+", &theme, cx.listener(|this, _, _, _| this.open(true, None))))
+            .child(round_button("open-settings", "⚙", &theme, cx.listener(|this, _, window, cx| this.open_settings(&OpenSettings, window, cx))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
             .when(client_decorations, |bar| {
                 bar.child(
@@ -1292,6 +1346,12 @@ impl WorkspaceView {
                 )
                 .into_any_element();
         };
+        if tab.settings {
+            return match self.settings.clone() {
+                Some(page) => div().id("tab-content").flex_1().min_h_0().w_full().child(page).into_any_element(),
+                None => div().flex_1().into_any_element(),
+            };
+        }
         let multiple = tab.root.leaves().len() > 1;
         div()
             .id("tab-content")
@@ -1515,6 +1575,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::find_session))
             .on_action(cx.listener(Self::open_launcher))
             .on_action(cx.listener(Self::open_recents))
+            .on_action(cx.listener(Self::open_settings))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if std::mem::take(&mut this.resizing_sidebar) {
@@ -1627,6 +1688,7 @@ mod tests {
             ("ctrl-shift-f", "workspace::FindSession"),
             ("ctrl-shift-o", "workspace::OpenLauncher"),
             ("ctrl-shift-r", "workspace::OpenRecents"),
+            ("ctrl-,", "workspace::OpenSettings"),
         ] {
             assert_eq!(action_for(keys), Some(action), "{keys}");
         }

@@ -77,7 +77,6 @@ impl SettingsStore {
     }
 
     /// Where the settings are stored.
-    #[allow(dead_code)] // read by the Settings tab
     pub fn path(&self) -> &Path {
         &self.path
     }
