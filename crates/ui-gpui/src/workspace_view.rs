@@ -147,6 +147,8 @@ type TabView = (String, Option<SessionStatus>, bool, bool, Option<String>, bool,
 /// Root view of the Gantry window.
 pub struct WorkspaceView {
     workspace: Workspace,
+    /// The tab a middle-button press started on, until the button is released.
+    middle_pressed: Option<usize>,
     slots: HashMap<NodeId, Slot>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
@@ -266,6 +268,7 @@ impl WorkspaceView {
             recents: None,
             settings: None,
             tab_menu: None,
+            middle_pressed: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -1409,10 +1412,15 @@ impl WorkspaceView {
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
                     .when(can_drag, |tab| tab.on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone())))
                     // A middle click closes the tab, like ×; it must not start a drag or select the tab.
-                    .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
+                        this.middle_pressed = Some(index);
+                        cx.stop_propagation();
+                    }))
                     .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.close_tab_at(index, window, cx);
+                        if this.middle_pressed.take() == Some(index) {
+                            this.close_tab_at(index, window, cx);
+                        }
                     }))
                     .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(line)))
                     .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
@@ -1724,7 +1732,15 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::open_launcher))
             .on_action(cx.listener(Self::open_recents))
             .on_action(cx.listener(Self::open_settings))
+            // Esc cancels a drag, and no pane or the sidebar sees it.
+            .capture_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && cx.has_active_drag() {
+                    cx.stop_active_drag(window);
+                    cx.stop_propagation();
+                }
+            }))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
+            .on_mouse_up(MouseButton::Middle, cx.listener(|this, _, _, _| this.middle_pressed = None))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if std::mem::take(&mut this.resizing_sidebar) {
                     this.save(cx);

@@ -90,25 +90,37 @@ pub(crate) fn render(
             let open = open_sub == Some(index);
             let children = open.then(|| {
                 // Colour swatches are drawn together as a 4-column grid, the other entries below it.
-                let swatches = items.iter().enumerate().filter_map(|(position, item)| match item {
-                    MenuItem::Entry(MenuEntry { swatch: Some(color), checked, action, .. }) => {
-                        let (action, on_pick) = (action.clone(), on_pick.clone());
-                        Some(
-                            div()
-                                .id(("menu-swatch", index * 100 + position))
-                                .flex_none()
-                                .size(theme.ui(36.))
-                                .rounded(px(RADIUS_SMALL))
-                                .bg(rgb(color.value(theme.preset)))
-                                .border_2()
-                                .border_color(if *checked { rgb(theme.tokens.text) } else { rgba(0) })
-                                .cursor_pointer()
-                                .on_click(move |_, window, cx| on_pick(&action, window, cx)),
-                        )
+                let swatches: Vec<_> = items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, item)| match item {
+                        MenuItem::Entry(MenuEntry { swatch: Some(color), checked, action, .. }) => {
+                            let (action, on_pick) = (action.clone(), on_pick.clone());
+                            Some(
+                                div()
+                                    .id(("menu-swatch", index * 100 + position))
+                                    .flex_none()
+                                    .size(theme.ui(36.))
+                                    .rounded(px(RADIUS_SMALL))
+                                    .bg(rgb(color.value(theme.preset)))
+                                    .border_2()
+                                    .border_color(if *checked { rgb(theme.tokens.text) } else { rgba(0) })
+                                    .cursor_pointer()
+                                    .on_click(move |_, window, cx| on_pick(&action, window, cx)),
+                            )
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut swatches = swatches.into_iter();
+                let mut grid = div().flex().flex_col().gap(theme.ui(6.)).p(theme.ui(6.));
+                loop {
+                    let row: Vec<_> = swatches.by_ref().take(4).collect();
+                    if row.is_empty() {
+                        break;
                     }
-                    _ => None,
-                });
-                let grid = div().flex().flex_row().flex_wrap().gap(theme.ui(6.)).p(theme.ui(6.)).w(theme.ui(4. * 36. + 3. * 6. + 12.)).children(swatches);
+                    grid = grid.child(div().flex().flex_row().gap(theme.ui(6.)).children(row));
+                }
                 let has_swatches = items.iter().any(|item| matches!(item, MenuItem::Entry(MenuEntry { swatch: Some(_), .. })));
                 let entries = items.iter().enumerate().filter_map(|(position, item)| match item {
                     MenuItem::Entry(entry) if entry.swatch.is_none() => Some(entry_row(("menu-sub-item", index * 100 + position), entry, None)),

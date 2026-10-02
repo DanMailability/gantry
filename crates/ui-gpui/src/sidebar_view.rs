@@ -367,8 +367,8 @@ impl SidebarView {
             .px(theme.ui(6.))
             .flex()
             .flex_col()
-            .when(edges.first, |row| row.pt(theme.ui(4.)))
-            .when(edges.last, |row| row.pb(theme.ui(4.)))
+            // The whole gap between groups is in the heading row, which has no fill.
+            .when(edges.first, |row| row.pt(theme.ui(8.)))
             .child(group)
             .when(target.is_some(), |row| {
                 row.child(marker.group_drag_over::<DraggedProject>(group_name, |style| style.bg(rgb(theme.tokens.accent))))
