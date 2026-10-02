@@ -17,8 +17,11 @@ pub enum IndexState {
         /// That process.
         pid: u32,
     },
-    /// Its pid file is from another pid namespace (a container); presumed running.
-    InContainer,
+    /// A process in another pid namespace (a container) runs it.
+    InContainer {
+        /// Its pid on this host; `None` where processes cannot be checked (then its pid file is the only sign).
+        pid: Option<u32>,
+    },
     /// Nothing runs it.
     Closed,
 }
@@ -44,6 +47,8 @@ pub struct SessionRecord {
     pub activity_since_ms: u64,
     /// Start time of the process running it (from its pid file), for verifying that process later.
     pub proc_start: Option<String>,
+    /// Docker container its process runs in (from the process's cgroup).
+    pub container_id: Option<String>,
 }
 
 struct Cached {
@@ -90,6 +95,7 @@ impl<H: Host> Index<H> {
                 activity: None,
                 activity_since_ms: 0,
                 proc_start: None,
+                container_id: None,
             };
             // The same id in two folders: keep the newer.
             if records.get(&record.id).is_none_or(|old| old.last_active_ms < record.last_active_ms) {
@@ -98,10 +104,7 @@ impl<H: Host> Index<H> {
         }
         self.cache.retain(|path, _| seen.contains(path));
         for live in live::read_all(&self.config.join("sessions")) {
-            let state = match liveness(&live, &self.host) {
-                Some(state) => state,
-                None => continue,
-            };
+            let Some((state, container_id)) = liveness(&live, &self.host) else { continue };
             let record = records.entry(live.session_id.clone()).or_insert_with(|| SessionRecord {
                 id: live.session_id.clone(),
                 cwd: live.cwd.clone(),
@@ -112,6 +115,7 @@ impl<H: Host> Index<H> {
                 activity: None,
                 activity_since_ms: 0,
                 proc_start: None,
+                container_id: None,
             });
             // A host process beats a container entry for the same session.
             if !matches!(record.state, IndexState::Running { .. }) {
@@ -119,6 +123,7 @@ impl<H: Host> Index<H> {
                 record.activity = live.activity;
                 record.activity_since_ms = live.activity_since_ms.unwrap_or(0);
                 record.proc_start = live.proc_start;
+                record.container_id = container_id;
             }
         }
         let mut exists: HashMap<PathBuf, bool> = HashMap::new();
@@ -135,18 +140,23 @@ impl<H: Host> Index<H> {
     }
 }
 
-/// The state a pid file proves, or `None` if its process is gone. A pid from another pid namespace
-/// cannot be checked here; Claude removes its pid file on exit, so it counts as running.
-fn liveness(record: &LiveRecord, host: &impl Host) -> Option<IndexState> {
+/// The state a pid file proves (and the container its process runs in), or `None` if its process is gone. A pid
+/// from another pid namespace is looked up on the host by namespace, pid and start time; where that cannot be
+/// checked it counts as running (Claude removes its pid file on exit).
+fn liveness(record: &LiveRecord, host: &impl Host) -> Option<(IndexState, Option<String>)> {
     if let (Some(theirs), Some(ours)) = (&record.pid_domain, host.pid_domain())
         && *theirs != ours
     {
-        return Some(IndexState::InContainer);
+        return match host.namespaced(theirs, record.pid, record.proc_start.as_deref()) {
+            None => Some((IndexState::InContainer { pid: None }, None)),
+            Some(None) => None,
+            Some(Some(found)) => Some((IndexState::InContainer { pid: Some(found.host_pid) }, found.container)),
+        };
     }
     match host.is_running(record.pid, record.proc_start.as_deref()) {
         Some(false) => None,
         // Running, or this host cannot tell.
-        _ => Some(IndexState::Running { pid: record.pid }),
+        _ => Some((IndexState::Running { pid: record.pid }, None)),
     }
 }
 
@@ -173,6 +183,7 @@ fn millis(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::Namespaced;
     use crate::live::Activity;
     use std::time::Duration;
 
@@ -182,6 +193,9 @@ mod tests {
         running: HashMap<u32, String>,
         domain: Option<String>,
         missing: HashSet<PathBuf>,
+        /// Container pid → its host process.
+        namespaced: HashMap<u32, Namespaced>,
+        cannot_check_namespaces: bool,
     }
 
     impl Host for FakeHost {
@@ -193,6 +207,9 @@ mod tests {
         }
         fn dir_exists(&self, path: &Path) -> bool {
             !self.missing.contains(path)
+        }
+        fn namespaced(&self, _domain: &str, pid: u32, _start: Option<&str>) -> Option<Option<Namespaced>> {
+            if self.cannot_check_namespaces { None } else { Some(self.namespaced.get(&pid).cloned()) }
         }
     }
 
@@ -282,12 +299,29 @@ mod tests {
     }
 
     #[test]
-    fn a_pid_file_from_another_namespace_is_in_a_container() {
+    fn a_container_pid_file_is_running_only_while_its_host_process_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        pid_file(dir.path(), 7, "alive", "/workspaces/x", "5", Some("linux::pid:[4026533220]"));
+        pid_file(dir.path(), 8, "stale", "/workspaces/x", "6", Some("linux::pid:[4026533223]"));
+        let host = FakeHost {
+            domain: Some("linux:abc:pid:[4026531836]".into()),
+            namespaced: HashMap::from([(7, Namespaced { host_pid: 9007, container: Some("4a31e6".into()) })]),
+            ..FakeHost::default()
+        };
+        let records = Index::new(dir.path().into(), host).scan();
+        assert_eq!(ids(&records), vec!["alive"]);
+        assert_eq!(
+            (records[0].state, records[0].container_id.as_deref()),
+            (IndexState::InContainer { pid: Some(9007) }, Some("4a31e6"))
+        );
+    }
+
+    #[test]
+    fn a_container_pid_file_counts_as_running_where_processes_cannot_be_checked() {
         let dir = tempfile::tempdir().unwrap();
         pid_file(dir.path(), 7, "box", "/workspaces/x", "5", Some("linux::pid:[4026533220]"));
-        let host = FakeHost { domain: Some("linux:abc:pid:[4026531836]".into()), ..FakeHost::default() };
-        let records = Index::new(dir.path().into(), host).scan();
-        assert_eq!((ids(&records), records[0].state), (vec!["box"], IndexState::InContainer));
+        let host = FakeHost { domain: Some("linux:abc:pid:[4026531836]".into()), cannot_check_namespaces: true, ..FakeHost::default() };
+        assert_eq!(Index::new(dir.path().into(), host).scan()[0].state, IndexState::InContainer { pid: None });
     }
 
     #[test]

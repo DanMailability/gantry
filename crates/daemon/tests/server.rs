@@ -22,7 +22,7 @@ async fn start_server(idle_timeout: Duration) -> Harness {
     let paths = Paths::in_dir(dir.path(), "test");
     std::fs::create_dir_all(&paths.runtime_dir).unwrap();
     let listener = ListenerOptions::new().name(paths.socket_name().unwrap()).create_tokio().unwrap();
-    let options = ServerOptions { base_env: std::env::vars().collect(), owner_uid: None, idle_timeout, claude_dir: None };
+    let options = ServerOptions { base_env: std::env::vars().collect(), owner_uid: None, idle_timeout, claude_dir: None, containers_file: None, docker: None };
     let server = tokio::spawn(serve(listener, options));
     Harness { paths, server, _dir: dir }
 }
@@ -104,6 +104,7 @@ fn sh(script: &str, cwd_from: Option<PaneId>) -> SpawnRequest {
         cols: 80,
         rows: 24,
         cwd_from,
+        container: None,
     }
 }
 
@@ -305,4 +306,29 @@ async fn spawn_from_an_unknown_pane_falls_back_to_cwd() {
     let mut c = TestClient::connect(&h.paths).await;
     let (_, cwd) = c.spawn_request(sh("sleep 5", Some(999))).await;
     assert_eq!(cwd, std::env::temp_dir());
+}
+
+#[tokio::test]
+async fn without_docker_container_launches_fail_and_lookups_find_nothing() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let spec = SpawnRequest { container: Some("/home/u/app".into()), ..sh("true", None) };
+    c.send(&ClientMessage::Spawn { request: 7, spec }).await;
+    loop {
+        match c.control().await {
+            DaemonMessage::SpawnFailed { request: 7, error } => {
+                assert!(error.contains("Docker"), "{error}");
+                break;
+            }
+            DaemonMessage::Spawned { .. } => panic!("spawned without Docker"),
+            _ => {}
+        }
+    }
+    c.send(&ClientMessage::FindContainer { request: 8, dir: "/home/u/app".into() }).await;
+    loop {
+        if let DaemonMessage::ContainerFound { request, container } = c.control().await {
+            assert_eq!((request, container), (8, None));
+            break;
+        }
+    }
 }

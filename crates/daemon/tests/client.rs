@@ -9,13 +9,13 @@ use daemon::paths::Paths;
 use protocol::message::SpawnRequest;
 
 fn sh(script: &str) -> SpawnRequest {
-    SpawnRequest { program: "sh".into(), args: vec!["-c".into(), script.into()], cwd: std::env::temp_dir(), cols: 80, rows: 24, cwd_from: None }
+    SpawnRequest { program: "sh".into(), args: vec!["-c".into(), script.into()], cwd: std::env::temp_dir(), cols: 80, rows: 24, cwd_from: None, container: None }
 }
 
 fn daemon_spawner(paths: Paths) -> impl FnOnce() -> std::io::Result<()> + Send + 'static {
     move || {
         let claude_dir = Some(paths.runtime_dir.with_file_name("claude"));
-        let options = DaemonOptions { paths, base_env: Some(std::env::vars().collect()), idle_timeout: Duration::from_secs(5), claude_dir };
+        let options = DaemonOptions { paths, base_env: Some(std::env::vars().collect()), idle_timeout: Duration::from_secs(5), claude_dir, docker: None };
         std::thread::spawn(move || run_daemon(options));
         Ok(())
     }

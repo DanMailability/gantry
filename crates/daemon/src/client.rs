@@ -3,12 +3,12 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use protocol::message::{ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome};
+use protocol::message::{ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome};
 use tokio::sync::mpsc;
 
 use crate::launch::{connect_or_spawn, connect_trusted};
@@ -77,6 +77,13 @@ pub enum ClientEvent {
         session: String,
         /// What happened.
         outcome: TakeOverOutcome,
+    },
+    /// The answer to `find_container`.
+    ContainerFound {
+        /// Echoed request id.
+        request: u64,
+        /// The dev container that mounts the directory, if any.
+        container: Option<ContainerChoice>,
     },
     /// Another GUI took over the daemon.
     TakenOver,
@@ -173,6 +180,11 @@ impl DaemonClient {
         self.send(&ClientMessage::TakeOver { session: session.into(), force });
     }
 
+    /// Ask which dev container (if any) mounts `dir`; answered by `ContainerFound` with the same `request`.
+    pub fn find_container(&self, request: u64, dir: &Path) {
+        self.send(&ClientMessage::FindContainer { request, dir: dir.into() });
+    }
+
     /// Send keyboard/paste input to a pane.
     pub fn input(&self, pane: PaneId, bytes: &[u8]) {
         let _ = self.outgoing.send(Outgoing::Frame(Frame::Data { pane, bytes: bytes.to_vec() }));
@@ -251,6 +263,7 @@ async fn run_connection(
                 Some(Ok(DaemonMessage::Sessions { sessions })) => ClientEvent::Sessions { sessions },
                 Some(Ok(DaemonMessage::SessionsChanged { upserted, removed })) => ClientEvent::SessionsChanged { upserted, removed },
                 Some(Ok(DaemonMessage::TakeOverResult { session, outcome })) => ClientEvent::TakeOverResult { session, outcome },
+                Some(Ok(DaemonMessage::ContainerFound { request, container })) => ClientEvent::ContainerFound { request, container },
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");

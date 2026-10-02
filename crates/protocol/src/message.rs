@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -29,6 +29,9 @@ pub struct SpawnRequest {
     /// Start in this live pane's current directory instead of `cwd`, when the daemon can tell.
     #[serde(default)]
     pub cwd_from: Option<PaneId>,
+    /// Run it in the dev container serving this host folder (`None` = on this machine).
+    #[serde(default)]
+    pub container: Option<PathBuf>,
 }
 
 /// A live pane as listed by the daemon.
@@ -44,6 +47,29 @@ pub struct PaneInfo {
     pub cwd: PathBuf,
     /// Focus sequence number; higher = focused more recently (0 = never).
     pub last_focused: u64,
+    /// Host folder of the dev container it runs in (`None` = this machine).
+    #[serde(default)]
+    pub container: Option<PathBuf>,
+}
+
+/// Where a container session runs (ran).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerPlace {
+    /// The dev container's host folder (its key for launching); `None` when Gantry never saw that container.
+    pub host_folder: Option<PathBuf>,
+    /// Its directory inside the container.
+    pub path: PathBuf,
+}
+
+/// A dev container that can run sessions for a folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerChoice {
+    /// The host folder it serves (its key for launching).
+    pub host_folder: PathBuf,
+    /// Container name.
+    pub name: String,
+    /// Whether it runs (a stopped one is started on launch).
+    pub running: bool,
 }
 
 /// Where a Claude session runs.
@@ -113,6 +139,9 @@ pub struct SessionInfo {
     pub status: Option<SessionStatus>,
     /// When `status` was last written, ms since the Unix epoch (0 = unknown).
     pub status_since_ms: u64,
+    /// Where it runs (ran) when it is a dev container session; `cwd` is then its directory on this host when known.
+    #[serde(default)]
+    pub container: Option<ContainerPlace>,
 }
 
 /// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`, when
@@ -176,6 +205,13 @@ pub enum ClientMessage {
         session: String,
         /// Kill immediately instead of asking it to stop.
         force: bool,
+    },
+    /// Which dev container (if any) mounts `dir`; answered by `ContainerFound`.
+    FindContainer {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// Directory a new session would start in.
+        dir: PathBuf,
     },
     /// Terminate every pane and stop the daemon (frozen).
     StopAll,
@@ -253,6 +289,13 @@ pub enum DaemonMessage {
         /// What happened.
         outcome: TakeOverOutcome,
     },
+    /// The answer to `FindContainer`.
+    ContainerFound {
+        /// Echoed request id.
+        request: u64,
+        /// The container that mounts the directory, if any.
+        container: Option<ContainerChoice>,
+    },
     /// Another GUI connected; this connection is closed next.
     TakenOver,
     /// A request could not be handled.
@@ -276,7 +319,7 @@ mod tests {
     fn messages_round_trip() {
         let msg = ClientMessage::Spawn {
             request: 3,
-            spec: SpawnRequest { program: "claude".into(), args: vec!["--resume".into()], cwd: "/tmp".into(), cols: 80, rows: 24, cwd_from: Some(4) },
+            spec: SpawnRequest { program: "claude".into(), args: vec!["--resume".into()], cwd: "/tmp".into(), cols: 80, rows: 24, cwd_from: Some(4), container: None },
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
@@ -307,6 +350,7 @@ mod tests {
             cwd_exists: true,
             status: Some(SessionStatus::NeedsInput { reason: Some("dialog open".into()) }),
             status_since_ms: 1_790_840_985_000,
+            container: None,
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains(r#""state":{"kind":"managed","pane":3}"#), "{json}");
@@ -343,5 +387,13 @@ mod tests {
         assert_eq!(claude_session("claude", &args(&["--continue"])), None);
         assert_eq!(claude_session("sh", &args(&["--session-id", "abc"])), None);
         assert_eq!(claude_session("claude", &args(&["--resume"])), None);
+    }
+
+    #[test]
+    fn messages_from_before_containers_still_parse() {
+        let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
+        assert_eq!(serde_json::from_str::<SpawnRequest>(spawn).unwrap().container, None);
+        let info = r#"{"id":"s","cwd":"/","title":"","last_active_ms":0,"state":{"kind":"closed"},"cwd_exists":true,"status":null,"status_since_ms":0}"#;
+        assert_eq!(serde_json::from_str::<SessionInfo>(info).unwrap().container, None);
     }
 }

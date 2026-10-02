@@ -108,6 +108,7 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
+            container: None,
         }
     }
 
@@ -122,6 +123,7 @@ mod tests {
             activity: None,
             activity_since_ms: 0,
             proc_start: start.map(Into::into),
+            container_id: None,
         }
     }
 

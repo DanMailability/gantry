@@ -21,6 +21,7 @@ use gpui::{
 use protocol::message::SessionInfo;
 
 use crate::field;
+use crate::theme;
 use crate::theme::{
     ACCENT, GROUND, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_SMALL, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
 };
@@ -371,6 +372,7 @@ impl SidebarView {
                             title.font_weight(FontWeight::SEMIBOLD)
                         }))
                         .when(unseen, |pill| pill.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.ink))))
+                        .when(session.container.is_some(), |pill| pill.child(theme::container_chip(colors.ink)))
                         .child(note(row_note(*tone, age, project.as_deref(), session.cwd_exists), colors.ink)),
                 )
             }

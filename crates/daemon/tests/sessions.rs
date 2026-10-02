@@ -31,6 +31,7 @@ fn start(prepare: impl FnOnce(&Path, &Path)) -> Setup {
             base_env: Some(std::env::vars().collect()),
             idle_timeout: Duration::from_secs(5),
             claude_dir: Some(claude_dir),
+            docker: None,
         };
         std::thread::spawn(move || run_daemon(options));
         Ok(())
@@ -75,6 +76,7 @@ fn spawn(conn: &Connection, program: &str, args: &[&str], cwd: &Path, needle: &s
         cols: 80,
         rows: 24,
         cwd_from: None,
+        container: None,
     };
     conn.client.spawn(1, spec);
     let deadline = Instant::now() + Duration::from_secs(10);

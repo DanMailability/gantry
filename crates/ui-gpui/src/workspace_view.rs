@@ -11,12 +11,13 @@ use app_core::layout_store;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
+use daemon::containers::GONE as CONTAINER_GONE;
 use daemon::pty::default_shell;
 use gpui::{
     Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
     PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
-use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
+use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
 use app_core::session_tree::{Activation, ShellEntry, Tone, display_path, session_title, status_tone};
 
@@ -26,7 +27,7 @@ use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
 use crate::theme::{
     ACCENT, GROUND, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_LARGE, RADIUS_SMALL, RAISED, SURFACE, TERMINAL, TEXT, UI_FONT,
-    tone_colors,
+    container_chip, tone_colors,
 };
 use crate::window_frame;
 
@@ -110,9 +111,19 @@ enum TakeOverTarget {
         cwd: PathBuf,
         /// As a split.
         split: bool,
+        /// Host folder of the dev container it ran in.
+        container: Option<PathBuf>,
     },
     /// The finished leaf that last ran it (Continue).
     Leaf(NodeId),
+}
+
+/// A new session waiting to learn whether a dev container mounts its directory.
+struct PendingOpen {
+    claude: bool,
+    cwd: PathBuf,
+    axis: Option<Axis>,
+    cwd_from: Option<PaneId>,
 }
 
 /// Root view of the Gantry window.
@@ -141,6 +152,8 @@ pub struct WorkspaceView {
     launcher: Option<(Entity<LauncherView>, Subscription)>,
     /// Take-over requests waiting for the daemon, by session.
     take_overs: HashMap<String, TakeOverTarget>,
+    /// New sessions waiting for `ContainerFound`, by request id.
+    pending_opens: HashMap<u64, PendingOpen>,
     /// Status changes seen so far, to tell which ones alert.
     attention: AttentionTracker,
     /// Leaves with an alert the user has not seen yet.
@@ -207,6 +220,7 @@ impl WorkspaceView {
             _sidebar_events: sidebar_events,
             launcher: None,
             take_overs: HashMap::new(),
+            pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
             _activation: activation,
@@ -300,6 +314,7 @@ impl WorkspaceView {
                     }
                 }
                 ClientEvent::TakeOverResult { session, outcome } => self.on_take_over(session.clone(), outcome.clone(), window, cx),
+                ClientEvent::ContainerFound { request, container } => self.on_container_found(*request, container.clone(), window, cx),
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
                     for slot in self.slots.values() {
@@ -425,9 +440,9 @@ impl WorkspaceView {
     fn on_take_over(&mut self, session: String, outcome: TakeOverOutcome, window: &mut Window, cx: &mut Context<Self>) {
         match outcome {
             TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
-                Some(TakeOverTarget::NewPane { cwd, split }) => {
+                Some(TakeOverTarget::NewPane { cwd, split, container }) => {
                     let axis = split.then_some(Axis::Horizontal);
-                    self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
+                    self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
                     if let Some(launch) = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun(true)) {
@@ -485,11 +500,57 @@ impl WorkspaceView {
 
     /// Open a new Claude or shell pane — as a new tab, or splitting the focused pane along `axis` —
     /// in the focused pane's current directory.
-    fn open(&mut self, claude: bool, axis: Option<Axis>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open(&mut self, claude: bool, axis: Option<Axis>) {
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.pane);
-        self.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx);
+        self.open_new(claude, cwd, axis, cwd_from);
+    }
+
+    /// Start a new Claude or shell pane in `cwd` — after asking where, when a dev container mounts `cwd`.
+    fn open_new(&mut self, claude: bool, cwd: PathBuf, axis: Option<Axis>, cwd_from: Option<PaneId>) {
+        self.next_request += 1;
+        self.client.find_container(self.next_request, &cwd);
+        self.pending_opens.insert(self.next_request, PendingOpen { claude, cwd, axis, cwd_from });
+    }
+
+    /// The daemon said which dev container (if any) mounts a waiting session's directory: open it locally, or ask.
+    fn on_container_found(&mut self, request: u64, container: Option<ContainerChoice>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(PendingOpen { claude, cwd, axis, cwd_from }) = self.pending_opens.remove(&request) else { return };
+        let Some(container) = container else {
+            self.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx);
+            return;
+        };
+        let folder = &container.host_folder;
+        let project = folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
+        let state = if container.running { "running" } else { "stopped, starts on open" };
+        let detail = format!("{} · {state}", container.name);
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &format!("Open {project} in"),
+            Some(&detail),
+            &["Dev container", "This machine", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update_in(cx, |this, window, cx| match answer {
+                // Splits of a container pane start in the session's directory, not the docker client's.
+                Ok(0) => this.open_launch(new_launch(claude, cwd).in_container(Some(container.host_folder)), axis, None, window, cx),
+                Ok(1) => this.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx),
+                _ => this.focus_current(window, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Say why a container session cannot be opened.
+    fn container_gone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = window.prompt(PromptLevel::Info, "Cannot open this session", Some(CONTAINER_GONE), &["OK"], cx);
+        cx.spawn(async move |_, _| {
+            let _ = answer.await;
+        })
+        .detach();
     }
 
     /// Start `launch` in a new tab, or splitting the focused pane along `axis`.
@@ -596,20 +657,31 @@ impl WorkspaceView {
                     }
                     None => {
                         let axis = split.then_some(Axis::Horizontal);
-                        self.open_launch(PaneLaunch::resume(&session, cwd), axis, None, window, cx);
+                        let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
+                        match place {
+                            Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
+                            place => {
+                                let container = place.and_then(|place| place.host_folder);
+                                self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
+                            }
+                        }
                     }
                 },
                 Activation::TakeOver { session, cwd } => {
                     let target = match self.workspace.leaf_for_session(&session) {
                         Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
-                        _ => TakeOverTarget::NewPane { cwd, split },
+                        _ => {
+                            let sessions = self.sidebar.read(cx).sessions();
+                            let container = sessions.get(&session).and_then(|info| info.container.clone()).and_then(|place| place.host_folder);
+                            TakeOverTarget::NewPane { cwd, split, container }
+                        }
                     };
                     self.confirm_take_over(session, target, window, cx);
                 }
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
-            SidebarEvent::NewHere { dir, claude } => self.open_launch(new_launch(claude, dir), None, None, window, cx),
-            SidebarEvent::New { claude } => self.open(claude, None, window, cx),
+            SidebarEvent::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
+            SidebarEvent::New { claude } => self.open(claude, None),
             SidebarEvent::ViewChanged(view) => {
                 self.workspace.sidebar.view = view;
                 self.save(cx);
@@ -663,7 +735,7 @@ impl WorkspaceView {
     fn on_launcher_event(&mut self, event: LauncherEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.launcher = None;
         match event {
-            LauncherEvent::Open { dir, claude } => self.open_launch(new_launch(claude, dir), None, None, window, cx),
+            LauncherEvent::Open { dir, claude } => self.open_new(claude, dir, None, None),
             LauncherEvent::Browse { claude } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
                 cx.spawn_in(window, async move |this, cx| {
@@ -672,7 +744,7 @@ impl WorkspaceView {
                         _ => None,
                     };
                     let _ = this.update_in(cx, |this, window, cx| match dir {
-                        Some(dir) => this.open_launch(new_launch(claude, dir), None, None, window, cx),
+                        Some(dir) => this.open_new(claude, dir, None, None),
                         None => this.focus_current(window, cx),
                     });
                 })
@@ -719,12 +791,12 @@ impl WorkspaceView {
         false
     }
 
-    fn new_claude_tab(&mut self, _: &NewClaudeTab, window: &mut Window, cx: &mut Context<Self>) { self.open(true, None, window, cx) }
-    fn new_shell_tab(&mut self, _: &NewShellTab, window: &mut Window, cx: &mut Context<Self>) { self.open(false, None, window, cx) }
-    fn split_right_claude(&mut self, _: &SplitRightClaude, window: &mut Window, cx: &mut Context<Self>) { self.open(true, Some(Axis::Horizontal), window, cx) }
-    fn split_right_shell(&mut self, _: &SplitRightShell, window: &mut Window, cx: &mut Context<Self>) { self.open(false, Some(Axis::Horizontal), window, cx) }
-    fn split_down_claude(&mut self, _: &SplitDownClaude, window: &mut Window, cx: &mut Context<Self>) { self.open(true, Some(Axis::Vertical), window, cx) }
-    fn split_down_shell(&mut self, _: &SplitDownShell, window: &mut Window, cx: &mut Context<Self>) { self.open(false, Some(Axis::Vertical), window, cx) }
+    fn new_claude_tab(&mut self, _: &NewClaudeTab, _: &mut Window, _: &mut Context<Self>) { self.open(true, None) }
+    fn new_shell_tab(&mut self, _: &NewShellTab, _: &mut Window, _: &mut Context<Self>) { self.open(false, None) }
+    fn split_right_claude(&mut self, _: &SplitRightClaude, _: &mut Window, _: &mut Context<Self>) { self.open(true, Some(Axis::Horizontal)) }
+    fn split_right_shell(&mut self, _: &SplitRightShell, _: &mut Window, _: &mut Context<Self>) { self.open(false, Some(Axis::Horizontal)) }
+    fn split_down_claude(&mut self, _: &SplitDownClaude, _: &mut Window, _: &mut Context<Self>) { self.open(true, Some(Axis::Vertical)) }
+    fn split_down_shell(&mut self, _: &SplitDownShell, _: &mut Window, _: &mut Context<Self>) { self.open(false, Some(Axis::Vertical)) }
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(leaf) = self.workspace.focused() {
             self.confirm_close(vec![leaf], window, cx);
@@ -851,7 +923,7 @@ impl WorkspaceView {
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let sessions = self.sidebar.read(cx).sessions();
-        let tabs: Vec<(String, Option<SessionStatus>, bool)> = self
+        let tabs: Vec<(String, Option<SessionStatus>, bool, bool)> = self
             .workspace
             .tabs
             .iter()
@@ -861,7 +933,8 @@ impl WorkspaceView {
                 let status = self.workspace.tab_status(index, sessions).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
-                (title, status, unseen)
+                let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
+                (title, status, unseen, container)
             })
             .collect();
         let sidebar = &self.workspace.sidebar;
@@ -896,7 +969,7 @@ impl WorkspaceView {
                     bar.pl_2()
                 }
             })
-            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen))| {
+            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container))| {
                 let active = index == self.workspace.active;
                 // Claude tabs are filled with what their most urgent session needs; shells stay plain.
                 let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
@@ -924,6 +997,7 @@ impl WorkspaceView {
                     .cursor_pointer()
                     .when_some(colors, |tab, colors| tab.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.dot))))
                     .child(div().min_w_0().truncate().child(title))
+                    .when(container, |tab| tab.child(container_chip(ink)))
                     .when(unseen, |tab| tab.child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(ink))))
                     .child(
                         div()
@@ -945,7 +1019,7 @@ impl WorkspaceView {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
             }))
-            .child(round_button("new-claude", "+", cx.listener(|this, _, window, cx| this.open(true, None, window, cx))))
+            .child(round_button("new-claude", "+", cx.listener(|this, _, _, _| this.open(true, None))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
             .when(client_decorations, |bar| {
                 bar.child(
@@ -987,7 +1061,7 @@ impl WorkspaceView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .child("New Claude session")
-                        .on_click(cx.listener(|this, _, window, cx| this.open(true, None, window, cx))),
+                        .on_click(cx.listener(|this, _, _, _| this.open(true, None))),
                 )
                 .child(
                     div()
@@ -1004,7 +1078,7 @@ impl WorkspaceView {
                         .cursor_pointer()
                         .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(RAISED)))
                         .child("New shell")
-                        .on_click(cx.listener(|this, _, window, cx| this.open(false, None, window, cx))),
+                        .on_click(cx.listener(|this, _, _, _| this.open(false, None))),
                 )
                 .into_any_element();
         };
@@ -1028,6 +1102,7 @@ impl WorkspaceView {
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen.contains_key(&leaf);
+                let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
                 Some(
                     div()
                         .absolute()
@@ -1047,7 +1122,7 @@ impl WorkspaceView {
                                 .bg(rgb(TERMINAL))
                                 .border_2()
                                 .border_color(rgb(if focused && multiple { ACCENT } else { LINE }))
-                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen)))
+                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1086,7 +1161,7 @@ impl WorkspaceView {
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
-fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool) -> impl IntoElement {
+fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool) -> impl IntoElement {
     let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
     let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
         Tone::NeedsInput => "Needs input",
@@ -1109,6 +1184,7 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool) -> im
         .text_color(rgb(colors.map_or(TEXT, |colors| colors.ink)))
         .when_some(colors, |header, colors| header.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.dot))))
         .child(div().flex_1().min_w_0().truncate().child(title))
+        .when(container, |header| header.child(container_chip(colors.map_or(TEXT, |colors| colors.ink))))
         .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
 }
 
@@ -1148,7 +1224,7 @@ pub(crate) fn round_button(
 
 /// A new Claude session (or the user's shell) in `cwd`.
 pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
-    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd } }
+    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd, container: None } }
 }
 
 impl Render for WorkspaceView {
