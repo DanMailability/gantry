@@ -1,5 +1,7 @@
 //! Default dark color theme and xterm 256-color resolution.
 
+use protocol::message::PaletteColors;
+
 use crate::snapshot::Rgb;
 
 /// Terminal colors used when the program does not override them.
@@ -42,6 +44,51 @@ pub const DARK: Palette = Palette {
         Rgb::hex(0xffffff),
     ],
 };
+
+/// Light theme: dark text on a pale background, ANSI colours darkened to read on it.
+pub const LIGHT: Palette = Palette {
+    foreground: Rgb::hex(0x1c2333),
+    background: Rgb::hex(0xf8f9fc),
+    cursor: Rgb::hex(0x3d86d9),
+    selection: Rgb::hex(0xc9dcf3),
+    ansi: [
+        Rgb::hex(0x1c2333),
+        Rgb::hex(0xc0392b),
+        Rgb::hex(0x2e7d32),
+        Rgb::hex(0x9a6b00),
+        Rgb::hex(0x1f63b5),
+        Rgb::hex(0x8e3fb0),
+        Rgb::hex(0x0f7c86),
+        Rgb::hex(0xd6dce7),
+        Rgb::hex(0x566073),
+        Rgb::hex(0xd0453a),
+        Rgb::hex(0x3a8f3f),
+        Rgb::hex(0xa87700),
+        Rgb::hex(0x2a73c9),
+        Rgb::hex(0x9c4ec0),
+        Rgb::hex(0x16899a),
+        Rgb::hex(0xffffff),
+    ],
+};
+
+impl Default for Palette {
+    fn default() -> Self {
+        DARK
+    }
+}
+
+impl From<Palette> for PaletteColors {
+    fn from(p: Palette) -> Self {
+        let pack = |c: Rgb| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
+        PaletteColors { foreground: pack(p.foreground), background: pack(p.background), cursor: pack(p.cursor), selection: pack(p.selection), ansi: p.ansi.map(pack) }
+    }
+}
+
+impl From<PaletteColors> for Palette {
+    fn from(c: PaletteColors) -> Self {
+        Palette { foreground: Rgb::hex(c.foreground), background: Rgb::hex(c.background), cursor: Rgb::hex(c.cursor), selection: Rgb::hex(c.selection), ansi: c.ansi.map(Rgb::hex) }
+    }
+}
 
 impl Palette {
     /// Resolve an xterm 256-color index: 0–15 ANSI, 16–231 color cube, 232–255 grayscale.

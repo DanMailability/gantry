@@ -153,6 +153,9 @@ pub struct Tab {
     pub root: Node,
     /// The leaf with focus inside this tab.
     pub focused: NodeId,
+    /// The Settings tab (not saved; its root is a node id with no leaf).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settings: bool,
 }
 
 /// Default sidebar width, in pixels.
@@ -200,9 +203,44 @@ impl Workspace {
     pub fn new_tab(&mut self, launch: PaneLaunch) -> NodeId {
         let leaf = self.alloc();
         self.leaves.insert(leaf, Leaf::new(launch));
-        self.tabs.push(Tab { root: Node::Leaf(leaf), focused: leaf });
+        self.tabs.push(Tab { root: Node::Leaf(leaf), focused: leaf, settings: false });
         self.active = self.tabs.len() - 1;
         leaf
+    }
+
+    /// Show the Settings tab, opening it as the last tab if it is not open. Returns its index.
+    pub fn open_settings(&mut self) -> usize {
+        let index = match self.settings_tab() {
+            Some(index) => index,
+            None => {
+                let id = self.alloc();
+                self.tabs.push(Tab { root: Node::Leaf(id), focused: id, settings: true });
+                self.tabs.len() - 1
+            }
+        };
+        self.active = index;
+        index
+    }
+
+    /// Index of the Settings tab, if open.
+    pub fn settings_tab(&self) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.settings)
+    }
+
+    /// Close the Settings tab (as `close` does for a last leaf: the neighbour becomes active).
+    pub fn close_settings(&mut self) {
+        let Some(index) = self.settings_tab() else { return };
+        self.tabs.remove(index);
+        if index < self.active || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+    }
+
+    /// A copy without the Settings tab, for saving.
+    pub fn saveable(&self) -> Workspace {
+        let mut saved = self.clone();
+        saved.close_settings();
+        saved
     }
 
     /// Split the focused leaf, putting `launch` second, and focus it. `None` when there are no tabs.
@@ -246,7 +284,7 @@ impl Workspace {
 
     /// The focused leaf of the visible tab.
     pub fn focused(&self) -> Option<NodeId> {
-        self.active_tab().map(|tab| tab.focused)
+        self.active_tab().filter(|tab| !tab.settings).map(|tab| tab.focused)
     }
 
     /// Focus `leaf`, selecting its tab. False if it is not in the layout.
@@ -259,7 +297,7 @@ impl Workspace {
 
     /// Move focus to the neighbouring leaf in `direction`; returns it.
     pub fn focus_direction(&mut self, direction: Direction) -> Option<NodeId> {
-        let tab = self.tabs.get_mut(self.active)?;
+        let tab = self.tabs.get_mut(self.active).filter(|tab| !tab.settings)?;
         let next = tab.root.neighbor(tab.focused, direction)?;
         tab.focused = next;
         Some(next)
@@ -310,7 +348,7 @@ impl Workspace {
 
     /// Set a split's ratio in the visible tab.
     pub fn set_ratio(&mut self, split: NodeId, ratio: f32) {
-        if let Some(tab) = self.tabs.get_mut(self.active) {
+        if let Some(tab) = self.tabs.get_mut(self.active).filter(|tab| !tab.settings) {
             tab.root.set_ratio(split, ratio);
         }
     }
@@ -343,13 +381,13 @@ impl Workspace {
 
     /// The most urgent status among tab `index`'s leaves.
     pub fn tab_status<'s>(&self, index: usize, sessions: &'s SessionStore) -> Option<&'s SessionStatus> {
-        let tab = self.tabs.get(index)?;
+        let tab = self.tabs.get(index).filter(|tab| !tab.settings)?;
         most_urgent(tab.root.leaves().into_iter().filter_map(|leaf| self.leaf_status(leaf, sessions)))
     }
 
     /// Index of the tab containing `leaf`.
     pub fn tab_of(&self, leaf: NodeId) -> Option<usize> {
-        self.tabs.iter().position(|tab| tab.root.contains(leaf))
+        self.tabs.iter().position(|tab| !tab.settings && tab.root.contains(leaf))
     }
 
     /// `leaf`'s process started as `pane` in `cwd`.
@@ -388,13 +426,18 @@ impl Workspace {
                     return false;
                 }
             }
+            if tab.settings {
+                continue;
+            }
             let leaves = tab.root.leaves();
             if !leaves.contains(&tab.focused) || !leaves.iter().all(|leaf| self.leaves.contains_key(leaf)) {
                 return false;
             }
             tab_leaves += leaves.len();
         }
-        tab_leaves == self.leaves.len() && (self.tabs.is_empty() || self.active < self.tabs.len())
+        self.tabs.iter().filter(|tab| tab.settings).count() <= 1
+            && tab_leaves == self.leaves.len()
+            && (self.tabs.is_empty() || self.active < self.tabs.len())
     }
 }
 
@@ -481,6 +524,118 @@ mod tests {
         let c = ws.new_tab(shell("/c"));
         assert_eq!((ws.active, ws.focused()), (1, Some(c)));
         assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn open_settings_twice_gives_one_tab() {
+        let mut ws = Workspace::default();
+        ws.new_tab(shell("/a"));
+        ws.new_tab(shell("/b"));
+        assert_eq!(ws.open_settings(), 2);
+        ws.select_tab(0);
+        assert_eq!(ws.open_settings(), 2);
+        assert_eq!((ws.tabs.len(), ws.active, ws.settings_tab()), (3, 2, Some(2)));
+        assert!(!ws.leaves.contains_key(&ws.tabs[2].focused));
+        assert_eq!(ws.tab_status(2, &SessionStore::default()), None);
+    }
+
+    #[test]
+    fn settings_tab_takes_part_in_cycle_select_and_move() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.new_tab(shell("/b"));
+        ws.open_settings();
+        ws.cycle_tab(1);
+        assert_eq!(ws.active, 0);
+        ws.cycle_tab(-1);
+        assert_eq!(ws.settings_tab(), Some(ws.active));
+        ws.move_tab(-2);
+        assert_eq!((ws.active, ws.settings_tab()), (0, Some(0)));
+        assert_eq!(ws.tabs.iter().map(|t| t.focused).skip(1).collect::<Vec<_>>(), vec![a, b]);
+        assert!(ws.select_tab(2));
+        assert_eq!(ws.focused(), Some(b));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn closing_settings_activates_neighbour() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        ws.open_settings();
+        let b = ws.new_tab(shell("/b"));
+        ws.select_tab(1);
+        ws.close_settings();
+        assert_eq!((ws.settings_tab(), ws.active, ws.focused()), (None, 1, Some(b)));
+        ws.open_settings();
+        ws.close_settings();
+        assert_eq!((ws.active, ws.focused()), (1, Some(b)), "closing the last tab activates the new last");
+        ws.select_tab(0);
+        ws.open_settings();
+        ws.select_tab(1);
+        ws.close_settings();
+        assert_eq!((ws.active, ws.focused()), (1, Some(b)), "closing a tab before the active one keeps it active");
+        ws.close_settings();
+        assert_eq!(ws.tabs.len(), 2);
+        assert!(ws.focus(a) && ws.is_consistent());
+    }
+
+    #[test]
+    fn settings_tab_is_never_saved() {
+        let mut ws = Workspace { instance: "i".into(), ..Default::default() };
+        let a = ws.new_tab(shell("/a"));
+        ws.open_settings();
+        let b = ws.new_tab(shell("/b"));
+        ws.select_tab(1);
+        let saved = ws.saveable();
+        assert_eq!((saved.settings_tab(), saved.tabs.len(), saved.active, saved.focused()), (None, 2, 1, Some(b)));
+        assert!(saved.is_consistent());
+        ws.select_tab(2);
+        assert_eq!(ws.saveable().active, 1, "settings before active: active shifts down");
+        ws.select_tab(0);
+        assert_eq!((ws.saveable().active, ws.saveable().focused()), (0, Some(a)));
+        ws.select_tab(1);
+        ws.move_tab_to(1, 2);
+        assert_eq!((ws.saveable().active, ws.saveable().focused()), (1, Some(b)), "settings last and active: last tab");
+        assert_eq!(ws.tabs.len(), 3, "the original keeps it");
+    }
+
+    #[test]
+    fn split_and_focus_do_nothing_while_settings_active() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.split(Axis::Horizontal, shell("/b")).unwrap();
+        ws.open_settings();
+        let before = ws.clone();
+        assert_eq!(ws.focused(), None);
+        assert_eq!(ws.split(Axis::Vertical, shell("/c")), None);
+        assert_eq!(ws.focus_direction(Direction::Left), None);
+        ws.set_ratio(ws.tabs[0].root.ids()[0], 0.3);
+        assert_eq!(ws, before);
+        assert!(!ws.is_visible(a) && !ws.is_visible(b));
+    }
+
+    #[test]
+    fn consistent_with_settings_open() {
+        let mut ws = Workspace::default();
+        ws.new_tab(shell("/a"));
+        ws.open_settings();
+        assert!(ws.is_consistent());
+        let mut two = ws.clone();
+        two.tabs.push(two.tabs[1].clone());
+        assert!(!two.is_consistent(), "ids stay unique and there is one settings tab");
+        ws.close_settings();
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn close_leaf_with_settings_id_does_nothing() {
+        let mut ws = Workspace::default();
+        ws.new_tab(shell("/a"));
+        ws.open_settings();
+        let id = ws.tabs[1].focused;
+        assert_eq!((ws.tab_of(id), ws.close(id), ws.focus(id)), (None, None, false));
+        assert_eq!((ws.leaf_for_pane(1), ws.leaf_for_session("x")), (None, None));
+        assert_eq!((ws.tabs.len(), ws.active), (2, 1));
     }
 
     #[test]

@@ -1,0 +1,322 @@
+//! Colour presets (Mist, Mist light) and status colours, including those derived from a user-chosen fill.
+
+use crate::palette::{self, Palette};
+use crate::session_tree::Tone;
+use crate::settings::{StatusFills, ThemeChoice};
+
+/// Which preset is drawn (`System` resolves to one of these).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    /// Dark slate surfaces.
+    Mist,
+    /// Light surfaces.
+    MistLight,
+}
+
+/// A preset's app colours, `0xRRGGBB`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tokens {
+    /// Behind everything: the window and the gaps between panes.
+    pub ground: u32,
+    /// Sidebar and tab bar.
+    pub surface: u32,
+    /// Fields, buttons, the active segment of a switch.
+    pub raised: u32,
+    /// Hairlines and outlines.
+    pub line: u32,
+    /// Body text.
+    pub text: u32,
+    /// Secondary text.
+    pub muted: u32,
+    /// Focus rings, the caret, primary buttons.
+    pub accent: u32,
+    /// Text on an accent fill.
+    pub on_accent: u32,
+    /// Inside a pane: the terminal's default background.
+    pub terminal: u32,
+}
+
+/// Colours of a session row, tab or pane header in a given tone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToneColors {
+    /// Background (`None` = the surface shows through).
+    pub fill: Option<u32>,
+    /// Text.
+    pub ink: u32,
+    /// The status dot.
+    pub dot: u32,
+}
+
+const MIST: Tokens = Tokens {
+    ground: 0x171b24,
+    surface: 0x1d2230,
+    raised: 0x272e3e,
+    line: 0x2c3344,
+    text: 0xe7eaf3,
+    muted: 0x97a1b6,
+    accent: 0x9ecbff,
+    on_accent: 0x0f2440,
+    terminal: 0x141821,
+};
+
+const MIST_LIGHT: Tokens = Tokens {
+    ground: 0xeef1f6,
+    surface: 0xffffff,
+    raised: 0xf3f5f9,
+    line: 0xd6dce7,
+    text: 0x1c2333,
+    muted: 0x566073,
+    accent: 0x2f74c4,
+    on_accent: 0xffffff,
+    terminal: 0xf8f9fc,
+};
+
+/// The app colours of `preset`.
+pub fn tokens(preset: Preset) -> Tokens {
+    match preset {
+        Preset::Mist => MIST,
+        Preset::MistLight => MIST_LIGHT,
+    }
+}
+
+/// The terminal palette of a preset (`palette::DARK` / `palette::LIGHT`).
+pub fn terminal_palette(preset: Preset) -> Palette {
+    match preset {
+        Preset::Mist => palette::DARK,
+        Preset::MistLight => palette::LIGHT,
+    }
+}
+
+/// Resolve a choice; `system_dark` is the desktop's appearance.
+pub fn resolve(choice: ThemeChoice, system_dark: bool) -> Preset {
+    match choice {
+        ThemeChoice::Mist => Preset::Mist,
+        ThemeChoice::MistLight => Preset::MistLight,
+        ThemeChoice::System if system_dark => Preset::Mist,
+        ThemeChoice::System => Preset::MistLight,
+    }
+}
+
+fn default_tone_colors(preset: Preset, tone: Tone) -> ToneColors {
+    let t = tokens(preset);
+    let light = preset == Preset::MistLight;
+    let (fill, ink, dot) = match tone {
+        Tone::NeedsInput => (Some(0xf7c9a3), 0x3b2414, 0xc9773d),
+        Tone::Working => (Some(0xb9d5f6), 0x132a43, 0x4f8fd6),
+        Tone::Done => (Some(0xc1e5cd), 0x143322, 0x4c9e6b),
+        Tone::Idle if light => (Some(0xe4e8ef), 0x2a3242, t.muted),
+        Tone::Idle => (Some(0x2f3647), 0xd5dae6, t.muted),
+        Tone::Elsewhere if light => (None, 0x3a4356, t.muted),
+        Tone::Elsewhere => (None, 0xc9d0de, t.muted),
+        Tone::Closed if light => (None, t.muted, 0x8a93a5),
+        Tone::Closed => (None, t.muted, 0x555e70),
+    };
+    ToneColors { fill, ink, dot }
+}
+
+/// The colours of `tone` in `preset`, with the user's fills applied (via [`derive`]) where set and readable.
+pub fn tone_colors(preset: Preset, fills: &StatusFills, tone: Tone) -> ToneColors {
+    let custom = match tone {
+        Tone::NeedsInput => fills.needs_input,
+        Tone::Working => fills.working,
+        Tone::Done => fills.done,
+        Tone::Idle => fills.idle,
+        Tone::Elsewhere | Tone::Closed => None,
+    };
+    let t = tokens(preset);
+    match custom {
+        Some(fill) if readable_fill(fill, &t) => derive(fill, &t),
+        _ => default_tone_colors(preset, tone),
+    }
+}
+
+/// Ink and dot for a user-chosen fill.
+pub fn derive(fill: u32, tokens: &Tokens) -> ToneColors {
+    let (h, s, _) = rgb_to_hsl(fill);
+    let (ink, dot) = if luminance(fill) > 0.18 {
+        (hsl_to_rgb(h, s.max(0.40), 0.14), hsl_to_rgb(h, s.clamp(0.35, 0.55), 0.46))
+    } else {
+        (hsl_to_rgb(h, s.min(0.20), 0.88), tokens.muted)
+    };
+    ToneColors { fill: Some(fill), ink, dot }
+}
+
+/// Whether `fill` is acceptable as a custom status fill (derived ink at least 4.5:1 on it).
+pub fn readable_fill(fill: u32, tokens: &Tokens) -> bool {
+    contrast(derive(fill, tokens).ink, fill) >= 4.5
+}
+
+/// WCAG relative luminance of an `0xRRGGBB` colour.
+pub fn luminance(color: u32) -> f64 {
+    let channel = |shift: u32| {
+        let c = f64::from((color >> shift) & 0xff) / 255.0;
+        if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+/// WCAG contrast ratio between two `0xRRGGBB` colours.
+pub fn contrast(a: u32, b: u32) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (light, dark) = if la > lb { (la, lb) } else { (lb, la) };
+    (light + 0.05) / (dark + 0.05)
+}
+
+/// Hue in degrees, saturation and lightness in 0..=1.
+fn rgb_to_hsl(color: u32) -> (f64, f64, f64) {
+    let channel = |shift: u32| f64::from((color >> shift) & 0xff) / 255.0;
+    let (r, g, b) = (channel(16), channel(8), channel(0));
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d == 0.0 {
+        return (0.0, 0.0, l);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h * 60.0, s, l)
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> u32 {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let byte = |v: f64| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u32;
+    (byte(r) << 16) | (byte(g) << 8) | byte(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::Rgb;
+
+    const PRESETS: [Preset; 2] = [Preset::Mist, Preset::MistLight];
+    const TONES: [Tone; 6] = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
+
+    #[test]
+    fn mist_defaults_match_todays_constants() {
+        let t = tokens(Preset::Mist);
+        assert_eq!(
+            [t.ground, t.surface, t.raised, t.line, t.text, t.muted, t.accent, t.on_accent, t.terminal],
+            [0x171b24, 0x1d2230, 0x272e3e, 0x2c3344, 0xe7eaf3, 0x97a1b6, 0x9ecbff, 0x0f2440, 0x141821]
+        );
+        let none = StatusFills::default();
+        let expected = [
+            (Some(0xf7c9a3), 0x3b2414, 0xc9773d),
+            (Some(0xb9d5f6), 0x132a43, 0x4f8fd6),
+            (Some(0xc1e5cd), 0x143322, 0x4c9e6b),
+            (Some(0x2f3647), 0xd5dae6, 0x97a1b6),
+            (None, 0xc9d0de, 0x97a1b6),
+            (None, 0x97a1b6, 0x555e70),
+        ];
+        for (tone, (fill, ink, dot)) in TONES.into_iter().zip(expected) {
+            assert_eq!(tone_colors(Preset::Mist, &none, tone), ToneColors { fill, ink, dot }, "{tone:?}");
+        }
+    }
+
+    #[test]
+    fn row_text_is_readable_on_every_tone() {
+        for preset in PRESETS {
+            let t = tokens(preset);
+            for tone in TONES {
+                let colors = tone_colors(preset, &StatusFills::default(), tone);
+                let ratio = contrast(colors.ink, colors.fill.unwrap_or(t.surface));
+                assert!(ratio >= 4.5, "{preset:?} {tone:?}: {ratio:.2}");
+            }
+            assert!(contrast(t.text, t.surface) >= 4.5, "{preset:?} text");
+            assert!(contrast(t.muted, t.surface) >= 4.5, "{preset:?} muted");
+            assert!(contrast(t.on_accent, t.accent) >= 4.5, "{preset:?} on_accent");
+        }
+    }
+
+    #[test]
+    fn attention_fills_stand_out_in_mist() {
+        let none = StatusFills::default();
+        let surface = tokens(Preset::Mist).surface;
+        for tone in [Tone::NeedsInput, Tone::Working, Tone::Done] {
+            assert!(contrast(tone_colors(Preset::Mist, &none, tone).fill.unwrap(), surface) >= 7.0, "{tone:?}");
+        }
+        assert!(contrast(tone_colors(Preset::Mist, &none, Tone::Idle).fill.unwrap(), surface) < 1.5);
+    }
+
+    #[test]
+    fn derive_is_readable_for_a_spread_of_fills() {
+        let t = tokens(Preset::Mist);
+        let readable = [0xf7c9a3, 0xb9d5f6, 0xc1e5cd, 0xffe08a, 0xe9c6ef, 0x2f3647, 0x1d2230];
+        for fill in readable {
+            assert!(readable_fill(fill, &t), "{fill:06x} refused");
+            assert!(contrast(derive(fill, &t).ink, fill) >= 4.5, "{fill:06x}");
+        }
+        let fill = 0x5a6b8c;
+        assert!(!readable_fill(fill, &t) || contrast(derive(fill, &t).ink, fill) >= 4.5);
+    }
+
+    #[test]
+    fn unreadable_fill_is_refused() {
+        let t = tokens(Preset::Mist);
+        assert!(!readable_fill(0x808080, &t));
+        let fills = StatusFills { done: Some(0x808080), ..StatusFills::default() };
+        assert_eq!(
+            tone_colors(Preset::Mist, &fills, Tone::Done),
+            tone_colors(Preset::Mist, &StatusFills::default(), Tone::Done)
+        );
+    }
+
+    #[test]
+    fn a_readable_fill_is_applied_and_elsewhere_ignores_fills() {
+        let fills = StatusFills { working: Some(0xffe08a), idle: Some(0x1d2230), ..StatusFills::default() };
+        let working = tone_colors(Preset::Mist, &fills, Tone::Working);
+        assert_eq!(working.fill, Some(0xffe08a));
+        assert_ne!(working.ink, 0x132a43);
+        assert_eq!(tone_colors(Preset::Mist, &fills, Tone::Idle).fill, Some(0x1d2230));
+        assert_eq!(tone_colors(Preset::Mist, &fills, Tone::Elsewhere).fill, None);
+    }
+
+    #[test]
+    fn defaults_untouched_without_fills() {
+        let done = tone_colors(Preset::Mist, &StatusFills::default(), Tone::Done);
+        assert_eq!(done, ToneColors { fill: Some(0xc1e5cd), ink: 0x143322, dot: 0x4c9e6b });
+    }
+
+    #[test]
+    fn system_follows_the_desktop() {
+        assert_eq!(resolve(ThemeChoice::System, true), Preset::Mist);
+        assert_eq!(resolve(ThemeChoice::System, false), Preset::MistLight);
+        assert_eq!(resolve(ThemeChoice::Mist, false), Preset::Mist);
+        assert_eq!(resolve(ThemeChoice::MistLight, true), Preset::MistLight);
+    }
+
+    #[test]
+    fn light_palette_is_readable() {
+        let bg = 0xf8f9fc;
+        let hex = |c: Rgb| (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+        let light = palette::LIGHT;
+        assert!(contrast(hex(light.foreground), bg) >= 7.0);
+        for i in (1..=6).chain(9..=14) {
+            let ratio = contrast(hex(light.ansi[i]), bg);
+            assert!(ratio >= 3.0, "ansi {i}: {ratio:.2}");
+        }
+    }
+
+    #[test]
+    fn terminal_token_matches_palette() {
+        for preset in PRESETS {
+            assert_eq!(Rgb::hex(tokens(preset).terminal), terminal_palette(preset).background, "{preset:?}");
+        }
+    }
+}

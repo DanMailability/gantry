@@ -46,6 +46,8 @@ pub struct Paths {
     pub layout_file: PathBuf,
     /// Dev container mappings the daemon remembers (beside the layout).
     pub containers_file: PathBuf,
+    /// User settings, shared by every profile.
+    pub settings_file: PathBuf,
     socket: SocketLocation,
 }
 
@@ -63,23 +65,40 @@ impl Paths {
         };
         #[cfg(windows)]
         let runtime_dir = data.join(profile).join("run");
-        Paths::build(profile, runtime_dir, data.join(profile).join("logs"), data.join(profile).join("layout.json"), &user)
+        let config = directories::ProjectDirs::from("", "", "gantry")
+            .map(|dirs| dirs.config_dir().to_path_buf())
+            .unwrap_or_else(|| std::env::temp_dir().join("gantry-data"));
+        Paths::build(
+            profile,
+            runtime_dir,
+            data.join(profile).join("logs"),
+            data.join(profile).join("layout.json"),
+            config.join("settings.json"),
+            &user,
+        )
     }
 
     /// Locations entirely inside `dir` (for tests).
     pub fn in_dir(dir: &Path, profile: &str) -> Paths {
         let unique = dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        Paths::build(profile, dir.join("run"), dir.join("logs"), dir.join("layout.json"), &unique)
+        Paths::build(profile, dir.join("run"), dir.join("logs"), dir.join("layout.json"), dir.join("settings.json"), &unique)
     }
 
     #[cfg_attr(unix, allow(unused_variables))]
-    fn build(profile: &str, runtime_dir: PathBuf, log_dir: PathBuf, layout_file: PathBuf, unique: &str) -> Paths {
+    fn build(
+        profile: &str,
+        runtime_dir: PathBuf,
+        log_dir: PathBuf,
+        layout_file: PathBuf,
+        settings_file: PathBuf,
+        unique: &str,
+    ) -> Paths {
         #[cfg(unix)]
         let socket = SocketLocation::File(runtime_dir.join("daemon.sock"));
         #[cfg(windows)]
         let socket = SocketLocation::Pipe(format!("gantry-{profile}-{unique}"));
         let containers_file = layout_file.with_file_name("containers.json");
-        Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, layout_file, containers_file, socket }
+        Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, layout_file, containers_file, settings_file, socket }
     }
 
     /// Name to bind or connect to.
@@ -128,12 +147,13 @@ mod tests {
     fn test_paths_stay_inside_the_given_dir() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::in_dir(dir.path(), "t");
-        for path in [&paths.runtime_dir, &paths.lock_file, &paths.log_dir, &paths.layout_file] {
+        for path in [&paths.runtime_dir, &paths.lock_file, &paths.log_dir, &paths.layout_file, &paths.settings_file] {
             assert!(path.starts_with(dir.path()), "{path:?}");
         }
         #[cfg(unix)]
         assert!(paths.socket_file().unwrap().starts_with(dir.path()));
         assert!(paths.socket_name().is_ok());
+        assert_eq!(paths.settings_file, dir.path().join("settings.json"));
     }
 
     #[test]

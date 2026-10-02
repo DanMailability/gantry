@@ -23,10 +23,7 @@ use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
-use crate::theme;
-use crate::theme::{
-    ACCENT, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_SMALL, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
-};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -318,11 +315,12 @@ impl SidebarView {
         let key = row.key();
         let selected = self.selected.as_ref() == Some(&key);
         let menu_key = key.clone();
+        let theme = theme(cx).clone();
         let base = div()
             .id(index)
-            .h(px(ROW_HEIGHT))
+            .h(theme.ui(ROW_HEIGHT))
             .w_full()
-            .px(px(10.))
+            .px(theme.ui(10.))
             .py(px(2.))
             .flex()
             .flex_row()
@@ -361,35 +359,35 @@ impl SidebarView {
                 .gap_2()
                 .rounded(px(RADIUS))
                 .border_2()
-                .border_color(if selected { rgb(ACCENT) } else { rgba(0) })
+                .border_color(if selected { rgb(theme.tokens.accent) } else { rgba(0) })
                 .cursor_pointer()
                 .map(|pill| match fill {
                     Some(fill) => pill.bg(rgb(fill)),
-                    None => pill.hover(|style| style.bg(rgb(RAISED))),
+                    None => pill.hover(|style| style.bg(rgb(theme.tokens.raised))),
                 })
         };
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
         let aside = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
-        let guide = row.in_tab.then(|| div().absolute().left(px(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(LINE)));
-        let base = base.when(row.in_tab, |base| base.relative().pl(px(32.))).children(guide);
+        let guide = row.in_tab.then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
+        let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32.))).children(guide);
         // A row listed under another project's tab heading names its own project.
-        let project = || row.project_label.clone().map(|label| div().flex_none().text_xs().text_color(rgb(MUTED)).child(label));
+        let project = || row.project_label.clone().map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label));
         match &row.kind {
             RowKind::Project { label, expanded, counts, .. } => {
                 base.child(
                     pill(None)
-                        .child(div().flex_none().text_color(rgb(MUTED)).child(if *expanded { "▾" } else { "▸" }))
+                        .child(div().flex_none().text_color(rgb(theme.tokens.muted)).child(if *expanded { "▾" } else { "▸" }))
                         .child(title(label.clone()).font_weight(FontWeight::SEMIBOLD))
-                        .children(count_chips(counts)),
+                        .children(count_chips(counts, &theme)),
                 )
             }
             RowKind::Session { session, tone, note, .. } => {
-                let colors = tone_colors(*tone);
+                let colors = theme.tone(*tone);
                 let unseen = self.unseen.contains(&session.id);
                 let lead = match tone {
-                    Tone::Elsewhere => div().flex_none().w(px(10.)).text_color(rgb(colors.dot)).child("↗"),
-                    Tone::Closed => div().flex_none().size(px(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
-                    _ => div().flex_none().size(px(8.)).rounded_full().bg(rgb(colors.dot)),
+                    Tone::Elsewhere => div().flex_none().w(theme.ui(10.)).text_color(rgb(colors.dot)).child("↗"),
+                    Tone::Closed => div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
+                    _ => div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)),
                 };
                 base.child(
                     pill(colors.fill)
@@ -398,25 +396,25 @@ impl SidebarView {
                         .child(title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
                             title.font_weight(FontWeight::SEMIBOLD)
                         }))
-                        .when(unseen, |pill| pill.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.ink))))
-                        .when(session.container.is_some(), |pill| pill.child(theme::container_chip(colors.ink)))
+                        .when(unseen, |pill| pill.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.ink))))
+                        .when(session.container.is_some(), |pill| pill.child(container_chip(colors.ink)))
                         .children(project())
                         .child(aside(note.clone(), colors.ink)),
                 )
             }
             RowKind::Pane { entry, tone, note } if !entry.claude => base.child(
                 pill(None)
-                    .text_color(rgb(if *tone == Tone::Closed { MUTED } else { TEXT }))
-                    .child(div().flex_none().text_xs().text_color(rgb(MUTED)).child(">_"))
+                    .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
+                    .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
                     .child(title(entry.title.clone()))
                     .children(project())
-                    .child(aside(note.clone(), MUTED)),
+                    .child(aside(note.clone(), theme.tokens.muted)),
             ),
             RowKind::Pane { tone, note, .. } => {
-                let colors = tone_colors(*tone);
+                let colors = theme.tone(*tone);
                 let lead = match tone {
-                    Tone::Closed => div().flex_none().size(px(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
-                    _ => div().flex_none().size(px(8.)).rounded_full().bg(rgb(colors.dot)),
+                    Tone::Closed => div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
+                    _ => div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)),
                 };
                 base.child(
                     pill(colors.fill)
@@ -429,34 +427,34 @@ impl SidebarView {
             }
             RowKind::Tab { index, title: tab_title, panes, .. } => base.child(
                 pill(None)
-                    .h(px(28.))
+                    .h(theme.ui(28.))
                     .child(
                         div()
                             .flex_none()
-                            .min_w(px(18.))
-                            .h(px(18.))
+                            .min_w(theme.ui(18.))
+                            .h(theme.ui(18.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .border_1()
-                            .border_color(rgb(LINE))
+                            .border_color(rgb(theme.tokens.line))
                             .rounded(px(RADIUS_SMALL - 3.))
                             .text_xs()
                             .child((index + 1).to_string()),
                     )
                     .child(title(tab_title.clone()).font_weight(FontWeight::SEMIBOLD))
-                    .child(aside(format!("{panes} panes"), MUTED)),
+                    .child(aside(format!("{panes} panes"), theme.tokens.muted)),
             ),
             RowKind::Detail { text, .. } => {
-                base.child(div().pl(px(34.)).text_xs().italic().text_color(rgb(MUTED)).child(text.clone()))
+                base.child(div().pl(theme.ui(34.)).text_xs().italic().text_color(rgb(theme.tokens.muted)).child(text.clone()))
             }
-            RowKind::TakeOver { .. } => base.child(pill(None).pl(px(32.)).text_color(rgb(ACCENT)).child("Take over…")),
+            RowKind::TakeOver { .. } => base.child(pill(None).pl(theme.ui(32.)).text_color(rgb(theme.tokens.accent)).child("Take over…")),
         }
     }
 }
 
 /// Small rounded counters in the tones of a project's live sessions.
-fn count_chips(counts: &ToneCounts) -> Vec<gpui::Div> {
+fn count_chips(counts: &ToneCounts, theme: &Theme) -> Vec<gpui::Div> {
     let tones = [
         (Tone::NeedsInput, counts.needs_input),
         (Tone::Working, counts.working),
@@ -468,17 +466,17 @@ fn count_chips(counts: &ToneCounts) -> Vec<gpui::Div> {
         .into_iter()
         .filter(|(_, count)| *count > 0)
         .map(|(tone, count)| {
-            let colors = tone_colors(tone);
+            let colors = theme.tone(tone);
             div()
                 .flex_none()
-                .h(px(20.))
-                .min_w(px(20.))
-                .px(px(6.))
+                .h(theme.ui(20.))
+                .min_w(theme.ui(20.))
+                .px(theme.ui(6.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(rgb(colors.fill.unwrap_or(RAISED)))
+                .bg(rgb(colors.fill.unwrap_or(theme.tokens.raised)))
                 .text_color(rgb(colors.ink))
                 .text_xs()
                 .font_weight(FontWeight::BOLD)
@@ -490,6 +488,7 @@ fn count_chips(counts: &ToneCounts) -> Vec<gpui::Div> {
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
+        let theme = theme(cx).clone();
         div()
             .key_context("Sidebar")
             .track_focus(&self.focus_handle)
@@ -497,13 +496,13 @@ impl Render for SidebarView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(SURFACE))
-            .text_color(rgb(TEXT))
+            .bg(rgb(theme.tokens.surface))
+            .text_color(rgb(theme.tokens.text))
             .font_family(UI_FONT)
             .child(
                 div()
                     .id("filter")
-                    .h(px(36.))
+                    .h(theme.ui(36.))
                     .flex_none()
                     .mx_3()
                     .mt_3()
@@ -513,14 +512,14 @@ impl Render for SidebarView {
                     .items_center()
                     .text_sm()
                     .rounded(px(RADIUS))
-                    .bg(rgb(RAISED))
+                    .bg(rgb(theme.tokens.raised))
                     .border_1()
-                    .border_color(rgb(if focused { ACCENT } else { LINE }))
+                    .border_color(rgb(if focused { theme.tokens.accent } else { theme.tokens.line }))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.focus_handle.focus(window, cx);
                         cx.notify();
                     }))
-                    .child(field::render(&self.filter, "Filter active sessions", focused)),
+                    .child(field::render(&self.filter, "Filter active sessions", focused, &theme)),
             )
             .child(
                 uniform_list(
@@ -535,7 +534,7 @@ impl Render for SidebarView {
                 div()
                     .id("recent-sessions")
                     .flex_none()
-                    .h(px(34.))
+                    .h(theme.ui(34.))
                     .mx_3()
                     .mt_2()
                     .px_3()
@@ -544,13 +543,13 @@ impl Render for SidebarView {
                     .gap_2()
                     .rounded(px(RADIUS))
                     .border_1()
-                    .border_color(rgb(LINE))
+                    .border_color(rgb(theme.tokens.line))
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme.tokens.muted))
                     .cursor_pointer()
-                    .hover(|style| style.text_color(rgb(TEXT)))
+                    .hover(|style| style.text_color(rgb(theme.tokens.text)))
                     .child(div().flex_1().child("Recent sessions"))
-                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(RAISED)).child(RECENTS_SHORTCUT))
+                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(theme.tokens.raised)).child(RECENTS_SHORTCUT))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenRecents))),
             )
             .child(
@@ -564,13 +563,13 @@ impl Render for SidebarView {
                         div()
                             .id("new-claude")
                             .flex_1()
-                            .h(px(36.))
+                            .h(theme.ui(36.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(RADIUS))
-                            .bg(rgb(ACCENT))
-                            .text_color(rgb(ON_ACCENT))
+                            .bg(rgb(theme.tokens.accent))
+                            .text_color(rgb(theme.tokens.on_accent))
                             .font_weight(FontWeight::SEMIBOLD)
                             .cursor_pointer()
                             .hover(|style| style.opacity(0.9))
@@ -581,17 +580,17 @@ impl Render for SidebarView {
                         div()
                             .id("new-shell")
                             .flex_none()
-                            .size(px(36.))
+                            .size(theme.ui(36.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(RADIUS))
                             .border_1()
-                            .border_color(rgb(LINE))
-                            .text_color(rgb(MUTED))
+                            .border_color(rgb(theme.tokens.line))
+                            .text_color(rgb(theme.tokens.muted))
                             .text_xs()
                             .cursor_pointer()
-                            .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(RAISED)))
+                            .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                             .child(">_")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: false }))),
                     ),
@@ -611,6 +610,7 @@ impl Render for SidebarView {
                 el.child(context_menu::render(
                     "sidebar-menu",
                     menu,
+                    &theme,
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))

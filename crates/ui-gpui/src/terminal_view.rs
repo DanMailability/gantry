@@ -2,7 +2,8 @@
 
 use std::ops::Range;
 
-use crate::theme;
+use crate::settings_store::SettingsStore;
+use crate::theme::{Theme, theme};
 use app_core::bidi::{RowOrder, logical_hit, to_display};
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
@@ -11,7 +12,9 @@ use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
 use app_core::scroll::{ScrollAction, scroll_action};
 use app_core::url::link_at;
 use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
+use app_core::settings::Settings;
 use app_core::term_state::TermState;
+use app_core::theme_colors::terminal_palette;
 use app_core::workspace::PaneLaunch;
 use daemon::client::{ClientEvent, DaemonClient};
 use protocol::message::PaneId;
@@ -59,16 +62,12 @@ fn key_bindings() -> Vec<KeyBinding> {
     bindings
 }
 
-/// Font size used at startup and restored by "reset zoom".
-pub const DEFAULT_FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT_FACTOR: f32 = 1.3;
-
 #[cfg(target_os = "linux")]
-const FONT_FAMILY: &str = "Noto Sans Mono";
+pub(crate) const FONT_FAMILY: &str = "Noto Sans Mono";
 #[cfg(target_os = "macos")]
-const FONT_FAMILY: &str = "Menlo";
+pub(crate) const FONT_FAMILY: &str = "Menlo";
 #[cfg(target_os = "windows")]
-const FONT_FAMILY: &str = "Consolas";
+pub(crate) const FONT_FAMILY: &str = "Consolas";
 
 /// Tried before cosmic-text's own fallback list, which misses some installed symbol fonts (it asks for "Noto Sans
 /// Symbols2"; `⏺` then lands on a COLRv1 emoji font that cannot be drawn). GPUI drops — and unloads — any fallback
@@ -76,16 +75,23 @@ const FONT_FAMILY: &str = "Consolas";
 #[cfg(target_os = "linux")]
 const FALLBACK_FAMILIES: &[&str] = &["Adwaita Mono", "Symbola"];
 
-/// The pane font, with its fallback chain on Linux.
-fn pane_font() -> Font {
+/// The pane font (`family`, else the platform's), with its fallback chain on Linux.
+pub(crate) fn pane_font(family: Option<&str>) -> Font {
     #[allow(unused_mut)]
-    let mut pane_font = font(FONT_FAMILY);
+    let mut pane_font = font(family.unwrap_or(FONT_FAMILY).to_string());
     #[cfg(target_os = "linux")]
     {
         pane_font.fallbacks =
             Some(gpui::FontFallbacks::from_fonts(FALLBACK_FAMILIES.iter().map(|family| family.to_string()).collect()));
     }
     pane_font
+}
+
+/// An empty terminal of the given size, in the current theme's colours.
+fn new_term(cols: u16, rows: u16, cx: &App) -> TermState {
+    let mut term = TermState::new(cols, rows);
+    term.set_palette(terminal_palette(theme(cx).preset));
+    term
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -187,8 +193,6 @@ pub struct TerminalView {
     state: PaneState,
     title: Option<String>,
     cell: (u16, u16),
-    font: Font,
-    font_size: Pixels,
     grid_origin: Point<Pixels>,
     grid_size: (u16, u16),
     metrics: CellMetrics,
@@ -215,15 +219,13 @@ impl TerminalView {
     pub fn new(client: DaemonClient, launch: PaneLaunch, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         TerminalView {
             focus_handle: cx.focus_handle(),
-            term: TermState::new(80, 24),
+            term: new_term(80, 24, cx),
             client,
             pane: None,
             launch,
             state: PaneState::Starting,
             title: None,
             cell: (0, 0),
-            font: pane_font(),
-            font_size: px(DEFAULT_FONT_SIZE),
             grid_origin: Point::default(),
             grid_size: (80, 24),
             metrics: CellMetrics { width: px(8.), height: px(18.) },
@@ -236,12 +238,18 @@ impl TerminalView {
         }
     }
 
+    /// The theme changed: use its terminal colours.
+    pub fn apply_theme(&mut self, cx: &mut Context<Self>) {
+        self.term.set_palette(terminal_palette(theme(cx).preset));
+        cx.notify();
+    }
+
     /// Show daemon pane `pane`, running `launch` (a fresh terminal; its output or replay follows).
     pub fn attach(&mut self, pane: PaneId, launch: PaneLaunch, cx: &mut Context<Self>) {
         self.pane = Some(pane);
         self.launch = launch;
         self.state = PaneState::Live;
-        self.term = TermState::new(self.grid_size.0, self.grid_size.1);
+        self.term = new_term(self.grid_size.0, self.grid_size.1, cx);
         self.title = None;
         if let Some((cols, rows, width, height)) = resize_on_attach(self.grid_size, self.cell) {
             self.client.resize(pane, cols, rows, width, height);
@@ -266,7 +274,7 @@ impl TerminalView {
                 }
             }
             ClientEvent::Resync { cols, rows, .. } => {
-                self.term = TermState::new(*cols, *rows);
+                self.term = new_term(*cols, *rows, cx);
                 // The next layout pass resizes to the window if it differs.
                 self.grid_size = (*cols, *rows);
             }
@@ -347,14 +355,11 @@ impl TerminalView {
         }
     }
 
-    fn cell_metrics(&self, window: &Window) -> CellMetrics {
+    fn cell_metrics(font: &Font, font_size: Pixels, line_height: f32, window: &Window) -> CellMetrics {
         let text_system = window.text_system();
-        let font_id = text_system.resolve_font(&self.font);
-        let width = text_system
-            .advance(font_id, self.font_size, 'm')
-            .map(|advance| advance.width)
-            .unwrap_or(self.font_size * 0.6);
-        CellMetrics { width, height: (self.font_size * LINE_HEIGHT_FACTOR).round() }
+        let font_id = text_system.resolve_font(font);
+        let width = text_system.advance(font_id, font_size, 'm').map(|advance| advance.width).unwrap_or(font_size * 0.6);
+        CellMetrics { width, height: (font_size * line_height).round() }
     }
 
     fn layout(&mut self, bounds: Bounds<Pixels>, metrics: CellMetrics, cx: &mut Context<Self>) {
@@ -426,21 +431,22 @@ impl TerminalView {
         }
     }
 
-    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        self.font_size = px(size.clamp(8.0, 40.0));
-        cx.notify();
+    /// Zoom every pane: `size` is the terminal font size, kept in the settings file.
+    fn set_font_size(size: f32, cx: &mut App) {
+        SettingsStore::update(cx, |settings| settings.terminal_font.size = size.clamp(8.0, 40.0));
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(f32::from(self.font_size) + 1.0, cx);
+        Self::set_font_size(cx.global::<SettingsStore>().settings().terminal_font.size + 1.0, cx);
     }
 
     fn zoom_out(&mut self, _: &ZoomOut, _window: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(f32::from(self.font_size) - 1.0, cx);
+        Self::set_font_size(cx.global::<SettingsStore>().settings().terminal_font.size - 1.0, cx);
     }
 
+    /// Back to the default size, which removes the key from the file.
     fn zoom_reset(&mut self, _: &ZoomReset, _window: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(DEFAULT_FONT_SIZE, cx);
+        Self::set_font_size(Settings::default().terminal_font.size, cx);
     }
 
     /// Viewport cell under a window position, plus whether it is in the cell's right half.
@@ -667,7 +673,11 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let metrics = self.cell_metrics(window);
+        let theme = theme(cx).clone();
+        let terminal_font = cx.global::<SettingsStore>().settings().terminal_font.clone();
+        let font = pane_font(terminal_font.family.as_deref());
+        let font_size = px(terminal_font.size);
+        let metrics = Self::cell_metrics(&font, font_size, terminal_font.line_height, window);
         let mut snapshot = self.term.snapshot();
         if let Some((row, cols)) = &self.hovered_link
             && let Some(cells) = snapshot.rows.get_mut(*row as usize)
@@ -679,8 +689,6 @@ impl Render for TerminalView {
         self.row_orders = to_display(&mut snapshot);
         let hovering_link = self.hovered_link.is_some();
         let focused = self.focus_handle.is_focused(window);
-        let font = self.font.clone();
-        let font_size = self.font_size;
         let background = to_hsla(snapshot.background);
         let banner_color = to_hsla(snapshot.cursor_color);
         let layout_view = cx.entity();
@@ -741,8 +749,8 @@ impl Render for TerminalView {
                         // Long messages (e.g. Docker's) wrap; the buttons stay visible.
                         .child(div().flex_1().min_w_0().child(text))
                         .when(actions, |row| {
-                            row.child(banner_button("rerun", rerun, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun))))
-                                .child(banner_button("close", "Close", cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close))))
+                            row.child(banner_button("rerun", rerun, &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun))))
+                                .child(banner_button("close", "Close", &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close))))
                         }),
                 )
             })
@@ -758,6 +766,7 @@ fn resize_on_attach(grid: (u16, u16), cell: (u16, u16)) -> Option<(u16, u16, u16
 fn banner_button(
     id: &'static str,
     label: &'static str,
+    theme: &Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -767,9 +776,9 @@ fn banner_button(
         .py(px(2.))
         .rounded_full()
         .border_1()
-        .border_color(rgb(theme::ACCENT))
+        .border_color(rgb(theme.tokens.accent))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme::RAISED)))
+        .hover(|style| style.bg(rgb(theme.tokens.raised)))
         .child(label)
         .on_click(on_click)
 }
@@ -904,7 +913,7 @@ mod tests {
 
     #[test]
     fn the_pane_font_falls_back_to_fonts_gpui_keeps() {
-        let fallbacks = pane_font().fallbacks.expect("Linux panes have a fallback chain");
+        let fallbacks = pane_font(None).fallbacks.expect("Linux panes have a fallback chain");
         assert_eq!(fallbacks.fallback_list(), ["Adwaita Mono", "Symbola"]);
     }
 

@@ -153,6 +153,21 @@ pub fn claude_session<'a>(program: &str, args: &'a [String]) -> Option<&'a str> 
     args.windows(2).find(|pair| matches!(pair[0].as_str(), "--session-id" | "--resume" | "-r")).map(|pair| pair[1].as_str())
 }
 
+/// Terminal colours the GUI draws with, 0xRRGGBB (the daemon answers colour queries from them).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaletteColors {
+    /// Default text colour.
+    pub foreground: u32,
+    /// Default background colour.
+    pub background: u32,
+    /// Cursor colour.
+    pub cursor: u32,
+    /// Background of selected cells.
+    pub selection: u32,
+    /// The 16 ANSI colours: 0-7 normal, 8-15 bright.
+    pub ansi: [u32; 16],
+}
+
 /// GUI → daemon.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -189,6 +204,8 @@ pub enum ClientMessage {
         /// Cell height in pixels (for size queries).
         cell_height: u16,
     },
+    /// The terminal colours the GUI uses now; the daemon answers colour queries from them.
+    SetPalette(PaletteColors),
     /// The user focused this pane.
     Focus {
         /// Pane.
@@ -331,6 +348,14 @@ mod tests {
             let json = serde_json::to_string(&reply).unwrap();
             assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
         }
+    }
+
+    #[test]
+    fn set_palette_round_trips() {
+        let msg = ClientMessage::SetPalette(PaletteColors { foreground: 0xd8dde8, background: 0x141821, cursor: 0x9ecbff, selection: 0x2f4a6e, ansi: [7; 16] });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.starts_with(r#"{"type":"set_palette","#), "{json}");
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
     }
 
     #[test]

@@ -4,26 +4,41 @@
 use std::borrow::Cow;
 
 use app_core::session_tree::Tone;
-use gpui::{App, Div, FontWeight, ParentElement, Styled, div, px, rgba};
+use app_core::settings::StatusFills;
+use app_core::theme_colors::{Preset, ToneColors, Tokens, tone_colors};
+use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, Styled, div, px, rgba};
 
-/// Behind everything: the window and the gaps between panes.
-pub(crate) const GROUND: u32 = 0x171b24;
-/// Sidebar and tab bar.
-pub(crate) const SURFACE: u32 = 0x1d2230;
-/// Fields, buttons, the active segment of a switch.
-pub(crate) const RAISED: u32 = 0x272e3e;
-/// Hairlines and outlines.
-pub(crate) const LINE: u32 = 0x2c3344;
-/// Body text.
-pub(crate) const TEXT: u32 = 0xe7eaf3;
-/// Secondary text.
-pub(crate) const MUTED: u32 = 0x97a1b6;
-/// Focus rings, the caret, primary buttons.
-pub(crate) const ACCENT: u32 = 0x9ecbff;
-/// Text on an accent fill.
-pub(crate) const ON_ACCENT: u32 = 0x0f2440;
-/// Inside a pane: the terminal's default background (`app_core::palette::DARK`).
-pub(crate) const TERMINAL: u32 = 0x141821;
+/// The colours and sizes views draw with, a GPUI global replaced whenever the settings change.
+#[derive(Clone)]
+pub(crate) struct Theme {
+    /// Which preset is drawn.
+    pub preset: Preset,
+    /// The preset's app colours.
+    pub tokens: Tokens,
+    /// The user's status fills that are readable on this preset.
+    pub fills: StatusFills,
+    /// `uiFontSize / 14`.
+    pub ui_scale: f32,
+}
+
+impl Global for Theme {}
+
+impl Theme {
+    /// The colours of a session row, tab or pane header in `tone`.
+    pub fn tone(&self, tone: Tone) -> ToneColors {
+        tone_colors(self.preset, &self.fills, tone)
+    }
+
+    /// `size` scaled with the interface font size.
+    pub fn ui(&self, size: f32) -> Pixels {
+        px(size * self.ui_scale)
+    }
+}
+
+/// The theme global.
+pub(crate) fn theme(cx: &App) -> &Theme {
+    cx.global::<Theme>()
+}
 
 /// Corner radii, in pixels: chips and small buttons, rows and tabs, panels and panes.
 pub(crate) const RADIUS_SMALL: f32 = 8.0;
@@ -40,30 +55,6 @@ const FONTS: [&[u8]; 5] = [
     include_bytes!("../assets/fonts/Figtree-SemiBold.ttf"),
     include_bytes!("../assets/fonts/Figtree-Bold.ttf"),
 ];
-
-/// Colours of a session row, tab or pane header in a given tone.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ToneColors {
-    /// Background (`None` = the surface shows through).
-    pub fill: Option<u32>,
-    /// Text.
-    pub ink: u32,
-    /// The status dot.
-    pub dot: u32,
-}
-
-/// The colours of `tone`: solid pastels with dark ink for the states that ask for attention.
-pub(crate) fn tone_colors(tone: Tone) -> ToneColors {
-    let (fill, ink, dot) = match tone {
-        Tone::NeedsInput => (Some(0xf7c9a3), 0x3b2414, 0xc9773d),
-        Tone::Working => (Some(0xb9d5f6), 0x132a43, 0x4f8fd6),
-        Tone::Done => (Some(0xc1e5cd), 0x143322, 0x4c9e6b),
-        Tone::Idle => (Some(0x2f3647), 0xd5dae6, MUTED),
-        Tone::Elsewhere => (None, 0xc9d0de, MUTED),
-        Tone::Closed => (None, MUTED, 0x555e70),
-    };
-    ToneColors { fill, ink, dot }
-}
 
 /// The small "container" tag on dev container sessions, tabs and pane headers, drawn in `ink`.
 pub(crate) fn container_chip(ink: u32) -> Div {
@@ -92,44 +83,51 @@ fn embedded_fonts() -> Vec<Cow<'static, [u8]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use app_core::theme_colors::{contrast, terminal_palette, tokens};
 
-    /// WCAG relative luminance of an `0xRRGGBB` colour.
-    fn luminance(color: u32) -> f64 {
-        let channel = |shift: u32| {
-            let c = f64::from((color >> shift) & 0xff) / 255.0;
-            if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-        };
-        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-    }
+    const PRESETS: [Preset; 2] = [Preset::Mist, Preset::MistLight];
+    const TONES: [Tone; 6] = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
 
-    fn contrast(a: u32, b: u32) -> f64 {
-        let (light, dark) = if luminance(a) > luminance(b) { (luminance(a), luminance(b)) } else { (luminance(b), luminance(a)) };
-        (light + 0.05) / (dark + 0.05)
+    fn theme(preset: Preset) -> Theme {
+        Theme { preset, tokens: tokens(preset), fills: StatusFills::default(), ui_scale: 1.0 }
     }
 
     #[test]
     fn row_text_is_readable_on_every_tone() {
-        let tones = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
-        for tone in tones {
-            let colors = tone_colors(tone);
-            let ratio = contrast(colors.ink, colors.fill.unwrap_or(SURFACE));
-            assert!(ratio >= 4.5, "{tone:?}: {ratio:.2}");
+        for preset in PRESETS {
+            let theme = theme(preset);
+            let t = theme.tokens;
+            for tone in TONES {
+                let colors = theme.tone(tone);
+                let ratio = contrast(colors.ink, colors.fill.unwrap_or(t.surface));
+                assert!(ratio >= 4.5, "{preset:?} {tone:?}: {ratio:.2}");
+            }
+            assert!(contrast(t.text, t.surface) >= 4.5 && contrast(t.muted, t.surface) >= 4.5);
+            assert!(contrast(t.on_accent, t.accent) >= 4.5, "{preset:?}");
         }
-        assert!(contrast(TEXT, SURFACE) >= 4.5 && contrast(MUTED, SURFACE) >= 4.5 && contrast(ON_ACCENT, ACCENT) >= 4.5);
     }
 
     #[test]
     fn states_that_ask_for_attention_stand_out_from_quiet_ones() {
-        // The pastel fills are far lighter than the surface; quiet states stay close to it.
+        // On Mist the pastel fills are far lighter than the surface; quiet states stay close to it.
+        let theme = theme(Preset::Mist);
         for tone in [Tone::NeedsInput, Tone::Working, Tone::Done] {
-            assert!(contrast(tone_colors(tone).fill.unwrap(), SURFACE) >= 7.0, "{tone:?}");
+            assert!(contrast(theme.tone(tone).fill.unwrap(), theme.tokens.surface) >= 7.0, "{tone:?}");
         }
-        assert!(contrast(tone_colors(Tone::Idle).fill.unwrap(), SURFACE) < 1.5);
+        assert!(contrast(theme.tone(Tone::Idle).fill.unwrap(), theme.tokens.surface) < 1.5);
     }
 
     #[test]
     fn pane_cards_match_the_terminal_background() {
-        assert_eq!(app_core::snapshot::Rgb::hex(TERMINAL), app_core::palette::DARK.background);
+        for preset in PRESETS {
+            assert_eq!(app_core::snapshot::Rgb::hex(tokens(preset).terminal), terminal_palette(preset).background, "{preset:?}");
+        }
+    }
+
+    #[test]
+    fn ui_sizes_scale_with_the_interface_font() {
+        let theme = Theme { ui_scale: 1.5, ..theme(Preset::Mist) };
+        assert_eq!(theme.ui(48.0), px(72.0));
     }
 
     #[test]

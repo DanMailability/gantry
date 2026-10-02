@@ -42,7 +42,7 @@ pub fn save(path: &Path, workspace: &Workspace) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let json = serde_json::to_vec_pretty(&SavedLayout { version: VERSION, workspace: workspace.clone() })
+    let json = serde_json::to_vec_pretty(&SavedLayout { version: VERSION, workspace: workspace.saveable() })
         .map_err(|err| invalid(err.to_string()))?;
     let temp = path.with_extension("json.tmp");
     std::fs::write(&temp, json)?;
@@ -101,6 +101,17 @@ mod tests {
         broken.leaves.clear();
         std::fs::write(&path, serde_json::to_string(&SavedLayout { version: VERSION, workspace: broken }).unwrap()).unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn the_settings_tab_is_not_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        workspace.open_settings();
+        save(&path, &workspace).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("settings"));
+        assert_eq!(load(&path).unwrap().unwrap().tabs, sample().tabs);
     }
 
     #[test]
