@@ -63,6 +63,9 @@ fn recording(tone: AlertTone) -> &'static [u8] {
     }
 }
 
+/// Silence before every sound: a device that wakes late swallows this instead of the start of a short blip.
+const LEAD_IN: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Play `tone` at `volume` (0 to 1) on a thread of its own. Without an audio device it does nothing.
 pub fn play(tone: AlertTone, volume: f32) {
     std::thread::spawn(move || {
@@ -83,7 +86,7 @@ pub fn play(tone: AlertTone, volume: f32) {
         };
         let player = rodio::Player::connect_new(sink.mixer());
         player.set_volume(volume);
-        player.append(source);
+        player.append(rodio::Source::delay(source, LEAD_IN));
         player.sleep_until_end();
     });
 }
