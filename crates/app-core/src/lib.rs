@@ -15,6 +15,7 @@ pub mod replay;
 pub mod paste;
 pub mod scroll;
 pub mod session_tree;
+pub mod settings;
 pub mod sessions;
 pub mod snapshot;
 pub mod split_tree;
