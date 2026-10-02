@@ -132,7 +132,7 @@ impl SettingsView {
         let current = chosen.unwrap_or(status.default_fill(theme.preset));
         self.hex.clear();
         self.hex.insert(&hex(current));
-        self.hex_selected = true;
+        self.hex.select_all();
         self.popover = Some(Popover::Fill(status));
         self.hex_focus.focus(window, cx);
         cx.notify();
@@ -151,18 +151,8 @@ impl SettingsView {
                 self.apply_fill(status, fill, cx);
                 self.close_popover(window, cx);
             }
-        } else if keystroke.key == "a" && (keystroke.modifiers.control || keystroke.modifiers.platform) {
-            self.hex_selected = true;
-        } else {
-            let replaces = matches!(keystroke.key.as_str(), "backspace" | "delete")
-                || keystroke.key_char.as_ref().is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control));
-            if self.hex_selected && replaces && !keystroke.modifiers.control && !keystroke.modifiers.platform {
-                self.hex.clear();
-            }
-            if !field::edit(&mut self.hex, keystroke) {
-                return;
-            }
-            self.hex_selected = false;
+        } else if !field::edit(&mut self.hex, keystroke, cx) {
+            return;
         }
         cx.stop_propagation();
         cx.notify();
@@ -361,7 +351,7 @@ impl SettingsView {
                 this.apply_fill(status, fill, cx);
                 this.hex.clear();
                 this.hex.insert(&hex(fill));
-                this.hex_selected = true;
+                this.hex.select_all();
                 cx.notify();
             });
             self.pressable("swatch", index, None, window, cx, pick)
@@ -387,9 +377,10 @@ impl SettingsView {
             .border_color(rgb(if hex_focused { theme.tokens.accent } else { theme.tokens.line }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| this.hex_key_down(status, event, window, cx)))
             .on_click(cx.listener(|this, _, window, cx| this.hex_focus.focus(window, cx)))
-            .child(field::render(&self.hex, "#rrggbb", hex_focused, theme).when(self.hex_selected, |text| {
-                text.bg(rgba((theme.tokens.accent << 8) | 0x55))
-            }));
+            .child(field::render(&self.hex, "#rrggbb", hex_focused, theme, field::on_press(cx, |this, offset, clicks, _, cx| {
+                this.hex.press(offset, clicks);
+                cx.notify();
+            })));
         deferred(
             div()
                 .occlude()

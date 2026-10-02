@@ -160,7 +160,7 @@ impl LauncherView {
             "escape" if self.chip_open => self.chip_open = false,
             "escape" => cx.emit(LauncherEvent::Dismiss),
             _ => {
-                if !field::edit(&mut self.query, keystroke) {
+                if !field::edit(&mut self.query, keystroke, cx) {
                     return;
                 }
                 self.refresh();
@@ -336,7 +336,7 @@ impl Render for LauncherView {
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(theme.tokens.line))
-                    .child(field::render(&self.query, "Open a directory…", true, &theme)),
+                    .child(field::render(&self.query, "Open a directory…", true, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.query.press(offset, clicks); cx.notify(); }))),
             )
             .when(self.dirs.dirs.len() > 1, |launcher| launcher.child(self.render_chip(cx)))
             .child(

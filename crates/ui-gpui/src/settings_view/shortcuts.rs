@@ -185,13 +185,13 @@ impl SettingsView {
             .border_1()
             .border_color(rgb(if focused { theme.tokens.accent } else { theme.tokens.line }))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if field::edit(&mut this.shortcut_filter, &event.keystroke) {
+                if field::edit(&mut this.shortcut_filter, &event.keystroke, cx) {
                     cx.stop_propagation();
                     cx.notify();
                 }
             }))
             .on_click(cx.listener(|this, _, window, cx| this.filter_focus.focus(window, cx)))
-            .child(field::render(&self.shortcut_filter, "Filter shortcuts", focused, theme));
+            .child(field::render(&self.shortcut_filter, "Filter shortcuts", focused, theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.shortcut_filter.press(offset, clicks); cx.notify(); })));
 
         div().relative().flex().flex_col().gap(theme.ui(20.)).child(filter_box).child(body)
     }
