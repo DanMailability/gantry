@@ -145,7 +145,7 @@ mod tests {
     fn tick_is_short() {
         let samples = tone_samples(AlertTone::Tick, 1.0);
         assert!(samples.len() <= at(0.06));
-        assert!(samples[at(0.05).min(samples.len())..].iter().all(|x| x.abs() < 0.01));
+        assert!(samples[at(0.04)..].iter().all(|x| x.abs() < 0.01));
     }
 
     #[test]

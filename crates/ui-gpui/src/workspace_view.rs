@@ -399,6 +399,7 @@ impl WorkspaceView {
         if channels.badge {
             self.unseen.insert(leaf, alert.kind.clone());
             self.sync_unseen(cx);
+            self.clear_seen(window, cx);
         }
         if !channels.notification && channels.sound.is_none() {
             return;
@@ -557,10 +558,18 @@ impl WorkspaceView {
     /// Open a new Claude or shell pane — as a new tab, or splitting the focused pane along `axis` —
     /// in the focused pane's current directory.
     fn open(&mut self, claude: bool, axis: Option<Axis>) {
+        if axis.is_some() && self.settings_active() {
+            return;
+        }
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.pane);
         self.open_new(claude, cwd, axis, cwd_from);
+    }
+
+    /// The Settings tab is the active one (it has no pane to split).
+    fn settings_active(&self) -> bool {
+        self.workspace.settings_tab() == Some(self.workspace.active)
     }
 
     /// Start a new Claude or shell pane in `cwd` — after asking where, when a dev container mounts `cwd`.
@@ -618,6 +627,9 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if axis.is_some() && self.settings_active() {
+            return;
+        }
         let leaf = match axis.and_then(|axis| self.workspace.split(axis, launch.clone())) {
             Some(leaf) => leaf,
             None => self.workspace.new_tab(launch),

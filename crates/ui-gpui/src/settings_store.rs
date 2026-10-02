@@ -33,10 +33,32 @@ fn reload_decision(applied: &Settings, loaded: &Loaded) -> Reload {
     }
 }
 
+/// Whether a reload must re-apply: the settings changed, or the file's problems did (Gantry's own write changes neither).
+fn reload_needs_apply(decision: &Reload, old: &[Problem], new: &[Problem]) -> bool {
+    matches!(decision, Reload::Apply(_)) || old != new
+}
+
+/// Save a UI change unless the file is broken (a save would overwrite the user's hand edits); say so instead.
+fn save_or_explain(broken: bool, problems: &mut Vec<Problem>, save: impl FnOnce() -> std::io::Result<()>) {
+    let problem = if broken {
+        Problem { key: String::new(), message: "Not saved: fix settings.json first".into() }
+    } else {
+        match save() {
+            Ok(()) => return,
+            Err(error) => Problem { key: String::new(), message: format!("could not save: {error}") },
+        }
+    };
+    if !broken || !problems.contains(&problem) {
+        problems.push(problem);
+    }
+}
+
 /// The applied settings, the raw JSON they came from, what was wrong with the file, and the file watcher.
 pub(crate) struct SettingsStore {
     settings: Settings,
     raw: Map<String, Value>,
+    /// The last read of the file was not JSON: changes apply in memory only, so hand edits are not overwritten.
+    broken: bool,
     /// Problems found reading (or writing) the file.
     file_problems: Vec<Problem>,
     /// `file_problems` plus the status fills the theme cannot draw readably.
@@ -54,6 +76,7 @@ impl SettingsStore {
         let loaded = settings::load(&path);
         let (watcher, reload) = watch(&path, cx).unzip();
         cx.set_global(SettingsStore {
+            broken: loaded.settings.is_none(),
             settings: loaded.settings.unwrap_or_default(),
             raw: loaded.raw,
             file_problems: loaded.problems,
@@ -88,9 +111,8 @@ impl SettingsStore {
         if new == store.settings {
             return;
         }
-        if let Err(error) = settings::save(&store.path, &new, &store.raw) {
-            store.file_problems.push(Problem { key: String::new(), message: format!("could not save: {error}") });
-        }
+        let (path, raw) = (&store.path, &store.raw);
+        save_or_explain(store.broken, &mut store.file_problems, || settings::save(path, &new, raw));
         store.settings = new;
         apply(cx);
     }
@@ -108,11 +130,15 @@ impl SettingsStore {
         if loaded.settings.is_some() {
             store.raw = loaded.raw;
         }
+        store.broken = loaded.settings.is_none();
+        let reapply = reload_needs_apply(&decision, &store.file_problems, &loaded.problems);
         store.file_problems = loaded.problems;
         if let Reload::Apply(settings) = decision {
             store.settings = settings;
         }
-        apply(cx);
+        if reapply {
+            apply(cx);
+        }
     }
 }
 
@@ -194,6 +220,46 @@ mod tests {
         let broken = loaded(None, vec![problem]);
         assert_eq!(reload_decision(&Settings::default(), &broken), Reload::Keep);
         assert_eq!(broken.problems.len(), 1);
+    }
+
+    #[test]
+    fn keep_reapplies_only_when_problems_change() {
+        let problem = Problem { key: "alerts.volume".into(), message: "bad".into() };
+        assert!(!reload_needs_apply(&Reload::Keep, &[], &[]));
+        assert!(!reload_needs_apply(&Reload::Keep, std::slice::from_ref(&problem), std::slice::from_ref(&problem)));
+        assert!(reload_needs_apply(&Reload::Keep, &[], std::slice::from_ref(&problem)));
+        assert!(reload_needs_apply(&Reload::Keep, std::slice::from_ref(&problem), &[]));
+        assert!(reload_needs_apply(&Reload::Apply(Settings::default()), &[], &[]));
+    }
+
+    #[test]
+    fn broken_file_is_never_saved_over() {
+        let mut problems = Vec::new();
+        let mut saved = false;
+        save_or_explain(true, &mut problems, || {
+            saved = true;
+            Ok(())
+        });
+        assert!(!saved);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].message.starts_with("Not saved"));
+        // Repeated changes do not repeat the message.
+        save_or_explain(true, &mut problems, || Ok(()));
+        assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn good_file_is_saved_and_failure_reported() {
+        let mut problems = Vec::new();
+        let mut saved = false;
+        save_or_explain(false, &mut problems, || {
+            saved = true;
+            Ok(())
+        });
+        assert!(saved && problems.is_empty());
+        save_or_explain(false, &mut problems, || Err(std::io::Error::other("disk full")));
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].message.contains("disk full"));
     }
 
     #[test]
