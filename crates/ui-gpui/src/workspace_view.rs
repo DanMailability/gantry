@@ -187,7 +187,7 @@ impl WorkspaceView {
             }
             let _ = this.update_in(cx, |view, window, cx| view.on_events(vec![ClientEvent::Disconnected], window, cx));
         });
-        let sidebar = cx.new(|cx| SidebarView::new(restored.workspace.sidebar.view, cx));
+        let sidebar = cx.new(SidebarView::new);
         let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
             this.on_sidebar_event(event.clone(), window, cx)
         });
@@ -682,10 +682,6 @@ impl WorkspaceView {
             },
             SidebarEvent::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
             SidebarEvent::New { claude } => self.open(claude, None),
-            SidebarEvent::ViewChanged(view) => {
-                self.workspace.sidebar.view = view;
-                self.save(cx);
-            }
             SidebarEvent::Dismiss => self.focus_current(window, cx),
         }
     }

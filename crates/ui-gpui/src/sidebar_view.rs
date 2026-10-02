@@ -12,7 +12,6 @@ use app_core::session_tree::{
 };
 use app_core::sessions::SessionStore;
 use app_core::text_field::TextField;
-use app_core::workspace::TreeView;
 use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, anchored,
@@ -23,7 +22,7 @@ use protocol::message::SessionInfo;
 use crate::field;
 use crate::theme;
 use crate::theme::{
-    ACCENT, GROUND, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_SMALL, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
+    ACCENT, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_SMALL, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
@@ -57,8 +56,6 @@ pub enum SidebarEvent {
         /// Claude (true) or a shell.
         claude: bool,
     },
-    /// The user switched between Projects and Status.
-    ViewChanged(TreeView),
     /// Give keyboard focus back to the pane.
     Dismiss,
 }
@@ -68,7 +65,6 @@ pub struct SidebarView {
     focus_handle: FocusHandle,
     sessions: SessionStore,
     shells: Vec<ShellEntry>,
-    view: TreeView,
     filter: TextField,
     toggled: HashSet<PathBuf>,
     details: Option<String>,
@@ -94,8 +90,8 @@ impl Focusable for SidebarView {
 }
 
 impl SidebarView {
-    /// An empty sidebar showing `view`; sessions arrive with `set_sessions`.
-    pub fn new(view: TreeView, cx: &mut Context<Self>) -> Self {
+    /// An empty sidebar; sessions arrive with `set_sessions`.
+    pub fn new(cx: &mut Context<Self>) -> Self {
         let refresh = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(REFRESH).await;
@@ -113,7 +109,6 @@ impl SidebarView {
             focus_handle: cx.focus_handle(),
             sessions: SessionStore::default(),
             shells: Vec::new(),
-            view,
             filter: TextField::default(),
             toggled: HashSet::new(),
             details: None,
@@ -179,10 +174,7 @@ impl SidebarView {
                 project_of: &project_of,
                 now_ms,
             };
-            match self.view {
-                TreeView::Projects => session_tree::projects(&input),
-                TreeView::Status => session_tree::status(&input),
-            }
+            session_tree::projects(&input)
         };
         self.rows = rows;
         if self.selected_index().is_none() {
@@ -234,15 +226,6 @@ impl SidebarView {
             }
             Activation::Nothing => cx.notify(),
             activation => cx.emit(SidebarEvent::Activate { activation, split }),
-        }
-    }
-
-    fn set_view(&mut self, view: TreeView, cx: &mut Context<Self>) {
-        if self.view != view {
-            self.view = view;
-            self.selected = None;
-            self.rebuild(cx);
-            cx.emit(SidebarEvent::ViewChanged(view));
         }
     }
 
@@ -440,23 +423,6 @@ fn count_chips(counts: &ToneCounts) -> Vec<gpui::Div> {
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        let current = self.view;
-        let segment = |id: &'static str, label: &'static str, view: TreeView, cx: &mut Context<Self>| {
-            let active = current == view;
-            div()
-                .id(id)
-                .flex_1()
-                .h(px(30.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(RADIUS - 4.))
-                .cursor_pointer()
-                .when(active, |el| el.bg(rgb(RAISED)).text_color(rgb(TEXT)).font_weight(FontWeight::SEMIBOLD))
-                .when(!active, |el| el.text_color(rgb(MUTED)).hover(|style| style.text_color(rgb(TEXT))))
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
-        };
         let filtering = !self.filter.text().is_empty();
         let total = self.sessions.all().count();
         div()
@@ -471,25 +437,11 @@ impl Render for SidebarView {
             .font_family(UI_FONT)
             .child(
                 div()
-                    .flex_none()
-                    .mx_3()
-                    .mt_3()
-                    .mb_2()
-                    .p(px(4.))
-                    .flex()
-                    .gap_1()
-                    .rounded(px(RADIUS))
-                    .bg(rgb(GROUND))
-                    .text_sm()
-                    .child(segment("view-projects", "By project", TreeView::Projects, cx))
-                    .child(segment("view-status", "By status", TreeView::Status, cx)),
-            )
-            .child(
-                div()
                     .id("filter")
                     .h(px(36.))
                     .flex_none()
                     .mx_3()
+                    .mt_3()
                     .mb_1()
                     .px_3()
                     .flex()

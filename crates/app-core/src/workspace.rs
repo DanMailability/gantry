@@ -155,17 +155,6 @@ pub struct Tab {
     pub focused: NodeId,
 }
 
-/// Which sidebar view is shown.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TreeView {
-    /// Sessions by project.
-    #[default]
-    #[serde(alias = "Folders")]
-    Projects,
-    /// Sessions grouped by state.
-    Status,
-}
-
 /// Default sidebar width, in pixels.
 pub const SIDEBAR_WIDTH: f32 = 280.0;
 
@@ -176,13 +165,11 @@ pub struct SidebarState {
     pub visible: bool,
     /// Width in pixels.
     pub width: f32,
-    /// Projects or Status.
-    pub view: TreeView,
 }
 
 impl Default for SidebarState {
     fn default() -> Self {
-        SidebarState { visible: true, width: SIDEBAR_WIDTH, view: TreeView::Projects }
+        SidebarState { visible: true, width: SIDEBAR_WIDTH }
     }
 }
 
@@ -197,7 +184,7 @@ pub struct Workspace {
     pub active: usize,
     /// Every leaf by id.
     pub leaves: BTreeMap<NodeId, Leaf>,
-    /// Sidebar visibility, width and view.
+    /// Sidebar visibility and width.
     #[serde(default)]
     pub sidebar: SidebarState,
     next_id: NodeId,
@@ -301,9 +288,24 @@ impl Workspace {
             return;
         }
         let target = (self.active as isize + delta).clamp(0, self.tabs.len() as isize - 1) as usize;
-        let tab = self.tabs.remove(self.active);
-        self.tabs.insert(target, tab);
-        self.active = target;
+        self.move_tab_to(self.active, target);
+    }
+
+    /// Move tab `from` to position `to`; the visible tab stays visible wherever it ends up. Out-of-range
+    /// indices do nothing.
+    pub fn move_tab_to(&mut self, from: usize, to: usize) {
+        let len = self.tabs.len();
+        if from >= len || to >= len || from == to {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = match self.active {
+            active if active == from => to,
+            active if from < active && active <= to => active - 1,
+            active if to <= active && active < from => active + 1,
+            active => active,
+        };
     }
 
     /// Set a split's ratio in the visible tab.
@@ -690,15 +692,46 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_defaults_to_a_visible_project_view() {
-        let state = Workspace::default().sidebar;
-        assert_eq!((state.visible, state.width, state.view), (true, SIDEBAR_WIDTH, TreeView::Projects));
+    fn move_tab_to_moves_one_tab_and_the_active_tab_follows_its_content() {
+        let mut ws = Workspace::default();
+        for dir in ["/a", "/b", "/c", "/d"] {
+            ws.new_tab(shell(dir));
+        }
+        let order = |ws: &Workspace| ws.tabs.iter().map(|tab| ws.leaves[&tab.focused].launch.cwd.display().to_string()).collect::<Vec<_>>();
+        ws.active = 1; // "/b"
+        ws.move_tab_to(0, 3);
+        assert_eq!(order(&ws), ["/b", "/c", "/d", "/a"]);
+        assert_eq!(ws.active, 0, "the visible tab is still /b");
+        ws.move_tab_to(3, 0);
+        assert_eq!(order(&ws), ["/a", "/b", "/c", "/d"]);
+        assert_eq!(ws.active, 1);
+        ws.move_tab_to(1, 2);
+        assert_eq!(order(&ws), ["/a", "/c", "/b", "/d"]);
+        assert_eq!(ws.active, 2, "the moved tab was the visible one");
     }
 
     #[test]
-    fn layouts_saved_with_the_folders_view_open_the_project_view() {
-        let state: SidebarState = serde_json::from_str(r#"{"visible":true,"width":300.0,"view":"Folders"}"#).unwrap();
-        assert_eq!(state.view, TreeView::Projects);
+    fn moving_a_tab_onto_itself_changes_nothing() {
+        let mut ws = Workspace::default();
+        ws.new_tab(shell("/a"));
+        ws.new_tab(shell("/b"));
+        let before = ws.clone();
+        ws.move_tab_to(1, 1);
+        ws.move_tab_to(0, 7);
+        ws.move_tab_to(9, 0);
+        assert_eq!(ws, before);
+    }
+
+    #[test]
+    fn the_sidebar_defaults_to_visible() {
+        let state = Workspace::default().sidebar;
+        assert_eq!((state.visible, state.width), (true, SIDEBAR_WIDTH));
+    }
+
+    #[test]
+    fn layouts_saved_with_a_sidebar_view_still_load() {
+        let state: SidebarState = serde_json::from_str(r#"{"visible":false,"width":300.0,"view":"Status"}"#).unwrap();
+        assert_eq!((state.visible, state.width), (false, 300.0));
     }
 
     #[test]
