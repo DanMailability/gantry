@@ -23,7 +23,7 @@ use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, Ses
 use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
-use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
+use app_core::session_tree::{Activation, PaneEntry, TabEntry, display_path, session_title, status_tone, tone_word};
 
 use crate::alerts::{self, Notice};
 use crate::context_menu::{self, OpenMenu};
@@ -31,6 +31,7 @@ use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
+use crate::hover_card::{self, HoverCard};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::SettingsView;
 use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, theme};
@@ -1360,8 +1361,21 @@ impl WorkspaceView {
                 };
                 let fill = if settings { Some(theme.tokens.text) } else { colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised)) };
                 let can_drag = self.workspace.can_drag(index);
+                let card = HoverCard {
+                    title: title.clone(),
+                    status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
+                    dir: dir.clone(),
+                    container,
+                    folder: self
+                        .workspace
+                        .tabs
+                        .get(index)
+                        .and_then(|tab| self.workspace.leaves.get(&tab.focused))
+                        .map(|leaf| display_path(&leaf.launch.cwd, std::env::home_dir().as_deref())),
+                };
                 div()
                     .id(("tab", index))
+                    .when(!settings, |tab| tab.tooltip(hover_card::tooltip(card)))
                     .relative()
                     .h(theme.ui(32.))
                     .when(project.is_some(), |tab| tab.pl(theme.ui(16.)))
@@ -1384,12 +1398,10 @@ impl WorkspaceView {
                     .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(theme.tokens.raised))))
                     .cursor_pointer()
                     .when_some(project, |tab, color| tab.child(side_line(color, &theme)))
-                    .when_some(colors.filter(|_| !settings), |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
                     .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
                     .child(div().min_w(theme.ui(24.)).truncate().child(title))
                     .when(container, |tab| tab.child(container_icon(ink, &theme)))
                     .children(dir.map(|badge| dir_badge(&badge, &theme)))
-                    .when(unseen, |tab| tab.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(ink))))
                     .child(
                         div()
                             .id(("close-tab", index))
@@ -1519,7 +1531,7 @@ impl WorkspaceView {
                     .absolute()
                     .size_full()
             })
-            .children(tab.root.layout(Rect::UNIT).into_iter().filter_map(|(leaf, rect)| {
+            .children(tab.root.layout(Rect::UNIT).into_iter().enumerate().filter_map(|(index, (leaf, rect))| {
                 let view = self.slots.get(&leaf)?.view.clone();
                 let focused = leaf == tab.focused;
                 let title = view.read(cx).title();
@@ -1529,6 +1541,7 @@ impl WorkspaceView {
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
                 let dir = self.leaf_dir_badge(leaf, cx);
                 let project = self.leaf_project_color(leaf, cx);
+                let folder = self.workspace.leaves.get(&leaf).map(|entry| display_path(&entry.launch.cwd, std::env::home_dir().as_deref()));
                 Some(
                     div()
                         .absolute()
@@ -1548,7 +1561,7 @@ impl WorkspaceView {
                                 .bg(rgb(theme.tokens.terminal))
                                 .border_2()
                                 .border_color(rgb(if focused && multiple { theme.tokens.accent } else { theme.tokens.line }))
-                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, dir, project, &theme)))
+                                .when(multiple, |pane| pane.child(pane_header(index, title, status, unseen, container, dir, folder, project, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1587,15 +1600,29 @@ impl WorkspaceView {
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
-fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, dir: Option<DirBadge>, project: Option<u32>, theme: &Theme) -> impl IntoElement {
+#[allow(clippy::too_many_arguments)]
+fn pane_header(
+    index: usize,
+    title: String,
+    status: Option<SessionStatus>,
+    unseen: bool,
+    container: bool,
+    dir: Option<DirBadge>,
+    folder: Option<String>,
+    project: Option<u32>,
+    theme: &Theme,
+) -> impl IntoElement {
     let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
-    let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
-        Tone::NeedsInput => "Needs input",
-        Tone::Working => "Working",
-        Tone::Done => "Done",
-        _ => "Idle",
-    });
+    let card = HoverCard {
+        title: title.clone(),
+        status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
+        dir: dir.clone(),
+        container,
+        folder,
+    };
     div()
+        .id(("pane-header", index))
+        .tooltip(hover_card::tooltip(card))
         .relative()
         .flex_none()
         .h(theme.ui(28.))
@@ -1612,11 +1639,9 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
         .bg(rgb(colors.and_then(|colors| colors.fill).unwrap_or(theme.tokens.raised)))
         .text_color(rgb(colors.map_or(theme.tokens.text, |colors| colors.ink)))
         .when_some(project, |header, color| header.child(side_line(color, theme)))
-        .when_some(colors, |header, colors| header.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme)))
         .children(dir.map(|badge| dir_badge(&badge, theme)))
-        .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
 }
 
 /// Title-bar behaviour for an empty stretch of the tab bar (client-side decorations): drag moves the window,

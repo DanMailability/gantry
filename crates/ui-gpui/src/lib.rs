@@ -4,6 +4,7 @@ mod alerts;
 mod assets;
 mod context_menu;
 mod field;
+mod hover_card;
 pub mod launcher_view;
 pub mod recents_view;
 pub mod sidebar_view;
