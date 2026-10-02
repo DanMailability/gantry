@@ -312,9 +312,10 @@ impl WorkspaceView {
     fn spawn_leaf(&mut self, leaf: NodeId, cwd_from: Option<PaneId>, cx: &mut Context<Self>) {
         let Some(slot) = self.slots.get(&leaf) else { return };
         let (cols, rows) = slot.view.read(cx).grid_size();
+        let scrollback = cx.global::<SettingsStore>().settings().window.scrollback;
         self.next_request += 1;
         self.pending.insert(self.next_request, leaf);
-        self.client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows));
+        self.client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
     }
 
     fn on_events(&mut self, events: Vec<ClientEvent>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1507,7 +1508,7 @@ pub(crate) fn round_button(
 
 /// A new Claude session (or the user's shell) in `cwd`.
 pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
-    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd, container: None } }
+    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd, container: None, claude: false, claude_dir: None, env: Vec::new() } }
 }
 
 impl Render for WorkspaceView {
