@@ -21,14 +21,14 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 #[derive(Debug, PartialEq)]
 enum Reload {
     /// Replace the applied settings.
-    Apply(Settings),
+    Apply(Box<Settings>),
     /// Leave them alone (unchanged, or the file is not JSON).
     Keep,
 }
 
 fn reload_decision(applied: &Settings, loaded: &Loaded) -> Reload {
     match &loaded.settings {
-        Some(settings) if settings != applied => Reload::Apply(settings.clone()),
+        Some(settings) if settings != applied => Reload::Apply(Box::new(settings.clone())),
         _ => Reload::Keep,
     }
 }
@@ -134,7 +134,7 @@ impl SettingsStore {
         let reapply = reload_needs_apply(&decision, &store.file_problems, &loaded.problems);
         store.file_problems = loaded.problems;
         if let Reload::Apply(settings) = decision {
-            store.settings = settings;
+            store.settings = *settings;
         }
         if reapply {
             apply(cx);
@@ -229,7 +229,7 @@ mod tests {
         assert!(!reload_needs_apply(&Reload::Keep, std::slice::from_ref(&problem), std::slice::from_ref(&problem)));
         assert!(reload_needs_apply(&Reload::Keep, &[], std::slice::from_ref(&problem)));
         assert!(reload_needs_apply(&Reload::Keep, std::slice::from_ref(&problem), &[]));
-        assert!(reload_needs_apply(&Reload::Apply(Settings::default()), &[], &[]));
+        assert!(reload_needs_apply(&Reload::Apply(Box::default()), &[], &[]));
     }
 
     #[test]
@@ -266,6 +266,6 @@ mod tests {
     fn changed_file_applies() {
         let mut changed = Settings::default();
         changed.terminal_font.size = 18.0;
-        assert_eq!(reload_decision(&Settings::default(), &loaded(Some(changed.clone()), Vec::new())), Reload::Apply(changed));
+        assert_eq!(reload_decision(&Settings::default(), &loaded(Some(changed.clone()), Vec::new())), Reload::Apply(Box::new(changed)));
     }
 }
