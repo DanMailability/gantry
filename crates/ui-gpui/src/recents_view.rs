@@ -15,8 +15,8 @@ use gpui::{
 use protocol::message::SessionInfo;
 
 use crate::field;
-use crate::settings_store::SettingsStore;
-use crate::theme::{RADIUS, RADIUS_LARGE, container_chip, side_line, theme};
+use crate::settings_store::{SettingsStore, dir_badge_for};
+use crate::theme::{RADIUS, RADIUS_LARGE, container_icon, dir_badge, side_line, theme};
 
 const ROW_HEIGHT: f32 = 36.0;
 
@@ -277,7 +277,8 @@ impl RecentsView {
                         .when_some(theme.project(project), |pill, color| pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme)))
                         .child(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(theme.tokens.muted)))
                         .child(div().flex_1().min_w_0().truncate().child(session_title(session).to_string()))
-                        .when(session.container.is_some(), |pill| pill.child(container_chip(theme.tokens.text)))
+                        .when(session.container.is_some(), |pill| pill.child(container_icon(theme.tokens.text, &theme)))
+                        .children(dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|badge| dir_badge(&badge, &theme)))
                         .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(if session.cwd_exists { age.clone() } else { "Folder missing".into() })),
                 ),
                 RecentItem::More { hidden, .. } => row.child(pill().pl(theme.ui(30.)).text_color(rgb(theme.tokens.accent)).child(format!("Show {hidden} more"))),

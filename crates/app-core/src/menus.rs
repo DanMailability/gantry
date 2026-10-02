@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn the_context_follows_the_settings() {
         use crate::settings::ClaudeDir;
-        let dir = |name: &str| ClaudeDir { name: name.into(), path: format!("~/.{name}").into(), command: "claude".into(), args: vec![] };
+        let dir = |name: &str| ClaudeDir { name: name.into(), path: format!("~/.{name}").into(), command: "claude".into(), args: vec![], color: None };
         let mut settings = Settings { claude_dirs: vec![dir("Personal"), dir("Work")], ..Settings::default() };
         settings.default_claude_dir = Some("Work".into());
         settings.folder_claude_dirs.insert("/r/app".into(), "Personal".into());

@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 
 use app_core::session_tree::display_path;
 use app_core::settings::{ClaudeDir, Settings};
+use app_core::theme_colors::ProjectColor;
+use app_core::workspace::ClaudeDirs;
 use app_core::text_field::TextField;
-use gpui::{Context, Div, KeyDownEvent, PathPromptOptions, Window, div, px, rgb};
+use gpui::{Context, Div, FontWeight, KeyDownEvent, PathPromptOptions, Window, deferred, div, px, rgb};
 
 use super::*;
 use crate::field;
@@ -116,7 +118,7 @@ fn dir_rows(settings: &Settings, daemon_dir: Option<&Path>, home: Option<&Path>)
         return settings.claude_dirs.clone();
     }
     let path = daemon_dir.map(|dir| display_path(dir, home)).unwrap_or_else(|| "~/.claude".into());
-    vec![ClaudeDir { name: "Default".into(), path: PathBuf::from(path), command: "claude".into(), args: Vec::new() }]
+    vec![ClaudeDir { name: "Default".into(), path: PathBuf::from(path), command: "claude".into(), args: Vec::new(), color: None }]
 }
 
 /// Make the implicit Default a real entry, so it can be edited or sit beside others.
@@ -145,7 +147,15 @@ fn add_dir(settings: &mut Settings, picked: &Path, daemon_dir: Option<&Path>, ho
     if settings.claude_dirs.iter().any(|dir| dir.path == path) {
         return;
     }
-    settings.claude_dirs.push(ClaudeDir { name, path, command: "claude".into(), args: Vec::new() });
+    settings.claude_dirs.push(ClaudeDir { name, path, command: "claude".into(), args: Vec::new(), color: None });
+}
+
+/// Pick `color` for the dir at `index` (listing the implicit Default first, so it has somewhere to live).
+fn set_dir_color(settings: &mut Settings, index: usize, color: ProjectColor, daemon_dir: Option<&Path>, home: Option<&Path>) {
+    materialize(settings, daemon_dir, home);
+    if let Some(dir) = settings.claude_dirs.get_mut(index) {
+        dir.color = Some(color);
+    }
 }
 
 /// Rename dir `index`; false when the name is empty or taken. The default and the folder memory follow the rename.
@@ -348,11 +358,68 @@ impl SettingsView {
         let home = std::env::home_dir();
         let dirs = dir_rows(settings, self.daemon_dir.as_deref(), home.as_deref());
         let default = default_name(settings, &dirs);
+        let resolved = ClaudeDirs::from_settings(settings, self.daemon_dir.as_deref(), home.as_deref());
         let mut rows: Vec<Div> = dirs
             .iter()
             .enumerate()
             .map(|(index, dir)| {
                 let is_default = dir.name == default;
+                let badge = resolved.dirs[index].badge();
+                let open = self.popover == Some(Popover::DirColor(index));
+                let open_picker = handler(move |this, _, cx| {
+                    this.popover = Some(Popover::DirColor(index));
+                    cx.notify();
+                });
+                let badge_button = self
+                    .pressable("dir-colour", index, Some(if open { theme.tokens.accent } else { theme.tokens.line }), window, cx, open_picker)
+                    .relative()
+                    .flex_none()
+                    .size(theme.ui(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_SMALL))
+                    .bg(rgb(badge.color.value(theme.preset)))
+                    .text_color(rgb(theme.tokens.ground))
+                    .font_weight(FontWeight::BOLD)
+                    .child(badge.letter.clone());
+                let picker = open.then(|| {
+                    let swatches = ProjectColor::ALL.iter().enumerate().map(|(number, color)| {
+                        let color = *color;
+                        let (daemon_dir, home) = (self.daemon_dir.clone(), home.clone());
+                        let pick = handler(move |this, window, cx| {
+                            SettingsStore::update(cx, |settings| set_dir_color(settings, index, color, daemon_dir.as_deref(), home.as_deref()));
+                            this.close_popover(window, cx);
+                        });
+                        self.pressable("dir-swatch", index * ProjectColor::ALL.len() + number, None, window, cx, pick)
+                            .size(theme.ui(30.))
+                            .rounded(px(RADIUS_SMALL))
+                            .bg(rgb(color.value(theme.preset)))
+                            .border_2()
+                            .when(color == badge.color, |swatch| swatch.border_color(rgb(theme.tokens.text)))
+                    }).collect::<Vec<_>>();
+                    deferred(
+                        div()
+                            .occlude()
+                            .absolute()
+                            .top(theme.ui(36.))
+                            .left_0()
+                            .w(theme.ui(4. * 30. + 3. * 6. + 2. * 14. + 2.))
+                            .p(theme.ui(14.))
+                            .flex()
+                            .flex_col()
+                            .gap(theme.ui(10.))
+                            .rounded(px(RADIUS))
+                            .bg(rgb(theme.tokens.raised))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .shadow_lg()
+                            .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(format!("Colour for {}", dir.name)))
+                            .child(div().grid().grid_cols(4).gap(theme.ui(6.)).children(swatches)),
+                    )
+                    .with_priority(1)
+                });
+                let badge_button = badge_button.children(picker);
                 let name = self.text_field((DIR_NAME, index), &dir.name, "Name", false, theme, window, cx).w(theme.ui(180.));
                 let path = div().mt(theme.ui(4.)).font_family(FONT_FAMILY).text_size(theme.ui(12.)).text_color(rgb(theme.tokens.muted)).truncate().child(dir.path.display().to_string());
                 let command = join_args(&[std::slice::from_ref(&dir.command), &dir.args].concat());
@@ -369,7 +436,7 @@ impl SettingsView {
                     actions_slot(theme).child(make_default).child(remove)
                 };
                 // One trailing width for every dir, so the command fields line up.
-                row_shell(theme, div().child(name).child(path), command, trailing.w(theme.ui(170.)).justify_end())
+                row_shell(theme, div().flex().items_start().gap(theme.ui(12.)).child(badge_button).child(div().flex_1().min_w_0().child(name).child(path)), command, trailing.w(theme.ui(170.)).justify_end())
             })
             .collect();
 
@@ -410,7 +477,7 @@ impl SettingsView {
                 div().px(theme.ui(10.)).py(theme.ui(6.)).rounded(px(RADIUS_SMALL)).bg(rgb(colors.fill.unwrap_or(theme.tokens.raised))).text_color(rgb(colors.ink)).text_sm().child(text),
             ));
         }
-        group(theme, "Claude config dirs", Some("New folders use the default. A dir picked in the launcher is remembered for that folder."), rows)
+        group(theme, "Claude config dirs", Some("New folders use the default. A dir picked in the launcher is remembered for that folder. The letter and colour mark its sessions."), rows)
     }
 
     fn favorites_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -461,7 +528,31 @@ mod tests {
     }
 
     fn dir(name: &str, path: &str) -> ClaudeDir {
-        ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![] }
+        ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![], color: None }
+    }
+
+    #[test]
+    fn picking_a_colour_for_the_implicit_default_lists_it_first() {
+        let mut settings = Settings::default();
+        set_dir_color(&mut settings, 0, ProjectColor::Lime, Some(Path::new("/d/claude")), None);
+        assert_eq!(settings.claude_dirs.len(), 1);
+        assert_eq!(settings.claude_dirs[0].color, Some(ProjectColor::Lime));
+    }
+
+    #[test]
+    fn picking_a_colour_changes_only_that_dir() {
+        let mut settings = Settings {
+            claude_dirs: vec![
+                ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![], color: None },
+                ClaudeDir { name: "B".into(), path: "/b".into(), command: "claude".into(), args: vec![], color: Some(ProjectColor::Blue) },
+            ],
+            ..Settings::default()
+        };
+        set_dir_color(&mut settings, 1, ProjectColor::Pink, None, None);
+        assert_eq!(settings.claude_dirs[0].color, None);
+        assert_eq!(settings.claude_dirs[1].color, Some(ProjectColor::Pink));
+        set_dir_color(&mut settings, 7, ProjectColor::Pink, None, None);
+        assert_eq!(settings.claude_dirs.len(), 2, "an index past the end changes nothing");
     }
 
     #[test]

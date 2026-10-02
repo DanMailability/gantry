@@ -132,6 +132,8 @@ pub struct ClaudeDir {
     pub command: String,
     /// Arguments placed before Gantry's own.
     pub args: Vec<String>,
+    /// Colour of its badge; `None` = the automatic colour of its path.
+    pub color: Option<ProjectColor>,
 }
 
 /// Whether the sidebar is shown when Gantry starts.
@@ -244,6 +246,8 @@ pub struct Settings {
     pub window: WindowSettings,
     /// Project colours.
     pub project_colors: ProjectColors,
+    /// Whether Working sessions show the moving glow.
+    pub animate_working: bool,
 }
 
 /// The `projectColors` setting: whether projects are coloured, and the colours picked per folder.
@@ -298,6 +302,7 @@ impl Default for Settings {
             favorites: Vec::new(),
             window: WindowSettings { restore_layout: true, sidebar_at_start: SidebarAtStart::Remember, scrollback: 10_000, right_to_left: true },
             project_colors: ProjectColors::default(),
+            animate_working: true,
         }
     }
 }
@@ -514,6 +519,14 @@ impl Reader {
                 Some(_) => self.string(map, &format!("{key}."), "command"),
             };
             let args = self.strings(map, &format!("{key}."), "args");
+            let color = match map.get("color") {
+                None => None,
+                Some(Value::String(name)) if ProjectColor::from_name(name).is_some() => ProjectColor::from_name(name),
+                Some(_) => {
+                    self.problem(&format!("{key}.color"), "expected a colour name; the automatic colour is used".into());
+                    None
+                }
+            };
             if name.is_empty() || path.is_empty() || command.is_empty() {
                 self.problem(&key, "needs a name, a path and a command; dropped".into());
             } else if dirs.iter().any(|dir| dir.name == name) {
@@ -521,7 +534,7 @@ impl Reader {
             } else if dirs.iter().any(|dir| dir.path == Path::new(&path)) {
                 self.problem(&key, format!("the path \"{path}\" is used twice; dropped"));
             } else {
-                dirs.push(ClaudeDir { name, path: path.into(), command, args });
+                dirs.push(ClaudeDir { name, path: path.into(), command, args, color });
             }
         }
         dirs
@@ -604,6 +617,7 @@ impl Reader {
         };
 
         let ui_font_size = self.number(raw, "", "uiFontSize", 14.0, (11.0, 20.0)) as f32;
+        let animate_working = self.bool(raw, "", "animateWorking", true);
 
         let map = self.object(raw, "", "alerts");
         let default = defaults.alerts;
@@ -687,6 +701,7 @@ impl Reader {
             favorites,
             window,
             project_colors,
+            animate_working,
         }
     }
 }
@@ -739,7 +754,13 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     let dirs: Vec<Value> = settings
         .claude_dirs
         .iter()
-        .map(|dir| serde_json::json!({"name": dir.name, "path": dir.path.to_string_lossy(), "command": dir.command, "args": dir.args}))
+        .map(|dir| {
+            let mut value = serde_json::json!({"name": dir.name, "path": dir.path.to_string_lossy(), "command": dir.command, "args": dir.args});
+            if let Some(color) = dir.color {
+                value["color"] = color.name().into();
+            }
+            value
+        })
         .collect();
     add(&["claudeDirs"], Value::Array(dirs), !settings.claude_dirs.is_empty());
     add(&["defaultClaudeDir"], settings.default_claude_dir.clone().map_or(Value::Null, Value::from), settings.default_claude_dir.is_some());
@@ -761,6 +782,7 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     let colors: Map<String, Value> =
         settings.project_colors.folders.iter().map(|(folder, color)| (folder.to_string_lossy().into_owned(), color.name().into())).collect();
     add(&["projectColors", "folders"], Value::Object(colors), !settings.project_colors.folders.is_empty());
+    add(&["animateWorking"], settings.animate_working.into(), settings.animate_working != default.animate_working);
     out
 }
 
@@ -826,6 +848,48 @@ pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dir_colour_round_trips_and_a_bad_one_keeps_the_dir() {
+        let loaded = parse(
+            r#"{"claudeDirs": [
+            {"name": "A", "path": "/a", "color": "violet"},
+            {"name": "B", "path": "/b", "color": "purple"},
+            {"name": "C", "path": "/c", "color": 3}
+        ]}"#,
+        );
+        let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["claudeDirs[1].color", "claudeDirs[2].color"]);
+        let settings = loaded.settings.unwrap();
+        let colors: Vec<_> = settings.claude_dirs.iter().map(|dir| dir.color).collect();
+        assert_eq!(colors, [Some(ProjectColor::Violet), None, None]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut changed = settings.clone();
+        changed.claude_dirs[1].color = Some(ProjectColor::Teal);
+        save(&path, &changed, &loaded.raw).unwrap();
+        let written = read_json(&path);
+        assert_eq!(written["claudeDirs"][0]["color"], "violet");
+        assert_eq!(written["claudeDirs"][1]["color"], "teal");
+        assert!(written["claudeDirs"][2].get("color").is_none(), "no colour picked, none written");
+    }
+
+    #[test]
+    fn animate_working_defaults_on_and_round_trips() {
+        assert!(Settings::default().animate_working);
+        let loaded = parse(r#"{"animateWorking": false}"#);
+        assert!(loaded.problems.is_empty());
+        let mut settings = loaded.settings.unwrap();
+        assert!(!settings.animate_working);
+        let bad = parse(r#"{"animateWorking": "no"}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert!(bad.settings.unwrap().animate_working);
+        settings.animate_working = true;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &Map::new()).unwrap();
+        assert!(read_json(&path).get("animateWorking").is_none(), "the default writes nothing");
+    }
 
     fn read_json(path: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -946,8 +1010,8 @@ mod tests {
         settings.shortcuts.insert("toggleSidebar".into(), Some("ctrl-alt-s".into()));
         settings.shortcuts.insert("splitRightClaude".into(), None);
         settings.claude_dirs = vec![
-            ClaudeDir { name: "Personal".into(), path: "~/.claude".into(), command: "claude".into(), args: vec![] },
-            ClaudeDir { name: "Work".into(), path: "~/.claude-work".into(), command: "claude-w".into(), args: vec!["--model".into(), "opus".into()] },
+            ClaudeDir { name: "Personal".into(), path: "~/.claude".into(), command: "claude".into(), args: vec![], color: None },
+            ClaudeDir { name: "Work".into(), path: "~/.claude-work".into(), command: "claude-w".into(), args: vec!["--model".into(), "opus".into()], color: Some(ProjectColor::Rose) },
         ];
         settings.default_claude_dir = Some("Work".into());
         settings.folder_claude_dirs.insert("/home/me/work/ops".into(), "Work".into());
@@ -955,6 +1019,7 @@ mod tests {
         settings.recents = RecentsSettings { per_project: 9, chips: 2 };
         settings.favorites = vec!["/a".into(), "/b".into()];
         settings.window = WindowSettings { restore_layout: false, sidebar_at_start: SidebarAtStart::Hidden, scrollback: 50000, right_to_left: false };
+        settings.animate_working = false;
         settings
     }
 
@@ -1068,7 +1133,7 @@ mod tests {
         );
         let dirs = loaded.settings.unwrap().claude_dirs;
         assert_eq!(dirs.len(), 2);
-        assert_eq!(dirs[0], ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![] });
+        assert_eq!(dirs[0], ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![], color: None });
         assert_eq!(dirs[1].args, vec!["-y".to_string()]);
         let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
         assert_eq!(keys, ["claudeDirs[1]", "claudeDirs[2]", "claudeDirs[3]", "claudeDirs[4]"]);

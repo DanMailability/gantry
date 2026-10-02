@@ -9,11 +9,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
     self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
-    session_title,
+    display_path, session_title,
 };
 use app_core::sessions::SessionStore;
 use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
+use app_core::theme_colors::ToneColors;
 use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window,
@@ -23,8 +24,9 @@ use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
-use crate::settings_store::{SettingsStore, dir_name, shortcut_label};
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, side_line, theme};
+use crate::hover_card::{self, HoverCard, Lead, lead};
+use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -74,6 +76,8 @@ pub struct SidebarView {
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
     unseen: HashSet<String>,
+    /// The Working glow runs: the setting is on and the window is active.
+    animate: bool,
     rows: Vec<Row>,
     selected: Option<RowKey>,
     /// The workspace's focused leaf; its row is selected unless the user moved the ring.
@@ -122,6 +126,7 @@ impl SidebarView {
             toggled: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
+            animate: false,
             rows: Vec::new(),
             selected: None,
             focused_leaf: None,
@@ -468,47 +473,55 @@ impl SidebarView {
             }
             RowKind::Session { session, tone, note, .. } => {
                 let colors = theme.tone(*tone);
-                let unseen = self.unseen.contains(&session.id);
-                let lead = match tone {
-                    Tone::Elsewhere => div().flex_none().w(theme.ui(10.)).text_color(rgb(colors.dot)).child("↗"),
-                    Tone::Closed => div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
-                    _ => div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)),
+                let card = HoverCard {
+                    title: session_title(session).to_string(),
+                    status: Some(note.clone()),
+                    dir: dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()),
+                    container: session.container.is_some(),
+                    folder: Some(display_path(&session.cwd, std::env::home_dir().as_deref())),
                 };
-                base.child(
+                base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
+                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme)))
                         .text_color(rgb(colors.ink))
-                        .child(lead)
+                        .children(lead_mark(*tone, &colors, &theme))
                         .child(title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
                             title.font_weight(FontWeight::SEMIBOLD)
                         }))
-                        .when(unseen, |pill| pill.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.ink))))
-                        .when(session.container.is_some(), |pill| pill.child(container_chip(colors.ink)))
-                        .children(dir_name(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|name| dir_chip(colors.ink, name)))
-                        .children(project())
-                        .child(aside(note.clone(), colors.ink)),
+                        .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
+                        .children(dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|badge| dir_badge(&badge, &theme)))
+                        .children(project()),
                 )
             }
-            RowKind::Pane { entry, tone, note } if !entry.claude => base.child(
+            RowKind::Pane { entry, tone, note } if !entry.claude => base.tooltip(hover_card::tooltip(HoverCard {
+                title: entry.title.clone(),
+                status: Some(note.clone()),
+                dir: None,
+                container: false,
+                folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
+            })).child(
                 lined(pill(None))
                     .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
                     .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
                     .child(title(entry.title.clone()))
-                    .children(project())
-                    .child(aside(note.clone(), theme.tokens.muted)),
+                    .children(project()),
             ),
-            RowKind::Pane { tone, note, .. } => {
+            RowKind::Pane { entry, tone, note } => {
                 let colors = theme.tone(*tone);
-                let lead = match tone {
-                    Tone::Closed => div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
-                    _ => div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)),
+                let card = HoverCard {
+                    title: "New session".into(),
+                    status: Some(note.clone()),
+                    dir: None,
+                    container: false,
+                    folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
                 };
-                base.child(
+                base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
+                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme)))
                         .text_color(rgb(colors.ink))
-                        .child(lead)
+                        .children(lead_mark(*tone, &colors, &theme))
                         .child(title("New session".into()))
-                        .children(project())
-                        .child(aside(note.clone(), colors.ink)),
+                        .children(project()),
                 )
             }
             RowKind::Tab { index, title: tab_title, panes, .. } => base.child(
@@ -566,6 +579,15 @@ impl Render for DraggedProject {
 }
 
 /// Small rounded counters in the tones of a project's live sessions.
+/// The mark before a row's title: a ring for Closed, `↗` for Elsewhere, none for the filled tones.
+fn lead_mark(tone: Tone, colors: &ToneColors, theme: &Theme) -> Option<gpui::Div> {
+    match lead(tone) {
+        Lead::None => None,
+        Lead::Ring => Some(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot))),
+        Lead::Arrow => Some(div().flex_none().w(theme.ui(10.)).text_color(rgb(colors.dot)).child("↗")),
+    }
+}
+
 fn count_chips(counts: &ToneCounts, theme: &Theme) -> Vec<gpui::Div> {
     let tones = [
         (Tone::NeedsInput, counts.needs_input),
@@ -599,6 +621,7 @@ fn count_chips(counts: &ToneCounts, theme: &Theme) -> Vec<gpui::Div> {
 
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let focused = self.focus_handle.is_focused(window);
         let theme = theme(cx).clone();
         div()

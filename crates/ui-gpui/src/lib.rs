@@ -1,8 +1,10 @@
 //! GPUI user interface for Gantry. The only crate in the workspace that depends on GPUI.
 
 mod alerts;
+mod assets;
 mod context_menu;
 mod field;
+mod hover_card;
 pub mod launcher_view;
 pub mod recents_view;
 pub mod sidebar_view;
@@ -42,7 +44,7 @@ pub const APP_ID: &str = "io.github.idogrf.Gantry";
 
 /// Connect to (or start) the daemon, restore the layout, and run until the app quits.
 pub fn run(launch: Launch) {
-    gpui_platform::application().run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         theme::load_fonts(cx);
         let paths = Paths::for_profile(&current_profile());
         SettingsStore::init(paths.settings_file.clone(), cx);

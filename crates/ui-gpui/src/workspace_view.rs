@@ -11,7 +11,7 @@ use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, terminal_palette};
-use app_core::workspace::{ClaudeDirs, PaneLaunch, Rerun, Restored, Workspace};
+use app_core::workspace::{ClaudeDirs, DirBadge, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
@@ -23,7 +23,7 @@ use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, Ses
 use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
-use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
+use app_core::session_tree::{Activation, PaneEntry, TabEntry, display_path, session_title, status_tone, tone_word};
 
 use crate::alerts::{self, Notice};
 use crate::context_menu::{self, OpenMenu};
@@ -31,9 +31,10 @@ use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
-use crate::settings_store::{SettingsStore, dir_name};
+use crate::hover_card::{self, HoverCard};
+use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::SettingsView;
-use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, side_line, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
 use crate::window_frame;
 
 pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
@@ -142,7 +143,7 @@ struct PendingOpen {
 
 /// What the tab bar draws for a tab: title, status, unseen alert, in a container, config dir name, is the Settings tab,
 /// project colour.
-type TabView = (String, Option<SessionStatus>, bool, bool, Option<String>, bool, Option<u32>);
+type TabView = (String, Option<SessionStatus>, bool, bool, Option<DirBadge>, bool, Option<u32>);
 
 /// Root view of the Gantry window.
 pub struct WorkspaceView {
@@ -228,7 +229,10 @@ impl WorkspaceView {
             this.on_sidebar_event(event.clone(), window, cx)
         });
         // Coming back to the window counts as seeing its visible tab.
-        let activation = cx.observe_window_activation(window, |this, window, cx| this.clear_seen(window, cx));
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.clear_seen(window, cx);
+            this.sidebar.update(cx, |_, cx| cx.notify());
+        });
         let theme_changed = cx.observe_global_in::<Theme>(window, |this, _, cx| this.apply_settings(cx));
         // Following the system: a light/dark switch resolves the theme again.
         let appearance = cx.observe_window_appearance(window, |_, _, cx| {
@@ -464,15 +468,15 @@ impl WorkspaceView {
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, cx));
     }
 
-    /// The name of the Claude config dir `leaf` runs in, when two or more are configured.
-    fn leaf_dir_name(&self, leaf: NodeId, cx: &App) -> Option<String> {
+    /// The badge of the Claude config dir `leaf` runs in, when two or more are configured.
+    fn leaf_dir_badge(&self, leaf: NodeId, cx: &App) -> Option<DirBadge> {
         let entry = self.workspace.leaves.get(&leaf)?;
         if !entry.launch.is_claude() || entry.launch.container.is_some() {
             return None;
         }
         let recorded = entry.session.as_deref().and_then(|id| self.sidebar.read(cx).sessions().get(id)).and_then(|info| info.claude_dir.clone());
         let path = recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone());
-        dir_name(cx.global::<SettingsStore>().settings(), path.as_deref())
+        dir_badge_for(cx.global::<SettingsStore>().settings(), path.as_deref())
     }
 
     /// The colour of the project `leaf` belongs to (its session's directory, else the pane's), if project colours are on.
@@ -1296,6 +1300,7 @@ impl WorkspaceView {
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let theme = theme(cx).clone();
+        let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let sessions = self.sidebar.read(cx).sessions();
         let tabs: Vec<TabView> = self
             .workspace
@@ -1307,7 +1312,7 @@ impl WorkspaceView {
                 let status = self.workspace.tab_status(index, sessions).cloned();
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
                 let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
-                let dir = self.leaf_dir_name(tab.focused, cx);
+                let dir = self.leaf_dir_badge(tab.focused, cx);
                 let project = if tab.settings { None } else { self.leaf_project_color(tab.focused, cx) };
                 (title, status, unseen, container, dir, tab.settings, project)
             })
@@ -1360,8 +1365,22 @@ impl WorkspaceView {
                 };
                 let fill = if settings { Some(theme.tokens.text) } else { colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised)) };
                 let can_drag = self.workspace.can_drag(index);
+                let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
+                let card = HoverCard {
+                    title: title.clone(),
+                    status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
+                    dir: dir.clone(),
+                    container,
+                    folder: self
+                        .workspace
+                        .tabs
+                        .get(index)
+                        .and_then(|tab| self.workspace.leaves.get(&tab.focused))
+                        .map(|leaf| display_path(&leaf.launch.cwd, std::env::home_dir().as_deref())),
+                };
                 div()
                     .id(("tab", index))
+                    .when(!settings, |tab| tab.tooltip(hover_card::tooltip(card)))
                     .relative()
                     .h(theme.ui(32.))
                     .when(project.is_some(), |tab| tab.pl(theme.ui(16.)))
@@ -1383,13 +1402,12 @@ impl WorkspaceView {
                     .when_some(fill, |tab, fill| tab.bg(rgb(fill)))
                     .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(theme.tokens.raised))))
                     .cursor_pointer()
+                    .when(sweep, |tab| tab.child(working_sweep(("sweep-tab", index), px(RADIUS - 2.), &theme)))
                     .when_some(project, |tab, color| tab.child(side_line(color, &theme)))
-                    .when_some(colors.filter(|_| !settings), |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
                     .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
                     .child(div().min_w(theme.ui(24.)).truncate().child(title))
-                    .when(container, |tab| tab.child(container_chip(ink)))
-                    .children(dir.map(|name| dir_chip(ink, name)))
-                    .when(unseen, |tab| tab.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(ink))))
+                    .when(container, |tab| tab.child(container_icon(ink, &theme)))
+                    .children(dir.map(|badge| dir_badge(&badge, &theme)))
                     .child(
                         div()
                             .id(("close-tab", index))
@@ -1453,7 +1471,7 @@ impl WorkspaceView {
             })
     }
 
-    fn render_active_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_active_tab(&self, animate: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
         let Some(tab) = self.workspace.active_tab() else {
             return div()
@@ -1519,7 +1537,7 @@ impl WorkspaceView {
                     .absolute()
                     .size_full()
             })
-            .children(tab.root.layout(Rect::UNIT).into_iter().filter_map(|(leaf, rect)| {
+            .children(tab.root.layout(Rect::UNIT).into_iter().enumerate().filter_map(|(index, (leaf, rect))| {
                 let view = self.slots.get(&leaf)?.view.clone();
                 let focused = leaf == tab.focused;
                 let title = view.read(cx).title();
@@ -1527,8 +1545,9 @@ impl WorkspaceView {
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen.contains_key(&leaf);
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
-                let dir = self.leaf_dir_name(leaf, cx);
+                let dir = self.leaf_dir_badge(leaf, cx);
                 let project = self.leaf_project_color(leaf, cx);
+                let folder = self.workspace.leaves.get(&leaf).map(|entry| display_path(&entry.launch.cwd, std::env::home_dir().as_deref()));
                 Some(
                     div()
                         .absolute()
@@ -1548,7 +1567,7 @@ impl WorkspaceView {
                                 .bg(rgb(theme.tokens.terminal))
                                 .border_2()
                                 .border_color(rgb(if focused && multiple { theme.tokens.accent } else { theme.tokens.line }))
-                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, dir, project, &theme)))
+                                .when(multiple, |pane| pane.child(pane_header(index, title, status, unseen, animate, container, dir, folder, project, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1587,15 +1606,31 @@ impl WorkspaceView {
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
-fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, dir: Option<String>, project: Option<u32>, theme: &Theme) -> impl IntoElement {
+#[allow(clippy::too_many_arguments)]
+fn pane_header(
+    index: usize,
+    title: String,
+    status: Option<SessionStatus>,
+    unseen: bool,
+    animate: bool,
+    container: bool,
+    dir: Option<DirBadge>,
+    folder: Option<String>,
+    project: Option<u32>,
+    theme: &Theme,
+) -> impl IntoElement {
     let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
-    let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
-        Tone::NeedsInput => "Needs input",
-        Tone::Working => "Working",
-        Tone::Done => "Done",
-        _ => "Idle",
-    });
+    let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
+    let card = HoverCard {
+        title: title.clone(),
+        status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
+        dir: dir.clone(),
+        container,
+        folder,
+    };
     div()
+        .id(("pane-header", index))
+        .tooltip(hover_card::tooltip(card))
         .relative()
         .flex_none()
         .h(theme.ui(28.))
@@ -1611,12 +1646,11 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
         .font_weight(FontWeight::SEMIBOLD)
         .bg(rgb(colors.and_then(|colors| colors.fill).unwrap_or(theme.tokens.raised)))
         .text_color(rgb(colors.map_or(theme.tokens.text, |colors| colors.ink)))
+        .when(sweep, |header| header.child(working_sweep(("sweep-pane", index), px(RADIUS_SMALL), theme)))
         .when_some(project, |header, color| header.child(side_line(color, theme)))
-        .when_some(colors, |header, colors| header.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
         .child(div().flex_1().min_w_0().truncate().child(title))
-        .when(container, |header| header.child(container_chip(colors.map_or(theme.tokens.text, |colors| colors.ink))))
-        .children(dir.map(|name| dir_chip(colors.map_or(theme.tokens.text, |colors| colors.ink), name)))
-        .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
+        .when(container, |header| header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme)))
+        .children(dir.map(|badge| dir_badge(&badge, theme)))
 }
 
 /// Title-bar behaviour for an empty stretch of the tab bar (client-side decorations): drag moves the window,
@@ -1656,6 +1690,7 @@ pub(crate) fn round_button(
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let theme = theme(cx).clone();
         // The interface scales with `uiFontSize`; GPUI's rem is 16 px at the default of 14.
         window.set_rem_size(px(16.0 * theme.ui_scale));
@@ -1699,7 +1734,7 @@ impl Render for WorkspaceView {
                     ),
                 )
             })
-            .child(div().flex_1().min_w_0().h_full().flex().flex_col().p(px(PANE_GAP / 2.)).child(self.render_active_tab(cx)));
+            .child(div().flex_1().min_w_0().h_full().flex().flex_col().p(px(PANE_GAP / 2.)).child(self.render_active_tab(animate, cx)));
         let root = div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)

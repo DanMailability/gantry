@@ -2,13 +2,20 @@
 //! corners, and the interface font (Figtree, embedded; the terminal keeps its own font).
 
 use std::borrow::Cow;
+use std::time::Duration;
 
 use app_core::session_tree::Tone;
 use std::path::Path;
 
 use app_core::settings::{ProjectColors, StatusFills};
+use app_core::workspace::DirBadge;
 use app_core::theme_colors::{Preset, ToneColors, Tokens, tone_colors};
-use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, SharedString, Styled, div, px, rgb, rgba};
+use gpui::{
+    Animation, AnimationExt, App, Div, ElementId, FontWeight, Global, IntoElement, ParentElement, Pixels, Styled, Svg, div, hsla, linear_color_stop,
+    linear_gradient, px, relative, rgb, rgba, svg,
+};
+
+use crate::assets::CONTAINER_ICON;
 
 /// The colours and sizes views draw with, a GPUI global replaced whenever the settings change.
 #[derive(Clone)]
@@ -71,30 +78,64 @@ const FONTS: [&[u8]; 5] = [
     include_bytes!("../assets/fonts/Figtree-Bold.ttf"),
 ];
 
-/// The small "container" tag on dev container sessions, tabs and pane headers, drawn in `ink`.
-pub(crate) fn container_chip(ink: u32) -> Div {
-    tag_chip(ink, "container")
+/// The dev container icon, in `ink` (slightly softened).
+pub(crate) fn container_icon(ink: u32, theme: &Theme) -> Svg {
+    svg().path(CONTAINER_ICON).flex_none().size(theme.ui(14.)).text_color(rgba((ink << 8) | 0xd9))
 }
 
-/// The Claude config dir's name on sessions, tabs and pane headers, drawn like [`container_chip`]; shown only with
-/// two or more config dirs.
-pub(crate) fn dir_chip(ink: u32, name: String) -> Div {
-    tag_chip(ink, name)
+/// A config dir's badge: its letter on its colour. Shown only with two or more config dirs.
+pub(crate) fn dir_badge(badge: &DirBadge, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .size(theme.ui(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .bg(rgb(badge.color.value(theme.preset)))
+        .text_color(rgb(theme.tokens.ground))
+        .text_size(theme.ui(10.))
+        .font_weight(FontWeight::BOLD)
+        .child(badge.letter.clone())
 }
 
-fn tag_chip(ink: u32, text: impl Into<SharedString>) -> Div {
-    // Clipped away, border and all, before the row's title gives way when the row is too narrow for it.
-    div().min_w_0().flex_shrink(4.).overflow_hidden().child(
-        div()
-            .flex_none()
-            .whitespace_nowrap()
-            .px(px(5.))
-            .rounded(px(RADIUS_SMALL - 3.))
-            .border_1()
-            .border_color(rgba((ink << 8) | 0x66))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .child(text.into()),
+/// Width of the Working glow, as a fraction of the row.
+pub(crate) const SWEEP_BAND: f32 = 0.45;
+/// One pass of the Working glow.
+const SWEEP_PERIOD: Duration = Duration::from_millis(2200);
+
+/// Whether a row of `tone` shows the Working glow: the setting is on and the window is active (an inactive window
+/// requests no animation frames at all).
+pub(crate) fn sweeping(tone: Tone, enabled: bool, window_active: bool) -> bool {
+    tone == Tone::Working && enabled && window_active
+}
+
+/// Where the glow is at `progress` (0..1 of a pass): the band's left edge as a fraction of the track (it enters
+/// from the left and leaves at the right) and its strength, which fades in and out at the ends so the clip at the
+/// track's edges never shows.
+pub(crate) fn sweep_band(progress: f32) -> (f32, f32) {
+    let progress = progress.clamp(0., 1.);
+    (progress * (1. + SWEEP_BAND) - SWEEP_BAND, (std::f32::consts::PI * progress).sin())
+}
+
+/// The Working glow: put it first inside a relatively positioned, filled row, tab or header. It runs on a track
+/// inset by `inset` (the element's corner radius) from both ends, because GPUI clips to rectangles, not rounded
+/// corners. All glows share one clock.
+pub(crate) fn working_sweep(id: impl Into<ElementId>, inset: Pixels, theme: &Theme) -> impl IntoElement {
+    let peak = if theme.preset == Preset::MistLight { 0.65 } else { 0.45 };
+    let glow = |alpha: f32| hsla(0., 0., 1., alpha);
+    div().absolute().top_0().bottom_0().left(inset).right(inset).overflow_hidden().child(
+        div().absolute().top_0().bottom_0().w(relative(SWEEP_BAND)).flex().with_animation(
+            id,
+            Animation::new(SWEEP_PERIOD).repeat_synced().with_max_fps(30.),
+            move |band, progress| {
+                let (left, strength) = sweep_band(progress);
+                let alpha = peak * strength;
+                band.left(relative(left))
+                    .child(div().h_full().flex_1().bg(linear_gradient(90., linear_color_stop(glow(0.), 0.), linear_color_stop(glow(alpha), 1.))))
+                    .child(div().h_full().flex_1().bg(linear_gradient(90., linear_color_stop(glow(alpha), 0.), linear_color_stop(glow(0.), 1.))))
+            },
+        ),
     )
 }
 
@@ -116,6 +157,29 @@ mod tests {
 
     const PRESETS: [Preset; 2] = [Preset::Mist, Preset::MistLight];
     const TONES: [Tone; 6] = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
+
+    #[test]
+    fn only_a_working_tone_in_an_active_window_with_the_setting_on_sweeps() {
+        assert!(sweeping(Tone::Working, true, true));
+        assert!(!sweeping(Tone::Working, false, true), "setting off");
+        assert!(!sweeping(Tone::Working, true, false), "window inactive");
+        for tone in [Tone::NeedsInput, Tone::Done, Tone::Idle, Tone::Closed, Tone::Elsewhere] {
+            assert!(!sweeping(tone, true, true), "{tone:?}");
+        }
+    }
+
+    #[test]
+    fn the_band_enters_left_leaves_right_and_fades_at_both_ends() {
+        let (start, faint) = sweep_band(0.);
+        assert_eq!(start, -SWEEP_BAND);
+        assert!(faint.abs() < 1e-6);
+        let (middle, full) = sweep_band(0.5);
+        assert!((middle - (1. - SWEEP_BAND) / 2.).abs() < 1e-6, "centred halfway through");
+        assert!((full - 1.).abs() < 1e-6);
+        let (end, faint) = sweep_band(1.);
+        assert!((end - 1.).abs() < 1e-6);
+        assert!(faint.abs() < 1e-6);
+    }
 
     fn theme(preset: Preset) -> Theme {
         Theme { preset, tokens: tokens(preset), fills: StatusFills::default(), ui_scale: 1.0, project_colors: ProjectColors::default() }

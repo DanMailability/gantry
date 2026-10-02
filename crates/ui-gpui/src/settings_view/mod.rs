@@ -81,6 +81,7 @@ impl Section {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Popover {
     Fill(Status),
+    DirColor(usize),
     Font,
     Tone(Event),
 }
