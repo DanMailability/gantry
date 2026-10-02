@@ -14,15 +14,16 @@ use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use daemon::pty::default_shell;
 use gpui::{
-    Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
+    App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
     PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
 use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::session_tree::{Activation, ShellEntry, Tone, display_path, session_title, status_tone};
+use app_core::session_tree::{Activation, PaneEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
 use crate::launcher_view::{LauncherEvent, LauncherView};
+use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
 use crate::theme::{
@@ -49,7 +50,8 @@ mod workspace_actions {
             NewClaudeTab, NewShellTab, SplitRightClaude, SplitRightShell, SplitDownClaude, SplitDownShell, ClosePane,
             FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
             ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
-            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher
+            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher,
+            OpenRecents
         ]
     );
 }
@@ -95,6 +97,7 @@ fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new(&format!("{m}-b"), ToggleSidebar, context),
         KeyBinding::new(&format!("{m}-f"), FindSession, context),
         KeyBinding::new(&format!("{m}-o"), OpenLauncher, context),
+        KeyBinding::new(&format!("{m}-r"), OpenRecents, context),
     ]
 }
 
@@ -150,6 +153,8 @@ pub struct WorkspaceView {
     _sidebar_events: Subscription,
     /// The open launcher overlay.
     launcher: Option<(Entity<LauncherView>, Subscription)>,
+    /// The open recent sessions overlay.
+    recents: Option<(Entity<RecentsView>, Subscription)>,
     /// Take-over requests waiting for the daemon, by session.
     take_overs: HashMap<String, TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
@@ -187,7 +192,7 @@ impl WorkspaceView {
             }
             let _ = this.update_in(cx, |view, window, cx| view.on_events(vec![ClientEvent::Disconnected], window, cx));
         });
-        let sidebar = cx.new(|cx| SidebarView::new(restored.workspace.sidebar.view, cx));
+        let sidebar = cx.new(SidebarView::new);
         let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
             this.on_sidebar_event(event.clone(), window, cx)
         });
@@ -219,6 +224,7 @@ impl WorkspaceView {
             resizing_sidebar: false,
             _sidebar_events: sidebar_events,
             launcher: None,
+            recents: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -492,7 +498,7 @@ impl WorkspaceView {
             PaneEvent::Rerun => self.rerun_leaf(leaf, window, cx),
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
             PaneEvent::TitleChanged => {
-                self.sync_shells(cx);
+                self.sync_panes(cx);
                 cx.notify()
             }
         }
@@ -610,30 +616,37 @@ impl WorkspaceView {
             }
             None => self.focus_handle.focus(window, cx),
         }
+        let focused = self.workspace.focused();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_focused(focused, cx));
         self.clear_seen(window, cx);
     }
 
-    /// Write the layout (atomically) and refresh the sidebar's shell entries.
+    /// Write the layout (atomically) and refresh the sidebar's pane entries.
     fn save(&self, cx: &mut Context<Self>) {
         if let Err(err) = layout_store::save(&self.layout_file, &self.workspace) {
             tracing::warn!("saving the layout failed: {err}");
         }
-        self.sync_shells(cx);
+        self.sync_panes(cx);
     }
 
-    fn sync_shells(&self, cx: &mut Context<Self>) {
-        let shells: Vec<ShellEntry> = self
+    fn sync_panes(&self, cx: &mut Context<Self>) {
+        let panes: Vec<PaneEntry> = self
             .workspace
             .leaves
             .iter()
-            .filter(|(_, leaf)| leaf.pane.is_some() && !leaf.launch.is_claude())
-            .map(|(id, leaf)| ShellEntry {
-                leaf: *id,
-                cwd: leaf.launch.cwd.clone(),
-                title: self.slots.get(id).map_or_else(|| leaf.launch.label(), |slot| slot.view.read(cx).title()),
+            .map(|(id, leaf)| {
+                let view = self.slots.get(id).map(|slot| slot.view.read(cx));
+                PaneEntry {
+                    leaf: *id,
+                    cwd: leaf.launch.cwd.clone(),
+                    title: view.map_or_else(|| leaf.launch.label(), |view| view.title()),
+                    session: leaf.session.clone(),
+                    claude: leaf.launch.is_claude(),
+                    ended: view.is_some_and(|view| view.has_ended()),
+                }
             })
             .collect();
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_shells(shells, cx));
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, cx));
     }
 
     fn on_sidebar_event(&mut self, event: SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -645,28 +658,7 @@ impl WorkspaceView {
                     }
                 }
                 Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
-                // A session already in the layout is shown there (and started again if it finished),
-                // so one session never runs in two panes.
-                Activation::Resume { session, cwd } => match self.workspace.leaf_for_session(&session) {
-                    Some(leaf) => {
-                        self.focus_leaf(leaf, window, cx);
-                        let starting = self.pending.values().any(|waiting| *waiting == leaf);
-                        if self.workspace.leaves[&leaf].pane.is_none() && !starting {
-                            self.rerun_leaf(leaf, window, cx);
-                        }
-                    }
-                    None => {
-                        let axis = split.then_some(Axis::Horizontal);
-                        let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
-                        match place {
-                            Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
-                            place => {
-                                let container = place.and_then(|place| place.host_folder);
-                                self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
-                            }
-                        }
-                    }
-                },
+                Activation::Resume { session, cwd } => self.resume_session(session, cwd, split, window, cx),
                 Activation::TakeOver { session, cwd } => {
                     let target = match self.workspace.leaf_for_session(&session) {
                         Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
@@ -682,11 +674,34 @@ impl WorkspaceView {
             },
             SidebarEvent::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
             SidebarEvent::New { claude } => self.open(claude, None),
-            SidebarEvent::ViewChanged(view) => {
-                self.workspace.sidebar.view = view;
-                self.save(cx);
-            }
+            SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
+        }
+    }
+
+    /// Resume `session`: show the leaf that already has it (starting it again if it finished), else open it in a
+    /// new tab (or a split) where it ran — its dev container included.
+    fn resume_session(&mut self, session: String, cwd: PathBuf, split: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // A session already in the layout is shown there, so one session never runs in two panes.
+        match self.workspace.leaf_for_session(&session) {
+            Some(leaf) => {
+                self.focus_leaf(leaf, window, cx);
+                let starting = self.pending.values().any(|waiting| *waiting == leaf);
+                if self.workspace.leaves[&leaf].pane.is_none() && !starting {
+                    self.rerun_leaf(leaf, window, cx);
+                }
+            }
+            None => {
+                let axis = split.then_some(Axis::Horizontal);
+                let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
+                match place {
+                    Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
+                    place => {
+                        let container = place.and_then(|place| place.host_folder);
+                        self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
+                    }
+                }
+            }
         }
     }
 
@@ -722,6 +737,7 @@ impl WorkspaceView {
     }
 
     fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
+        self.recents = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
         let view = cx.new(|cx| LauncherView::new(sessions, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &LauncherEvent, window, cx| {
@@ -729,6 +745,28 @@ impl WorkspaceView {
         });
         view.focus_handle(cx).focus(window, cx);
         self.launcher = Some((view, subscription));
+        cx.notify();
+    }
+
+    fn open_recents(&mut self, _: &OpenRecents, window: &mut Window, cx: &mut Context<Self>) {
+        self.launcher = None;
+        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
+        let open: HashSet<String> = self.workspace.leaves.values().filter_map(|leaf| leaf.session.clone()).collect();
+        let view = cx.new(|cx| RecentsView::new(sessions, open, cx));
+        let subscription = cx.subscribe_in(&view, window, |this, _, event: &RecentsEvent, window, cx| {
+            this.on_recents_event(event.clone(), window, cx)
+        });
+        view.focus_handle(cx).focus(window, cx);
+        self.recents = Some((view, subscription));
+        cx.notify();
+    }
+
+    fn on_recents_event(&mut self, event: RecentsEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.recents = None;
+        match event {
+            RecentsEvent::Resume { session, cwd, split } => self.resume_session(session, cwd, split, window, cx),
+            RecentsEvent::Dismiss => self.focus_current(window, cx),
+        }
         cx.notify();
     }
 
@@ -920,6 +958,13 @@ impl WorkspaceView {
         }
     }
 
+    /// A dragged tab was dropped on tab `to`: it takes that place.
+    fn drop_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.workspace.move_tab_to(from, to);
+        self.save(cx);
+        cx.notify();
+    }
+
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let sessions = self.sidebar.read(cx).sessions();
@@ -970,6 +1015,7 @@ impl WorkspaceView {
                 }
             })
             .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container))| {
+                let dragged = DraggedTab { index, title: title.clone() };
                 let active = index == self.workspace.active;
                 // Claude tabs are filled with what their most urgent session needs; shells stay plain.
                 let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
@@ -1011,6 +1057,8 @@ impl WorkspaceView {
                             .text_xs()
                             .hover(|style| style.bg(rgba(0x00000026)))
                             .child("×")
+                            // Pressing × must not start dragging the tab.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 let leaves = this.workspace.tabs.get(index).map(|tab| tab.root.leaves()).unwrap_or_default();
@@ -1018,6 +1066,9 @@ impl WorkspaceView {
                             })),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
+                    .on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone()))
+                    .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(LINE)))
+                    .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
             }))
             .child(round_button("new-claude", "+", cx.listener(|this, _, _, _| this.open(true, None))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
@@ -1300,6 +1351,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::find_session))
             .on_action(cx.listener(Self::open_launcher))
+            .on_action(cx.listener(Self::open_recents))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if std::mem::take(&mut this.resizing_sidebar) {
@@ -1319,8 +1371,38 @@ impl Render for WorkspaceView {
                 root.child(
                     div().id("launcher-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
                 )
+            })
+            .when_some(self.recents.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div().id("recents-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
+                )
             });
         window_frame::frame(window, root)
+    }
+}
+
+/// A tab being dragged: its index, and the title its floating copy shows.
+#[derive(Clone)]
+struct DraggedTab {
+    index: usize,
+    title: String,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(32.))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded(px(RADIUS - 2.))
+            .border_2()
+            .border_color(rgb(ACCENT))
+            .bg(rgb(RAISED))
+            .text_sm()
+            .font_family(UI_FONT)
+            .text_color(rgb(TEXT))
+            .child(self.title.clone())
     }
 }
 
@@ -1358,6 +1440,7 @@ mod tests {
             ("ctrl-shift-b", "workspace::ToggleSidebar"),
             ("ctrl-shift-f", "workspace::FindSession"),
             ("ctrl-shift-o", "workspace::OpenLauncher"),
+            ("ctrl-shift-r", "workspace::OpenRecents"),
         ] {
             assert_eq!(action_for(keys), Some(action), "{keys}");
         }

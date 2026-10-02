@@ -309,6 +309,11 @@ impl TerminalView {
         self.state == PaneState::Live
     }
 
+    /// Whether the process ended (or could not start): the pane shows Continue / Restart.
+    pub fn has_ended(&self) -> bool {
+        matches!(self.state, PaneState::Exited(_) | PaneState::Failed(_))
+    }
+
     /// Program title, else `program · dir`.
     pub fn title(&self) -> String {
         self.title.clone().filter(|title| !title.trim().is_empty()).unwrap_or_else(|| self.launch.label())
