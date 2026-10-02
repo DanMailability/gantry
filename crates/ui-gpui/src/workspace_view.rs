@@ -1160,7 +1160,12 @@ impl WorkspaceView {
                     .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| this.open_tab_menu(index, event.position, window, cx)),
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_tab_menu(index, event.position, window, cx);
+                            // Keep focus on the menu: the workspace's tracked focus must not take it back.
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
                     )
             }))
             .child(round_button("new-claude", "+", cx.listener(|this, _, _, _| this.open(true, None))))
@@ -1473,6 +1478,7 @@ impl Render for WorkspaceView {
             .when_some(self.tab_menu.as_ref(), |root, menu| {
                 let pick = cx.listener(|this, action: &MenuAction, window, cx| {
                     this.tab_menu = None;
+                    this.focus_current(window, cx);
                     this.run_menu_action(action.clone(), window, cx);
                     cx.notify();
                 });

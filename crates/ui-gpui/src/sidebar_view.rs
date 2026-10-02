@@ -297,6 +297,7 @@ impl SidebarView {
         let row = &self.rows[index];
         let key = row.key();
         let selected = self.selected.as_ref() == Some(&key);
+        let menu_key = key.clone();
         let base = div()
             .id(index)
             .h(px(ROW_HEIGHT))
@@ -319,7 +320,15 @@ impl SidebarView {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| this.open_menu(index, event.position, window, cx)),
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // By identity: the list may have been rebuilt since this row was drawn.
+                    if let Some(index) = session_tree::find(&this.rows, &menu_key) {
+                        this.open_menu(index, event.position, window, cx);
+                        // Keep focus on the menu: the tracked-focus handlers above must not take it back.
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
             );
         // The visible part of a row: a rounded pill, ringed when selected.
         let pill = |fill: Option<u32>| {
@@ -541,15 +550,15 @@ impl Render for SidebarView {
                     ),
             )
             .when_some(self.menu.as_ref(), |el, menu| {
-                let pick = cx.listener(|this, action: &MenuAction, window, cx| {
+                let pick = cx.listener(|this, action: &MenuAction, _, cx| {
                     this.menu = None;
-                    this.focus_handle.focus(window, cx);
+                    cx.emit(SidebarEvent::Dismiss);
                     cx.emit(SidebarEvent::Menu(action.clone()));
                     cx.notify();
                 });
-                let dismiss = cx.listener(|this, _: &(), window, cx| {
+                let dismiss = cx.listener(|this, _: &(), _, cx| {
                     this.menu = None;
-                    this.focus_handle.focus(window, cx);
+                    cx.emit(SidebarEvent::Dismiss);
                     cx.notify();
                 });
                 el.child(context_menu::render(

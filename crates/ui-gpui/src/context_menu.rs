@@ -78,8 +78,9 @@ pub(crate) fn render(
                 .on_key_down(move |event, window, cx| {
                     if event.keystroke.key == "escape" {
                         dismiss_key(window, cx);
-                        cx.stop_propagation();
                     }
+                    // Keys must not reach what is beneath the menu (the sidebar filter).
+                    cx.stop_propagation();
                 })
                 .on_mouse_down_out(move |_, window, cx| on_dismiss(window, cx))
                 .min_w(px(220.))
