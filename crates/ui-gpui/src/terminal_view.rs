@@ -63,11 +63,11 @@ fn key_bindings() -> Vec<KeyBinding> {
 }
 
 #[cfg(target_os = "linux")]
-const FONT_FAMILY: &str = "Noto Sans Mono";
+pub(crate) const FONT_FAMILY: &str = "Noto Sans Mono";
 #[cfg(target_os = "macos")]
-const FONT_FAMILY: &str = "Menlo";
+pub(crate) const FONT_FAMILY: &str = "Menlo";
 #[cfg(target_os = "windows")]
-const FONT_FAMILY: &str = "Consolas";
+pub(crate) const FONT_FAMILY: &str = "Consolas";
 
 /// Tried before cosmic-text's own fallback list, which misses some installed symbol fonts (it asks for "Noto Sans
 /// Symbols2"; `⏺` then lands on a COLRv1 emoji font that cannot be drawn). GPUI drops — and unloads — any fallback
@@ -76,7 +76,7 @@ const FONT_FAMILY: &str = "Consolas";
 const FALLBACK_FAMILIES: &[&str] = &["Adwaita Mono", "Symbola"];
 
 /// The pane font (`family`, else the platform's), with its fallback chain on Linux.
-fn pane_font(family: Option<&str>) -> Font {
+pub(crate) fn pane_font(family: Option<&str>) -> Font {
     #[allow(unused_mut)]
     let mut pane_font = font(family.unwrap_or(FONT_FAMILY).to_string());
     #[cfg(target_os = "linux")]

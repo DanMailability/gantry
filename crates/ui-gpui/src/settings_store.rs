@@ -71,7 +71,6 @@ impl SettingsStore {
     }
 
     /// Everything wrong with the file or the settings, for the Settings tab's banner.
-    #[allow(dead_code)] // read by the Settings tab
     pub fn problems(&self) -> &[Problem] {
         &self.problems
     }
