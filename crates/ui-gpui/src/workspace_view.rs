@@ -14,15 +14,16 @@ use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use daemon::pty::default_shell;
 use gpui::{
-    App, Bounds, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseMoveEvent, Pixels,
-    PathPromptOptions, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    PathPromptOptions, Point, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
 use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::menus::MenuAction;
+use app_core::menus::{self, MenuAction};
 use app_core::session_tree::{Activation, PaneEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
+use crate::context_menu::{self, OpenMenu};
 use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
@@ -156,6 +157,8 @@ pub struct WorkspaceView {
     launcher: Option<(Entity<LauncherView>, Subscription)>,
     /// The open recent sessions overlay.
     recents: Option<(Entity<RecentsView>, Subscription)>,
+    /// The open right-click menu of a tab.
+    tab_menu: Option<OpenMenu>,
     /// Take-over requests waiting for the daemon, by session.
     take_overs: HashMap<String, TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
@@ -226,6 +229,7 @@ impl WorkspaceView {
             _sidebar_events: sidebar_events,
             launcher: None,
             recents: None,
+            tab_menu: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -653,10 +657,77 @@ impl WorkspaceView {
     }
 
     /// Do what a right-click menu entry says.
-    fn run_menu_action(&mut self, action: MenuAction, _window: &mut Window, _cx: &mut Context<Self>) {
-        if let MenuAction::NewHere { dir, claude } = action {
-            self.open_new(claude, dir, None, None);
+    fn run_menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            MenuAction::Split { tab, axis } => {
+                // The right-clicked tab, which becomes the visible one.
+                if self.workspace.select_tab(tab) {
+                    self.focus_current(window, cx);
+                    self.open(true, Some(axis));
+                }
+            }
+            MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
+            MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
+            MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
+            MenuAction::CloseTab(index) => {
+                if let Some(tab) = self.workspace.tabs.get(index) {
+                    let leaves = tab.root.leaves();
+                    self.confirm_close(leaves, window, cx);
+                }
+            }
+            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
+            MenuAction::RecentsFor(project) => self.show_recents(Some(project), window, cx),
+            MenuAction::Continue(leaf) => {
+                self.focus_leaf(leaf, window, cx);
+                self.rerun_leaf(leaf, window, cx);
+            }
+            MenuAction::TakeOver { session, cwd } => self.on_sidebar_event(
+                SidebarEvent::Activate { activation: Activation::TakeOver { session, cwd }, split: false },
+                window,
+                cx,
+            ),
         }
+    }
+
+    /// Start VS Code (`code <args>`), detached; say so if it cannot start.
+    fn open_in_vscode(&mut self, args: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let started = std::process::Command::new("code")
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match started {
+            // `code` hands off to VS Code and exits; reap it so it does not linger as a zombie.
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(error) => {
+                let detail = format!("Could not start VS Code (`code`): {error}");
+                let answer = window.prompt(PromptLevel::Warning, "Open in VS Code", Some(&detail), &["OK"], cx);
+                cx.spawn(async move |_, _| {
+                    let _ = answer.await;
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Open tab `index`'s right-click menu at `position` (it acts on that tab, not the visible one).
+    fn open_tab_menu(&mut self, index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.workspace.tabs.get(index) else { return };
+        let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
+        let sessions = self.sidebar.read(cx).sessions();
+        let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
+        let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
+        let items = menus::tab_menu(index, &leaf.launch.cwd, vscode);
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        self.tab_menu = Some(OpenMenu { items, position, focus });
+        cx.notify();
     }
 
     fn on_sidebar_event(&mut self, event: SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -759,10 +830,15 @@ impl WorkspaceView {
     }
 
     fn open_recents(&mut self, _: &OpenRecents, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_recents(None, window, cx);
+    }
+
+    /// Open the recent sessions pop-up, on `project`'s sessions when given.
+    fn show_recents(&mut self, project: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.launcher = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
         let open: HashSet<String> = self.workspace.leaves.values().filter_map(|leaf| leaf.session.clone()).collect();
-        let view = cx.new(|cx| RecentsView::new(sessions, open, cx));
+        let view = cx.new(|cx| RecentsView::new(sessions, open, project, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &RecentsEvent, window, cx| {
             this.on_recents_event(event.clone(), window, cx)
         });
@@ -1079,6 +1155,10 @@ impl WorkspaceView {
                     .on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone()))
                     .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(LINE)))
                     .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| this.open_tab_menu(index, event.position, window, cx)),
+                    )
             }))
             .child(round_button("new-claude", "+", cx.listener(|this, _, _, _| this.open(true, None))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
@@ -1386,6 +1466,24 @@ impl Render for WorkspaceView {
                 root.child(
                     div().id("recents-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
                 )
+            })
+            .when_some(self.tab_menu.as_ref(), |root, menu| {
+                let pick = cx.listener(|this, action: &MenuAction, window, cx| {
+                    this.tab_menu = None;
+                    this.run_menu_action(action.clone(), window, cx);
+                    cx.notify();
+                });
+                let dismiss = cx.listener(|this, _: &(), window, cx| {
+                    this.tab_menu = None;
+                    this.focus_current(window, cx);
+                    cx.notify();
+                });
+                root.child(context_menu::render(
+                    "tab-menu",
+                    menu,
+                    move |action, window, cx| pick(action, window, cx),
+                    move |window, cx| dismiss(&(), window, cx),
+                ))
             });
         window_frame::frame(window, root)
     }

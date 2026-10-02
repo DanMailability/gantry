@@ -70,8 +70,8 @@ impl Focusable for RecentsView {
 }
 
 impl RecentsView {
-    /// An overlay over `sessions`; `open` = sessions a leaf of the layout shows.
-    pub fn new(sessions: Vec<SessionInfo>, open: HashSet<String>, cx: &mut Context<Self>) -> Self {
+    /// An overlay over `sessions`; `open` = sessions a leaf of the layout shows; `project` = the project to start on.
+    pub fn new(sessions: Vec<SessionInfo>, open: HashSet<String>, project: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let home = std::env::home_dir();
         let mut view = RecentsView {
             focus_handle: cx.focus_handle(),
@@ -80,7 +80,7 @@ impl RecentsView {
             roots: ProjectRoots::new(home.clone()),
             home,
             query: TextField::default(),
-            project: None,
+            project,
             expanded: HashSet::new(),
             choosing: false,
             list: List::Sessions(Vec::new()),
