@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use app_core::settings::{self, Loaded, Problem, Settings};
 use app_core::shortcuts::{self, Check, Platform};
-use app_core::workspace::ClaudeDirs;
+use app_core::workspace::{ClaudeDirs, DirBadge, ResolvedDir};
 use app_core::theme_colors::{readable_fill, resolve, tokens};
 use gpui::{App, Global, Task, WindowAppearance};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -205,13 +205,13 @@ pub(crate) fn shortcut_label(settings: &Settings, action: &str) -> String {
     shortcuts::label(shortcuts::current(action, &settings.shortcuts, platform).as_deref(), platform)
 }
 
-/// The name of the config dir at `claude_dir`, when two or more are configured (a lone dir needs no tag).
-pub(crate) fn dir_name(settings: &Settings, claude_dir: Option<&Path>) -> Option<String> {
+/// The badge of the config dir at `claude_dir`, shown only with two or more config dirs.
+pub(crate) fn dir_badge_for(settings: &Settings, claude_dir: Option<&Path>) -> Option<DirBadge> {
     if settings.claude_dirs.len() < 2 {
         return None;
     }
     let dirs = ClaudeDirs::from_settings(settings, None, std::env::home_dir().as_deref());
-    dirs.by_path(claude_dir?).map(|dir| dir.name.clone())
+    dirs.by_path(claude_dir?).map(ResolvedDir::badge)
 }
 
 /// Watch the settings file's directory; a foreground task reloads after the events settle.
@@ -332,15 +332,16 @@ mod tests {
     }
 
     #[test]
-    fn the_dir_name_is_shown_only_with_two_or_more_dirs() {
+    fn the_dir_badge_is_shown_only_with_two_or_more_dirs() {
         use app_core::settings::ClaudeDir;
         let dir = |name: &str, path: &str| ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![], color: None };
         let mut settings = Settings { claude_dirs: vec![dir("Personal", "/c/one")], ..Settings::default() };
-        assert_eq!(dir_name(&settings, Some(Path::new("/c/one"))), None);
+        assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/one"))), None);
         settings.claude_dirs.push(dir("Work", "/c/two"));
-        assert_eq!(dir_name(&settings, Some(Path::new("/c/two"))).as_deref(), Some("Work"));
-        assert_eq!(dir_name(&settings, Some(Path::new("/c/else"))), None);
-        assert_eq!(dir_name(&settings, None), None);
+        let badge = dir_badge_for(&settings, Some(Path::new("/c/two"))).unwrap();
+        assert_eq!((badge.name.as_str(), badge.letter.as_str()), ("Work", "W"));
+        assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/else"))), None);
+        assert_eq!(dir_badge_for(&settings, None), None);
     }
 
     #[test]

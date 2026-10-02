@@ -23,8 +23,8 @@ use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
-use crate::settings_store::{SettingsStore, dir_name, shortcut_label};
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, side_line, theme};
+use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, theme};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -482,8 +482,8 @@ impl SidebarView {
                             title.font_weight(FontWeight::SEMIBOLD)
                         }))
                         .when(unseen, |pill| pill.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.ink))))
-                        .when(session.container.is_some(), |pill| pill.child(container_chip(colors.ink)))
-                        .children(dir_name(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|name| dir_chip(colors.ink, name)))
+                        .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
+                        .children(dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|badge| dir_badge(&badge, &theme)))
                         .children(project())
                         .child(aside(note.clone(), colors.ink)),
                 )

@@ -7,8 +7,11 @@ use app_core::session_tree::Tone;
 use std::path::Path;
 
 use app_core::settings::{ProjectColors, StatusFills};
+use app_core::workspace::DirBadge;
 use app_core::theme_colors::{Preset, ToneColors, Tokens, tone_colors};
-use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, SharedString, Styled, div, px, rgb, rgba};
+use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, Styled, Svg, div, px, rgb, rgba, svg};
+
+use crate::assets::CONTAINER_ICON;
 
 /// The colours and sizes views draw with, a GPUI global replaced whenever the settings change.
 #[derive(Clone)]
@@ -71,31 +74,25 @@ const FONTS: [&[u8]; 5] = [
     include_bytes!("../assets/fonts/Figtree-Bold.ttf"),
 ];
 
-/// The small "container" tag on dev container sessions, tabs and pane headers, drawn in `ink`.
-pub(crate) fn container_chip(ink: u32) -> Div {
-    tag_chip(ink, "container")
+/// The dev container icon, in `ink` (slightly softened).
+pub(crate) fn container_icon(ink: u32, theme: &Theme) -> Svg {
+    svg().path(CONTAINER_ICON).flex_none().size(theme.ui(14.)).text_color(rgba((ink << 8) | 0xd9))
 }
 
-/// The Claude config dir's name on sessions, tabs and pane headers, drawn like [`container_chip`]; shown only with
-/// two or more config dirs.
-pub(crate) fn dir_chip(ink: u32, name: String) -> Div {
-    tag_chip(ink, name)
-}
-
-fn tag_chip(ink: u32, text: impl Into<SharedString>) -> Div {
-    // Clipped away, border and all, before the row's title gives way when the row is too narrow for it.
-    div().min_w_0().flex_shrink(4.).overflow_hidden().child(
-        div()
-            .flex_none()
-            .whitespace_nowrap()
-            .px(px(5.))
-            .rounded(px(RADIUS_SMALL - 3.))
-            .border_1()
-            .border_color(rgba((ink << 8) | 0x66))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .child(text.into()),
-    )
+/// A config dir's badge: its letter on its colour. Shown only with two or more config dirs.
+pub(crate) fn dir_badge(badge: &DirBadge, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .size(theme.ui(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .bg(rgb(badge.color.value(theme.preset)))
+        .text_color(rgb(theme.tokens.ground))
+        .text_size(theme.ui(10.))
+        .font_weight(FontWeight::BOLD)
+        .child(badge.letter.clone())
 }
 
 /// Make the embedded interface font available.
