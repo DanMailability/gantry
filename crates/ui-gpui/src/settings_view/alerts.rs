@@ -51,7 +51,15 @@ impl Event {
     }
 }
 
-const TONES: [(AlertTone, &str); 2] = [(AlertTone::Bell, "Bell (low, ringing)"), (AlertTone::Tick, "Tick (short, high)")];
+const TONES: [(AlertTone, &str); 7] = [
+    (AlertTone::Blip, "Blip (short, high)"),
+    (AlertTone::BlipLong, "Blip, long tail"),
+    (AlertTone::Chime, "Chime (two notes)"),
+    (AlertTone::Droplet, "Droplet (glides up)"),
+    (AlertTone::Beep, "Beep (low, soft)"),
+    (AlertTone::BeepSlow, "Beep, slow start"),
+    (AlertTone::Rise, "Rise (three notes)"),
+];
 
 fn tone_label(tone: AlertTone) -> &'static str {
     TONES.iter().find(|(candidate, _)| *candidate == tone).map_or("", |(_, label)| label)
@@ -115,7 +123,7 @@ impl SettingsView {
                         (text.to_string(), tone == channels.tone, change(move |s| event.alerts(&mut s.alerts).tone = tone))
                     })
                     .collect();
-                let picker = self.dropdown("tone", index, Popover::Tone(event), tone_label(channels.tone).into(), theme.ui(150.), options, window, cx);
+                let picker = self.dropdown("tone", index, Popover::Tone(event), tone_label(channels.tone).into(), theme.ui(170.), options, window, cx);
                 let tone = channels.tone;
                 let play = handler(move |_, _, cx| {
                     let volume = cx.global::<SettingsStore>().settings().alerts.volume;
@@ -193,7 +201,7 @@ impl SettingsView {
             None,
             vec![
                 row(theme, "Play sounds", "Off mutes every alert sound.", sounds, sounds_reset),
-                row(theme, "Volume", "Bell and tick share one volume.", slider, volume_reset),
+                row(theme, "Volume", "All sounds share one volume.", slider, volume_reset),
                 stacked_row(
                     theme,
                     None,

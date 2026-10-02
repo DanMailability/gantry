@@ -380,8 +380,13 @@ impl TerminalView {
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if input_fate(&self.state) == InputFate::Drop {
-            if event.keystroke.key == "enter" && matches!(self.state, PaneState::Exited(_) | PaneState::Failed(_)) {
-                cx.emit(PaneEvent::Rerun);
+            if matches!(self.state, PaneState::Exited(_) | PaneState::Failed(_)) {
+                let keystroke = &event.keystroke;
+                if keystroke.key == "enter" {
+                    cx.emit(PaneEvent::Rerun);
+                } else if keystroke.key == "d" && keystroke.modifiers.control && !keystroke.modifiers.shift && !keystroke.modifiers.alt {
+                    cx.emit(PaneEvent::Close);
+                }
             }
             cx.stop_propagation();
             return;
