@@ -30,7 +30,8 @@ mod terminal;
 mod window;
 
 use alerts::Event;
-use appearance::{Status, installed_monospace};
+use appearance::Status;
+use terminal::installed_monospace;
 
 /// A group of settings, chosen in the left menu.
 #[derive(Clone, Copy, PartialEq, Eq)]

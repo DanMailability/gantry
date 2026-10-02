@@ -18,8 +18,8 @@ pub(super) type FieldKey = (&'static str, usize);
 
 const DIR_NAME: &str = "dir-name";
 const DIR_COMMAND: &str = "dir-command";
-const SHELL_PROGRAM: &str = "shell-program";
-const SHELL_ARGS: &str = "shell-args";
+pub(super) const SHELL_PROGRAM: &str = "shell-program";
+pub(super) const SHELL_ARGS: &str = "shell-args";
 
 const SESSIONS_PER_PROJECT: Stepped = Stepped {
     name: "recents-per-project",
@@ -262,9 +262,9 @@ impl SettingsView {
         cx.notify();
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// An editable text box for `key` showing `value` (the edited text while it has focus).
-    fn text_field(&mut self, key: FieldKey, value: &str, placeholder: &'static str, mono: bool, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn text_field(&mut self, key: FieldKey, value: &str, placeholder: &'static str, mono: bool, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         self.watch_field(key, window, cx);
         let handle = self.stop(key.0, key.1, cx);
         let focused = handle.is_focused(window);
@@ -474,11 +474,6 @@ impl SettingsView {
     }
 
     fn shell_and_recents(&mut self, theme: &Theme, settings: &Settings, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let labelled = |label: &'static str, field: gpui::Stateful<Div>| {
-            div().flex().flex_wrap().items_center().gap_x(theme.ui(12.)).gap_y(theme.ui(4.)).child(div().flex_none().w(theme.ui(110.)).child(label)).child(field.flex_1().min_w(theme.ui(200.)))
-        };
-        let program = self.text_field((SHELL_PROGRAM, 0), &settings.shell.program, "$SHELL", true, theme, window, cx);
-        let args = self.text_field((SHELL_ARGS, 0), &join_args(&settings.shell.args), "none", true, theme, window, cx);
         let stepper_row = |this: &mut Self, label: &'static str, stepped: &'static Stepped, cx: &mut Context<Self>| {
             div()
                 .flex()
@@ -495,11 +490,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(theme.ui(12.))
-            .child(heading(theme, "Shell"))
-            .child(labelled("Program", program))
-            .child(labelled("Arguments", args))
-            .child(muted(theme, "Empty program: your login shell ($SHELL)."))
-            .child(div().mt(theme.ui(12.)).child(heading(theme, "Recent sessions pop-up")))
+            .child(heading(theme, "Recent sessions pop-up"))
             .child(stepper_row(self, "Sessions per project", &SESSIONS_PER_PROJECT, cx))
             .child(stepper_row(self, "Project chips", &PROJECT_CHIPS, cx))
     }

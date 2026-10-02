@@ -2,12 +2,10 @@
 
 use app_core::session_tree::Tone;
 use app_core::settings::{Settings, StatusFills, ThemeChoice, parse_hex};
-use app_core::theme_colors::{Preset, ProjectColor, Tokens, contrast, derive, readable_fill, terminal_palette, tokens as preset_tokens, tone_colors};
-use gpui::{App, Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, div, px, rgb, rgba, deferred};
+use app_core::theme_colors::{Preset, ProjectColor, Tokens, contrast, derive, readable_fill, tokens as preset_tokens, tone_colors};
+use gpui::{Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, div, px, rgb, rgba, deferred};
 
 use super::*;
-use crate::settings_store::shortcut_label;
-use crate::terminal_view::FONT_FAMILY;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
 
 /// A session status whose sidebar fill can be chosen.
@@ -82,24 +80,6 @@ impl Status {
     }
 }
 
-const TERMINAL_SIZE: Stepped = Stepped {
-    name: "terminal-size",
-    get: |s| s.terminal_font.size,
-    set: |s, value| s.terminal_font.size = value,
-    delta: 1.0,
-    min: 8.0,
-    max: 40.0,
-    unit: "",
-};
-const LINE_HEIGHT: Stepped = Stepped {
-    name: "line-height",
-    get: |s| s.terminal_font.line_height,
-    set: |s, value| s.terminal_font.line_height = value,
-    delta: 0.1,
-    min: 1.0,
-    max: 2.0,
-    unit: "",
-};
 const INTERFACE_SIZE: Stepped = Stepped {
     name: "interface-size",
     get: |s| s.ui_font_size,
@@ -146,26 +126,6 @@ fn fill_to_store(fill: u32, default: u32) -> Option<u32> {
 fn parse_fill(text: &str) -> Option<u32> {
     let text = text.trim();
     parse_hex(&if text.starts_with('#') { text.to_string() } else { format!("#{text}") })
-}
-
-/// The families whose `m` and `i` advance the same: `(family, advance of m, advance of i)` in, sorted names out.
-fn monospace_families(measured: impl IntoIterator<Item = (String, f32, f32)>) -> Vec<String> {
-    let mut names: Vec<String> =
-        measured.into_iter().filter(|(_, m, i)| (m - i).abs() < 0.01).map(|(name, _, _)| name).collect();
-    names.sort();
-    names.dedup();
-    names
-}
-
-pub(super) fn installed_monospace(cx: &App) -> Vec<String> {
-    let text_system = cx.text_system();
-    let measured = text_system.all_font_names().into_iter().filter_map(|name| {
-        let id = text_system.resolve_font(&gpui::font(name.clone()));
-        let m = text_system.advance(id, px(14.), 'm').ok()?.width;
-        let i = text_system.advance(id, px(14.), 'i').ok()?.width;
-        Some((name, f32::from(m), f32::from(i)))
-    });
-    monospace_families(measured)
 }
 
 impl SettingsView {
@@ -218,7 +178,7 @@ impl SettingsView {
             .gap(theme.ui(26.))
             .child(self.theme_cards(theme, settings, window, cx))
             .child(self.status_colours(theme, settings, window, cx))
-            .child(self.fonts(theme, settings, window, cx))
+            .child(self.interface_group(theme, settings, window, cx))
             .child(self.project_colours(theme, settings, window, cx))
     }
 
@@ -383,6 +343,12 @@ impl SettingsView {
             .children(rows)
     }
 
+    fn interface_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+        let control = self.stepper(&INTERFACE_SIZE, settings, window, cx);
+        let reset = self.reset_slot("reset-interface-size", 0, settings, |s| s.ui_font_size, |s, v| s.ui_font_size = v, window, cx);
+        group(theme, "Interface", None, vec![row(theme, "Interface size", "Sidebar, tabs and menus.", control, reset)])
+    }
+
     fn project_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let enabled = settings.project_colors.enabled;
         let switch = self.switch("project-colours", 0, enabled, window, cx, change(move |settings| settings.project_colors.enabled = !enabled));
@@ -532,86 +498,6 @@ impl SettingsView {
         )
         .with_priority(1)
     }
-
-    fn fonts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
-        let font = &settings.terminal_font;
-        let label = match &font.family {
-            Some(family) => family.clone(),
-            None => format!("{FONT_FAMILY} (default)"),
-        };
-        let mut options: Vec<(String, bool, Handler)> = vec![(
-            format!("{FONT_FAMILY} (default)"),
-            font.family.is_none(),
-            change(|settings| settings.terminal_font.family = None),
-        )];
-        options.extend(self.families.iter().filter(|family| *family != FONT_FAMILY).map(|family| {
-            let name = family.clone();
-            (family.clone(), font.family.as_deref() == Some(family.as_str()), change(move |settings| settings.terminal_font.family = Some(name.clone())))
-        }));
-        let family_row = div()
-            .flex()
-            .items_center()
-            .gap(theme.ui(12.))
-            .child(div().w(theme.ui(150.)).child("Terminal font"))
-            .child(self.dropdown("font-family", 0, Popover::Font, label, theme.ui(210.), options, window, cx));
-        let stepper_row = |this: &mut Self, label: &'static str, stepped: &'static Stepped, hint: String, cx: &mut Context<Self>| {
-            div()
-                .flex()
-                .items_center()
-                .gap(theme.ui(12.))
-                .child(div().flex_none().w(theme.ui(150.)).child(label))
-                .child(this.stepper(stepped, settings, window, cx))
-                .child(muted(theme, hint).flex_1().min_w_0())
-        };
-        let controls = div()
-            .w(theme.ui(520.))
-            .max_w_full()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(12.))
-            .child(family_row)
-            .child(stepper_row(self, "Terminal size", &TERMINAL_SIZE, format!("{} / {} change this too", shortcut_label(settings, "zoomIn"), shortcut_label(settings, "zoomOut")), cx))
-            .child(stepper_row(self, "Line height", &LINE_HEIGHT, String::new(), cx))
-            .child(stepper_row(self, "Interface size", &INTERFACE_SIZE, "Sidebar, tabs, menus".into(), cx));
-
-        let palette = terminal_palette(theme.preset);
-        let ok = color(palette.ansi[2]);
-        let line = |parts: Vec<(String, Option<u32>)>| {
-            div().flex().flex_row().whitespace_nowrap().children(parts.into_iter().map(move |(text, ink)| {
-                div().when_some(ink, |part, ink| part.text_color(rgb(ink))).child(text)
-            }))
-        };
-        let family = font.family.clone().unwrap_or_else(|| FONT_FAMILY.to_string());
-        let sample = div()
-            .flex_1()
-            .min_w(theme.ui(300.))
-            .px(theme.ui(16.))
-            .py(theme.ui(14.))
-            .rounded(px(RADIUS))
-            .bg(rgb(theme.tokens.terminal))
-            .border_1()
-            .border_color(rgb(theme.tokens.line))
-            .overflow_hidden()
-            .font_family(family)
-            .text_size(px(font.size))
-            .line_height(px(font.size * font.line_height))
-            .text_color(rgb(color(palette.foreground)))
-            .child(line(vec![("~/rust_terminal".into(), Some(theme.tokens.accent)), (" $ cargo test -p app-core settings".into(), None)]))
-            .child(line(vec![("running 12 tests".into(), None)]))
-            .child(line(vec![("test settings::missing_keys_use_defaults ... ".into(), None), ("ok".into(), Some(ok))]))
-            .child(line(vec![("test settings::low_contrast_fill_is_refused ... ".into(), None), ("ok".into(), Some(ok))]))
-            .child(line(vec![
-                ("test result: ".into(), None),
-                ("ok".into(), Some(ok)),
-                (". 12 passed; 0 failed".into(), None),
-            ]));
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(12.))
-            .child(heading(theme, "Fonts"))
-            .child(div().flex().flex_wrap().items_start().gap(theme.ui(20.)).child(controls).child(sample))
-    }
 }
 
 #[cfg(test)]
@@ -662,16 +548,5 @@ mod tests {
         assert_eq!(parse_fill(" c1e5cd "), Some(0xc1e5cd));
         assert_eq!(parse_fill("#c1e5"), None);
         assert_eq!(parse_fill(""), None);
-    }
-
-    #[test]
-    fn only_fixed_width_families_are_listed_once_and_sorted() {
-        let measured = [
-            ("Noto Sans Mono".to_string(), 8.4, 8.4),
-            ("Figtree".to_string(), 12.0, 4.0),
-            ("Adwaita Mono".to_string(), 8.4, 8.4),
-            ("Noto Sans Mono".to_string(), 8.4, 8.4),
-        ];
-        assert_eq!(monospace_families(measured), ["Adwaita Mono", "Noto Sans Mono"]);
     }
 }
