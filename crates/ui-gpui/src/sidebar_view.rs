@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::menus::{self, MenuAction};
 use app_core::session_tree::{
-    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, Tone, ToneCounts,
+    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
     session_title,
 };
 use app_core::sessions::SessionStore;
@@ -25,7 +25,7 @@ use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::theme;
 use crate::theme::{
-    ACCENT, LINE, MUTED, ON_ACCENT, RADIUS, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
+    ACCENT, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_SMALL, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
@@ -49,6 +49,13 @@ pub enum SidebarEvent {
     },
     /// A right-click menu entry was picked.
     Menu(MenuAction),
+    /// Open the right-click menu of tab `index` (a tab heading was right-clicked).
+    TabMenu {
+        /// The tab.
+        index: usize,
+        /// Where the menu opens.
+        position: Point<Pixels>,
+    },
     /// Open a new Claude (or shell) tab where the focused pane is.
     New {
         /// Claude (true) or a shell.
@@ -65,6 +72,7 @@ pub struct SidebarView {
     focus_handle: FocusHandle,
     sessions: SessionStore,
     panes: Vec<PaneEntry>,
+    tabs: Vec<TabEntry>,
     arrivals: Arrivals,
     filter: TextField,
     toggled: HashSet<PathBuf>,
@@ -112,6 +120,7 @@ impl SidebarView {
             focus_handle: cx.focus_handle(),
             sessions: SessionStore::default(),
             panes: Vec::new(),
+            tabs: Vec::new(),
             arrivals: Arrivals::default(),
             filter: TextField::default(),
             toggled: HashSet::new(),
@@ -162,10 +171,11 @@ impl SidebarView {
         cx.notify();
     }
 
-    /// The workspace's panes.
-    pub fn set_panes(&mut self, panes: Vec<PaneEntry>, cx: &mut Context<Self>) {
-        if panes != self.panes {
+    /// The workspace's panes and tabs.
+    pub fn set_panes(&mut self, panes: Vec<PaneEntry>, tabs: Vec<TabEntry>, cx: &mut Context<Self>) {
+        if panes != self.panes || tabs != self.tabs {
             self.panes = panes;
+            self.tabs = tabs;
             self.rebuild(cx);
         }
     }
@@ -184,6 +194,7 @@ impl SidebarView {
                 toggled: &self.toggled,
                 details: self.details.as_deref(),
                 unseen: &self.unseen,
+                tabs: &self.tabs,
                 project_of: &project_of,
                 now_ms,
             };
@@ -271,6 +282,13 @@ impl SidebarView {
     /// Open the right-click menu of row `index` at `position`.
     fn open_menu(&mut self, index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.rows.get(index) else { return };
+        if let RowKind::Tab { index: tab, .. } = row.kind {
+            // The workspace owns the tab menu; only one menu may be open.
+            self.menu = None;
+            cx.emit(SidebarEvent::TabMenu { index: tab, position });
+            cx.notify();
+            return;
+        }
         let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
         let items = match &row.kind {
             RowKind::Project { path, .. } => {
@@ -350,6 +368,10 @@ impl SidebarView {
         };
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
         let aside = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
+        let guide = row.in_tab.then(|| div().absolute().left(px(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(LINE)));
+        let base = base.when(row.in_tab, |base| base.relative().pl(px(32.))).children(guide);
+        // A row listed under another project's tab heading names its own project.
+        let project = || row.project_label.clone().map(|label| div().flex_none().text_xs().text_color(rgb(MUTED)).child(label));
         match &row.kind {
             RowKind::Project { label, expanded, counts, .. } => {
                 base.child(
@@ -376,6 +398,7 @@ impl SidebarView {
                         }))
                         .when(unseen, |pill| pill.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.ink))))
                         .when(session.container.is_some(), |pill| pill.child(theme::container_chip(colors.ink)))
+                        .children(project())
                         .child(aside(note.clone(), colors.ink)),
                 )
             }
@@ -384,6 +407,7 @@ impl SidebarView {
                     .text_color(rgb(if *tone == Tone::Closed { MUTED } else { TEXT }))
                     .child(div().flex_none().text_xs().text_color(rgb(MUTED)).child(">_"))
                     .child(title(entry.title.clone()))
+                    .children(project())
                     .child(aside(note.clone(), MUTED)),
             ),
             RowKind::Pane { tone, note, .. } => {
@@ -397,9 +421,30 @@ impl SidebarView {
                         .text_color(rgb(colors.ink))
                         .child(lead)
                         .child(title("New session".into()))
+                        .children(project())
                         .child(aside(note.clone(), colors.ink)),
                 )
             }
+            RowKind::Tab { index, title: tab_title, panes, .. } => base.child(
+                pill(None)
+                    .h(px(28.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .min_w(px(18.))
+                            .h(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .rounded(px(RADIUS_SMALL - 3.))
+                            .text_xs()
+                            .child((index + 1).to_string()),
+                    )
+                    .child(title(tab_title.clone()).font_weight(FontWeight::SEMIBOLD))
+                    .child(aside(format!("{panes} panes"), MUTED)),
+            ),
             RowKind::Detail { text, .. } => {
                 base.child(div().pl(px(34.)).text_xs().italic().text_color(rgb(MUTED)).child(text.clone()))
             }

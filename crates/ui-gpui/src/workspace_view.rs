@@ -20,7 +20,7 @@ use gpui::{
 use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
 use app_core::menus::{self, MenuAction};
-use app_core::session_tree::{Activation, PaneEntry, Tone, display_path, session_title, status_tone};
+use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
 use crate::context_menu::{self, OpenMenu};
@@ -656,7 +656,19 @@ impl WorkspaceView {
                 }
             })
             .collect();
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, cx));
+        let tabs: Vec<TabEntry> = self
+            .workspace
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| TabEntry {
+                index,
+                title: self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title()),
+                focused: tab.focused,
+                leaves: tab.root.leaves(),
+            })
+            .collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, tabs, cx));
     }
 
     /// Do what a right-click menu entry says.
@@ -757,6 +769,7 @@ impl WorkspaceView {
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
             SidebarEvent::Menu(action) => self.run_menu_action(action, window, cx),
+            SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
             SidebarEvent::New { claude } => self.open(claude, None),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
