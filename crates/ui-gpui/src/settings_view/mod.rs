@@ -488,7 +488,6 @@ impl SettingsView {
     }
 
     /// The trailing slot with a "Reset" text button when `show`, empty otherwise.
-    #[allow(dead_code)]
     fn reset_button(&mut self, name: &'static str, index: usize, show: bool, reset: Handler, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = theme(cx).clone();
         let slot = div().flex_none().w(theme.ui(SLOT_WIDTH)).flex().justify_end();
@@ -509,7 +508,7 @@ impl SettingsView {
     }
 
     /// A trailing slot whose "Reset" shows when the setting `get` reads differs from its default and puts the default back with `set`.
-    #[allow(dead_code, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn reset_slot<T: PartialEq + 'static>(
         &mut self,
         name: &'static str,
@@ -525,7 +524,6 @@ impl SettingsView {
     }
 
     /// A segmented bar: one button per label, the `chosen` one filled; `pick(i)` is the handler for button `i`.
-    #[allow(dead_code)]
     fn segmented(
         &mut self,
         name: &'static str,
@@ -593,7 +591,6 @@ fn muted(theme: &Theme, text: impl Into<SharedString>) -> Div {
 const SLOT_WIDTH: f32 = 56.;
 
 /// A section of a page: heading, optional description under it, then a bordered box of `rows` divided by lines.
-#[allow(dead_code)]
 fn group(theme: &Theme, title: &'static str, description: Option<&'static str>, rows: Vec<Div>) -> Div {
     div()
         .flex()
@@ -613,14 +610,12 @@ fn group(theme: &Theme, title: &'static str, description: Option<&'static str>, 
 }
 
 /// A row's label column: the title (medium weight) and its description under it.
-#[allow(dead_code)]
 fn row_label(title: impl Into<SharedString>, description: impl IntoElement) -> Div {
     div().child(div().font_weight(FontWeight::MEDIUM).child(title.into())).child(description)
 }
 
 /// A row: `label` on the left (it flexes and wraps), then `control` and the `trailing` slot on the right. They wrap under the
 /// label when the row is narrow.
-#[allow(dead_code)]
 fn row_shell(theme: &Theme, label: Div, control: impl IntoElement, trailing: Div) -> Div {
     div()
         .min_h(theme.ui(56.))
@@ -636,13 +631,11 @@ fn row_shell(theme: &Theme, label: Div, control: impl IntoElement, trailing: Div
 }
 
 /// A setting as a row: title, one line of description, the control and the trailing slot.
-#[allow(dead_code)]
 fn row(theme: &Theme, title: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, trailing: Div) -> Div {
     row_shell(theme, row_label(title, muted(theme, description)), control, trailing)
 }
 
 /// A row whose `content` takes the full width under the optional label (title and description).
-#[allow(dead_code)]
 fn stacked_row(theme: &Theme, label: Option<(&'static str, &'static str)>, content: impl IntoElement) -> Div {
     div()
         .px(theme.ui(16.))
@@ -660,7 +653,6 @@ fn empty_slot(theme: &Theme) -> Div {
 }
 
 /// The trailing slot of a list row: as wide as its `actions` need.
-#[allow(dead_code)]
 fn actions_slot(theme: &Theme) -> Div {
     div().flex_none().flex().items_center().gap(theme.ui(4.))
 }
