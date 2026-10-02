@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use app_core::attention::{Alert, AlertKind, AttentionTracker, describe, without_claude_glyph};
+use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, describe, without_claude_glyph};
 use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
@@ -385,14 +385,19 @@ impl WorkspaceView {
         }
     }
 
-    /// Mark `alert`'s pane unseen — unless the user is looking at it (visible tab, active window).
+    /// Raise `alert` on the channels the settings allow for its pane (badge, notification, sound).
     fn raise(&mut self, alert: Alert, window: &mut Window, cx: &mut Context<Self>) {
         let Some(leaf) = self.workspace.leaf_for_pane(alert.pane) else { return };
-        if window.is_window_active() && self.workspace.is_visible(leaf) {
+        let settings = cx.global::<SettingsStore>().settings().clone();
+        let visible = self.workspace.is_visible(leaf);
+        let channels = alert_channels(&settings.alerts, &alert.kind, visible, window.is_window_active());
+        if channels.badge {
+            self.unseen.insert(leaf, alert.kind.clone());
+            self.sync_unseen(cx);
+        }
+        if !channels.notification && channels.sound.is_none() {
             return;
         }
-        self.unseen.insert(leaf, alert.kind.clone());
-        self.sync_unseen(cx);
         let (title, dir) = self
             .sidebar
             .read(cx)
@@ -401,7 +406,7 @@ impl WorkspaceView {
             .map(|session| (session_title(session).to_string(), display_path(&session.cwd, std::env::home_dir().as_deref())))
             .unwrap_or_default();
         let (summary, body) = describe(&alert.kind, &title, &dir);
-        alerts::deliver(Notice { leaf, summary, body }, self.clicked.clone());
+        alerts::deliver(Notice { leaf, summary, body }, channels, settings.alerts.volume, self.clicked.clone());
     }
 
     /// Forget alerts of the panes the user can see now.
