@@ -190,7 +190,11 @@ impl SidebarView {
                 project_of: &project_of,
                 now_ms,
             };
-            session_tree::active(&input, &mut self.arrivals)
+            // Until the session list arrives, number nothing: panes and sessions must get their arrival
+            // numbers together, so that at startup leaves land above outside sessions.
+            let mut unloaded = Arrivals::default();
+            let arrivals = if self.sessions.loaded() { &mut self.arrivals } else { &mut unloaded };
+            session_tree::active(&input, arrivals)
         };
         self.rows = rows;
         // A selection whose row is gone falls back to the focused pane's row.

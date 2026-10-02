@@ -421,7 +421,11 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
     for (_, entries) in &mut projects {
         entries.sort_by_key(|entry| std::cmp::Reverse(arrivals.of(&entry.key)));
     }
-    let latest = |entries: &[Entry<'_>]| entries.iter().map(|entry| entry.activity).max().unwrap_or(0);
+    // Sessions decide; a project with only shells or new leaves counts as now.
+    let latest = |entries: &[Entry<'_>]| {
+        let sessions = entries.iter().filter(|entry| matches!(entry.kind, EntryKind::Session { .. }));
+        sessions.map(|entry| entry.activity).max().unwrap_or(u64::MAX)
+    };
     projects.sort_by(|(a_path, a), (b_path, b)| latest(b).cmp(&latest(a)).then_with(|| a_path.cmp(b_path)));
     let paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
     let labels = labels(&paths, input.home);
@@ -760,6 +764,18 @@ mod tests {
         assert_eq!(fixture.outline(), vec!["▾ b", "  new (Idle · 1h)", "▾ a", "  old (Idle · 5h)"]);
         fixture.sessions[0].last_active_ms = NOW;
         assert_eq!(fixture.outline()[0], "▾ a");
+    }
+
+    #[test]
+    fn a_shell_does_not_pin_its_project_above_newer_sessions() {
+        let mut fixture = Fixture::of(
+            vec![managed("old", "/r/a", NOW - 5 * HOUR_MS), managed("new", "/r/b", NOW - HOUR_MS)],
+            vec![pane(1, "/r/a", Some("old")), shell_pane(2, "/r/a"), pane(3, "/r/b", Some("new"))],
+        );
+        assert_eq!(fixture.outline()[0], "▾ b");
+        // A project with nothing but shells counts as now.
+        fixture.panes.push(shell_pane(4, "/r/c"));
+        assert_eq!(fixture.outline()[0], "▾ c");
     }
 
     #[test]
