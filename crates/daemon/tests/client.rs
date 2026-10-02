@@ -9,7 +9,7 @@ use daemon::paths::Paths;
 use protocol::message::SpawnRequest;
 
 fn sh(script: &str) -> SpawnRequest {
-    SpawnRequest { program: "sh".into(), args: vec!["-c".into(), script.into()], cwd: std::env::temp_dir(), cols: 80, rows: 24, cwd_from: None, container: None }
+    SpawnRequest { program: "sh".into(), args: vec!["-c".into(), script.into()], cwd: std::env::temp_dir(), cols: 80, rows: 24, cwd_from: None, container: None, claude: false, env: Vec::new(), scrollback: None }
 }
 
 fn daemon_spawner(paths: Paths) -> impl FnOnce() -> std::io::Result<()> + Send + 'static {

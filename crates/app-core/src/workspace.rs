@@ -46,7 +46,7 @@ impl PaneLaunch {
 
     /// The Claude session this command line names (`--session-id`, `--resume`, `-r`).
     pub fn session(&self) -> Option<&str> {
-        claude_session(&self.program, &self.args)
+        claude_session(false, &self.program, &self.args)
     }
 
     /// Whether this runs Claude Code.
@@ -74,6 +74,9 @@ impl PaneLaunch {
             rows,
             cwd_from,
             container: self.container.clone(),
+            claude: false,
+            env: Vec::new(),
+            scrollback: None,
         }
     }
 }
@@ -510,7 +513,7 @@ mod tests {
     }
 
     fn info(pane: PaneId, program: &str, last_focused: u64) -> PaneInfo {
-        PaneInfo { pane, program: program.into(), args: vec!["-l".into()], cwd: "/srv".into(), last_focused, container: None }
+        PaneInfo { pane, program: program.into(), args: vec!["-l".into()], cwd: "/srv".into(), last_focused, container: None, claude: false }
     }
 
     #[test]
@@ -773,7 +776,7 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
-            container: None,
+            container: None, claude_dir: None,
         }
     }
 
@@ -840,7 +843,7 @@ mod tests {
 
     #[test]
     fn restore_adopted_claude_panes_know_their_session() {
-        let live = [PaneInfo { pane: 4, program: "claude".into(), args: vec!["--resume".into(), "xyz".into()], cwd: "/srv".into(), last_focused: 1, container: None }];
+        let live = [PaneInfo { pane: 4, program: "claude".into(), args: vec!["--resume".into(), "xyz".into()], cwd: "/srv".into(), last_focused: 1, container: None, claude: false }];
         let restored = restore(None, "i", &live, &launch());
         let leaf = restored.attach[0].0;
         assert_eq!(restored.workspace.leaves[&leaf].session.as_deref(), Some("xyz"));

@@ -108,7 +108,7 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
-            container: None,
+            container: None, claude_dir: None,
         }
     }
 
@@ -124,6 +124,7 @@ mod tests {
             activity_since_ms: 0,
             proc_start: start.map(Into::into),
             container_id: None,
+            claude_dir: None,
         }
     }
 

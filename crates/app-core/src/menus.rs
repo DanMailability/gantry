@@ -219,7 +219,7 @@ mod tests {
     fn session(state: SessionState) -> SessionInfo {
         SessionInfo {
             id: "s1".into(), cwd: "/r/app".into(), title: "t".into(), last_active_ms: 0, state, cwd_exists: true,
-            status: None, status_since_ms: 0, container: None,
+            status: None, status_since_ms: 0, container: None, claude_dir: None,
         }
     }
 

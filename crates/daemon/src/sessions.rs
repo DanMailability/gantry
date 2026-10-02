@@ -104,6 +104,7 @@ pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone], 
                 status_since_ms: if status.is_some() { r.activity_since_ms } else { 0 },
                 status,
                 container: placed.map(|(place, _)| place),
+                claude_dir: r.claude_dir.clone(),
             }
         })
         .collect()
@@ -128,6 +129,20 @@ pub fn diff(old: &[SessionInfo], new: &[SessionInfo]) -> (Vec<SessionInfo>, Vec<
     let upserted = new.iter().filter(|s| before.get(s.id.as_str()).copied() != Some(*s)).cloned().collect();
     let removed = old.iter().filter(|s| !after.contains(s.id.as_str())).map(|s| s.id.clone()).collect();
     (upserted, removed)
+}
+
+/// One list from the scans of several config dirs: a session found in more than one keeps the record that was
+/// active most recently; most recently active first.
+pub fn merge_records<'a>(scans: impl IntoIterator<Item = &'a Arc<Vec<SessionRecord>>>) -> Vec<SessionRecord> {
+    let mut by_id: HashMap<&str, &SessionRecord> = HashMap::new();
+    for record in scans.into_iter().flat_map(|scan| scan.iter()) {
+        if by_id.get(record.id.as_str()).is_none_or(|old| old.last_active_ms < record.last_active_ms) {
+            by_id.insert(record.id.as_str(), record);
+        }
+    }
+    let mut list: Vec<SessionRecord> = by_id.into_values().cloned().collect();
+    list.sort_by(|a, b| b.last_active_ms.cmp(&a.last_active_ms).then_with(|| a.id.cmp(&b.id)));
+    list
 }
 
 /// Index `config` on a thread of its own: rescan on change notifications (debounced) and every
@@ -189,6 +204,7 @@ mod tests {
             activity_since_ms: 0,
             proc_start: None,
             container_id: None,
+            claude_dir: None,
         }
     }
 
@@ -337,5 +353,16 @@ mod tests {
             info.container,
             Some(ContainerPlace { host_folder: Some("/home/u/app".into()), path: "/workspaces/app/src".into() })
         );
+    }
+
+    #[test]
+    fn merging_dirs_keeps_the_most_recently_active_duplicate() {
+        let (mut a, mut b) = (record("dup", IndexState::Closed), record("dup", IndexState::Closed));
+        (a.last_active_ms, a.claude_dir) = (5, Some("/a".into()));
+        (b.last_active_ms, b.claude_dir) = (9, Some("/b".into()));
+        let only = record("only", IndexState::Closed);
+        let merged = merge_records([&Arc::new(vec![a, only]), &Arc::new(vec![b])]);
+        assert_eq!(merged.iter().map(|r| (r.id.as_str(), r.last_active_ms)).collect::<Vec<_>>(), vec![("dup", 9), ("only", 1)]);
+        assert_eq!(merged[0].claude_dir.as_deref(), Some(Path::new("/b")));
     }
 }

@@ -77,7 +77,15 @@ fn spawn(conn: &Connection, program: &str, args: &[&str], cwd: &Path, needle: &s
         rows: 24,
         cwd_from: None,
         container: None,
+        claude: false,
+        env: Vec::new(),
+        scrollback: None,
     };
+    spawn_spec(conn, spec, needle)
+}
+
+/// Spawn `spec`; returns the pane and the output seen until `needle`.
+fn spawn_spec(conn: &Connection, spec: SpawnRequest, needle: &str) -> (PaneId, String) {
     conn.client.spawn(1, spec);
     let deadline = Instant::now() + Duration::from_secs(10);
     let (mut pane, mut text) = (None, String::new());
@@ -239,4 +247,61 @@ fn take_over_of_a_closed_session_is_refused() {
     wait_for(&s.conn, "s9", |s| s.state == SessionState::Closed);
     s.conn.client.take_over("s9", false);
     assert!(matches!(take_over_result(&s.conn, "s9").0, TakeOverOutcome::Failed { .. }));
+}
+
+/// Start a daemon indexing `config` (the default dir), with a second dir and fixtures prepared.
+fn two_dirs() -> (Setup, PathBuf) {
+    let mut second = PathBuf::new();
+    let s = start(|config, work| {
+        transcript(config, "d1", work, "from the first");
+        second = config.with_file_name("claude2");
+        transcript(&second, "d2", work, "from the second");
+    });
+    (s, second)
+}
+
+#[test]
+fn set_claude_dirs_indexes_and_tags_two_dirs() {
+    let (s, second) = two_dirs();
+    let first = wait_for(&s.conn, "d1", |_| true);
+    assert_eq!(first.claude_dir.as_deref(), Some(s.config.as_path()));
+    s.conn.client.set_claude_dirs(vec![s.config.clone(), second.clone()]);
+    let found = wait_for(&s.conn, "d2", |_| true);
+    assert_eq!(found.claude_dir.as_deref(), Some(second.as_path()));
+}
+
+#[test]
+fn removing_a_dir_removes_its_sessions() {
+    let (s, second) = two_dirs();
+    s.conn.client.set_claude_dirs(vec![s.config.clone(), second.clone()]);
+    wait_for(&s.conn, "d2", |_| true);
+    s.conn.client.set_claude_dirs(vec![s.config.clone()]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for the removal");
+        match s.conn.events.try_recv() {
+            Ok(ClientEvent::SessionsChanged { removed, .. }) if removed.contains(&"d2".to_string()) => break,
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+#[test]
+fn spawn_env_reaches_child() {
+    let s = start(|_, _| {});
+    let spec = SpawnRequest {
+        program: "sh".into(),
+        args: vec!["-c".into(), "echo GOT:$FOO; sleep 5".into()],
+        cwd: s.work.clone(),
+        cols: 80,
+        rows: 24,
+        cwd_from: None,
+        container: None,
+        claude: false,
+        env: vec![("FOO".into(), "bar".into())],
+        scrollback: None,
+    };
+    let (_, output) = spawn_spec(&s.conn, spec, "GOT:bar");
+    assert!(output.contains("GOT:bar"), "{output:?}");
 }

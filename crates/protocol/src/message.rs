@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -32,6 +32,15 @@ pub struct SpawnRequest {
     /// Run it in the dev container serving this host folder (`None` = on this machine).
     #[serde(default)]
     pub container: Option<PathBuf>,
+    /// The program is Claude Code (session tracking reads its arguments whatever the program is named).
+    #[serde(default)]
+    pub claude: bool,
+    /// Extra environment variables for the child, on top of the daemon's base environment (host panes only).
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Scrollback lines for this pane (`None` = the default, 10,000).
+    #[serde(default)]
+    pub scrollback: Option<u32>,
 }
 
 /// A live pane as listed by the daemon.
@@ -50,6 +59,9 @@ pub struct PaneInfo {
     /// Host folder of the dev container it runs in (`None` = this machine).
     #[serde(default)]
     pub container: Option<PathBuf>,
+    /// Whether it runs Claude Code.
+    #[serde(default)]
+    pub claude: bool,
 }
 
 /// Where a container session runs (ran).
@@ -142,12 +154,16 @@ pub struct SessionInfo {
     /// Where it runs (ran) when it is a dev container session; `cwd` is then its directory on this host when known.
     #[serde(default)]
     pub container: Option<ContainerPlace>,
+    /// The Claude config dir it was found in (`None` from an older daemon).
+    #[serde(default)]
+    pub claude_dir: Option<PathBuf>,
 }
 
-/// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`, when
-/// `program` is `claude`.
-pub fn claude_session<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
-    if std::path::Path::new(program).file_stem().is_none_or(|stem| stem != "claude") {
+/// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`. With `claude`
+/// set the arguments are read whatever the program is called; otherwise only when `program` is named `claude`
+/// (layouts and clients from before the flag).
+pub fn claude_session<'a>(claude: bool, program: &str, args: &'a [String]) -> Option<&'a str> {
+    if !claude && std::path::Path::new(program).file_stem().is_none_or(|stem| stem != "claude") {
         return None;
     }
     args.windows(2).find(|pair| matches!(pair[0].as_str(), "--session-id" | "--resume" | "-r")).map(|pair| pair[1].as_str())
@@ -179,6 +195,11 @@ pub enum ClientMessage {
     },
     /// Ask for `Panes`.
     ListPanes,
+    /// The Claude config dirs to index; an empty list means the daemon's own default dir.
+    SetClaudeDirs {
+        /// Directories, already expanded.
+        dirs: Vec<PathBuf>,
+    },
     /// Start a new pane; the client is attached to it automatically.
     Spawn {
         /// Client-chosen id echoed in the reply.
@@ -244,6 +265,9 @@ pub enum DaemonMessage {
         protocol: u32,
         /// Identifies this daemon process; pane ids are only meaningful within one instance.
         instance: String,
+        /// The daemon's default Claude config dir.
+        #[serde(default)]
+        claude_dir: Option<PathBuf>,
     },
     /// Handshake rejected; only `StopAll` is accepted afterwards.
     VersionMismatch {
@@ -336,13 +360,14 @@ mod tests {
     fn messages_round_trip() {
         let msg = ClientMessage::Spawn {
             request: 3,
-            spec: SpawnRequest { program: "claude".into(), args: vec!["--resume".into()], cwd: "/tmp".into(), cols: 80, rows: 24, cwd_from: Some(4), container: None },
+            spec: SpawnRequest { program: "claude".into(), args: vec!["--resume".into()], cwd: "/tmp".into(), cols: 80, rows: 24, cwd_from: Some(4), container: None, claude: true, env: vec![("A".into(), "b".into())], scrollback: Some(5000) },
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
         for reply in [
             DaemonMessage::Resync { pane: 9, cols: 100, rows: 30 },
-            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "123-456".into() },
+            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "123-456".into(), claude_dir: Some("/home/u/.claude".into()) },
+            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "1".into(), claude_dir: None },
             DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
         ] {
             let json = serde_json::to_string(&reply).unwrap();
@@ -376,6 +401,7 @@ mod tests {
             status: Some(SessionStatus::NeedsInput { reason: Some("dialog open".into()) }),
             status_since_ms: 1_790_840_985_000,
             container: None,
+            claude_dir: Some("/home/me/.claude-work".into()),
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains(r#""state":{"kind":"managed","pane":3}"#), "{json}");
@@ -406,12 +432,39 @@ mod tests {
     #[test]
     fn claude_session_reads_the_session_flags_of_claude_only() {
         let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-        assert_eq!(claude_session("claude", &args(&["--session-id", "abc"])), Some("abc"));
-        assert_eq!(claude_session("/usr/bin/claude", &args(&["--model", "x", "--resume", "def"])), Some("def"));
-        assert_eq!(claude_session("claude", &args(&["-r", "ghi"])), Some("ghi"));
-        assert_eq!(claude_session("claude", &args(&["--continue"])), None);
-        assert_eq!(claude_session("sh", &args(&["--session-id", "abc"])), None);
-        assert_eq!(claude_session("claude", &args(&["--resume"])), None);
+        assert_eq!(claude_session(false, "claude", &args(&["--session-id", "abc"])), Some("abc"));
+        assert_eq!(claude_session(false, "/usr/bin/claude", &args(&["--model", "x", "--resume", "def"])), Some("def"));
+        assert_eq!(claude_session(false, "claude", &args(&["-r", "ghi"])), Some("ghi"));
+        assert_eq!(claude_session(false, "claude", &args(&["--continue"])), None);
+        assert_eq!(claude_session(false, "sh", &args(&["--session-id", "abc"])), None);
+        assert_eq!(claude_session(false, "claude", &args(&["--resume"])), None);
+    }
+
+    #[test]
+    fn claude_session_with_the_flag_ignores_the_program_name() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(claude_session(true, "/opt/wrap/claude-work", &args(&["--model", "x", "--session-id", "abc"])), Some("abc"));
+        assert_eq!(claude_session(true, "sh", &args(&["--continue"])), None);
+        assert_eq!(claude_session(false, "/opt/wrap/claude-work", &args(&["--session-id", "abc"])), None);
+    }
+
+    #[test]
+    fn set_claude_dirs_and_phase2_fields_round_trip() {
+        let msg = ClientMessage::SetClaudeDirs { dirs: vec!["/a".into(), "/b".into()] };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"set_claude_dirs","dirs":["/a","/b"]}"#);
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
+        let old_welcome = r#"{"type":"welcome","protocol":5,"instance":"x"}"#;
+        assert_eq!(
+            serde_json::from_str::<DaemonMessage>(old_welcome).unwrap(),
+            DaemonMessage::Welcome { protocol: 5, instance: "x".into(), claude_dir: None }
+        );
+        let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
+        let spec = serde_json::from_str::<SpawnRequest>(spawn).unwrap();
+        assert_eq!((spec.claude, spec.env.len(), spec.scrollback), (false, 0, None));
+        let pane = r#"{"pane":1,"program":"sh","args":[],"cwd":"/","last_focused":0}"#;
+        assert!(!serde_json::from_str::<PaneInfo>(pane).unwrap().claude);
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 
     #[test]

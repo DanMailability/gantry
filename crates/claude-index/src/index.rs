@@ -49,6 +49,8 @@ pub struct SessionRecord {
     pub proc_start: Option<String>,
     /// Docker container its process runs in (from the process's cgroup).
     pub container_id: Option<String>,
+    /// The config directory it was found in.
+    pub claude_dir: Option<PathBuf>,
 }
 
 struct Cached {
@@ -96,6 +98,7 @@ impl<H: Host> Index<H> {
                 activity_since_ms: 0,
                 proc_start: None,
                 container_id: None,
+                claude_dir: Some(self.config.clone()),
             };
             // The same id in two folders: keep the newer.
             if records.get(&record.id).is_none_or(|old| old.last_active_ms < record.last_active_ms) {
@@ -116,6 +119,7 @@ impl<H: Host> Index<H> {
                 activity_since_ms: 0,
                 proc_start: None,
                 container_id: None,
+                claude_dir: Some(self.config.clone()),
             });
             // A host process beats a container entry for the same session.
             if !matches!(record.state, IndexState::Running { .. }) {
