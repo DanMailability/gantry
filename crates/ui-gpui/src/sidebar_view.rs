@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
-    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
+    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone,
     display_path, session_title,
 };
 use app_core::sessions::SessionStore;
@@ -456,7 +456,7 @@ impl SidebarView {
         // A row listed under another project's tab heading names its own project.
         let project = || row.project_label.clone().map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label));
         match &row.kind {
-            RowKind::Project { path, label, expanded, counts } => {
+            RowKind::Project { path, label, expanded } => {
                 let color = theme.project(path);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
                 base.on_drag(dragged, |dragged: &DraggedProject, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone())).child(
@@ -467,8 +467,7 @@ impl SidebarView {
                             title(label.clone())
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .when_some(color, |title, color| title.text_color(rgb(color))),
-                        )
-                        .children(count_chips(counts, &theme)),
+                        ),
                 )
             }
             RowKind::Session { session, tone, note, .. } => {
@@ -586,37 +585,6 @@ fn lead_mark(tone: Tone, colors: &ToneColors, theme: &Theme) -> Option<gpui::Div
         Lead::Ring => Some(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot))),
         Lead::Arrow => Some(div().flex_none().w(theme.ui(10.)).text_color(rgb(colors.dot)).child("↗")),
     }
-}
-
-fn count_chips(counts: &ToneCounts, theme: &Theme) -> Vec<gpui::Div> {
-    let tones = [
-        (Tone::NeedsInput, counts.needs_input),
-        (Tone::Working, counts.working),
-        (Tone::Done, counts.done),
-        (Tone::Idle, counts.idle),
-        (Tone::Elsewhere, counts.elsewhere),
-    ];
-    tones
-        .into_iter()
-        .filter(|(_, count)| *count > 0)
-        .map(|(tone, count)| {
-            let colors = theme.tone(tone);
-            div()
-                .flex_none()
-                .h(theme.ui(20.))
-                .min_w(theme.ui(20.))
-                .px(theme.ui(6.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(rgb(colors.fill.unwrap_or(theme.tokens.raised)))
-                .text_color(rgb(colors.ink))
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .child(count.to_string())
-        })
-        .collect()
 }
 
 impl Render for SidebarView {
