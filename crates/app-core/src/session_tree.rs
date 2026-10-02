@@ -119,11 +119,14 @@ pub struct ProjectOrder {
 }
 
 impl ProjectOrder {
-    /// Fold in the projects listed now, latest activity first. The first call takes that order. Later calls put
+    /// Fold in the projects listed now, latest activity first. The first call without a filter takes that order. Later calls put
     /// unknown projects on top (in the given order) and forget projects no longer listed. While `filtering`, only
     /// add, never forget.
     pub fn update(&mut self, by_activity: &[PathBuf], filtering: bool) {
         if !self.started {
+            if filtering {
+                return;
+            }
             self.order = by_activity.to_vec();
             self.started = true;
             return;
@@ -241,14 +244,6 @@ pub struct GroupEdges {
 pub fn group_edges(rows: &[Row], index: usize) -> GroupEdges {
     let heading = |row: &Row| matches!(row.kind, RowKind::Project { .. });
     GroupEdges { first: heading(&rows[index]), last: rows.get(index + 1).is_none_or(heading) }
-}
-
-/// The heading path of the group `rows[index]` belongs to.
-pub fn group_root(rows: &[Row], index: usize) -> Option<PathBuf> {
-    rows[..=index].iter().rev().find_map(|row| match &row.kind {
-        RowKind::Project { path, .. } => Some(path.clone()),
-        _ => None,
-    })
 }
 
 /// What a row shows.
@@ -1150,6 +1145,16 @@ mod tests {
     }
 
     #[test]
+    fn a_first_update_while_filtering_does_not_start_the_order() {
+        let mut order = ProjectOrder::default();
+        order.update(&paths(&["/b"]), true);
+        order.update(&paths(&["/a", "/b", "/c"]), false);
+        let mut sorted = paths(&["/c", "/b", "/a"]);
+        sorted.sort_by_key(|p| order.position(p));
+        assert_eq!(sorted, paths(&["/a", "/b", "/c"]));
+    }
+
+    #[test]
     fn a_project_that_leaves_and_returns_goes_on_top() {
         let mut order = ProjectOrder::default();
         order.update(&paths(&["/a", "/b"]), false);
@@ -1220,8 +1225,6 @@ mod tests {
         let edges: Vec<(bool, bool)> = (0..rows.len()).map(|i| group_edges(&rows, i)).map(|e| (e.first, e.last)).collect();
         assert_eq!(keys(&rows).len(), 4);
         assert_eq!(edges, vec![(true, false), (false, false), (false, true), (true, true)]);
-        assert_eq!(group_root(&rows, 2).as_deref(), Some(Path::new("/r/p")));
-        assert_eq!(group_root(&rows, 3).as_deref(), Some(Path::new("/r/q")));
     }
 
     #[test]
