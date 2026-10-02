@@ -26,7 +26,7 @@ use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, theme};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -76,6 +76,8 @@ pub struct SidebarView {
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
     unseen: HashSet<String>,
+    /// The Working glow runs: the setting is on and the window is active.
+    animate: bool,
     rows: Vec<Row>,
     selected: Option<RowKey>,
     /// The workspace's focused leaf; its row is selected unless the user moved the ring.
@@ -124,6 +126,7 @@ impl SidebarView {
             toggled: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
+            animate: false,
             rows: Vec::new(),
             selected: None,
             focused_leaf: None,
@@ -479,6 +482,7 @@ impl SidebarView {
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
+                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme)))
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
@@ -513,6 +517,7 @@ impl SidebarView {
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
+                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme)))
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(title("New session".into()))
@@ -616,6 +621,7 @@ fn count_chips(counts: &ToneCounts, theme: &Theme) -> Vec<gpui::Div> {
 
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let focused = self.focus_handle.is_focused(window);
         let theme = theme(cx).clone();
         div()

@@ -256,7 +256,7 @@ impl SettingsView {
     }
 
     fn status_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
-        let rows = Status::ALL.map(|status| {
+        let mut rows: Vec<Div> = Status::ALL.map(|status| {
             let index = status as usize;
             let chosen = status.fill(&settings.status_fills);
             let colors = theme.tone(status.tone());
@@ -300,8 +300,14 @@ impl SettingsView {
             let reset = self.reset_button("status-reset", index, chosen.is_some(), change(move |settings| status.set(&mut settings.status_fills, None)), window, cx);
             let control = div().flex().items_center().gap(theme.ui(10.)).child(sample).child(div().relative().flex_none().child(picker_button).children(picker));
             row(theme, status.label(), status.description(), control, reset)
-        });
-        group(theme, "Status colours", Some("Pick a fill for each status. Text and dot colours follow it."), rows.into_iter().collect())
+        })
+        .into_iter()
+        .collect();
+        let animate = settings.animate_working;
+        let toggle = self.switch("animate-working", 0, animate, window, cx, change(move |settings| settings.animate_working = !animate));
+        let reset = self.reset_slot("reset-animate-working", 0, settings, |s| s.animate_working, |s, v| s.animate_working = v, window, cx);
+        rows.push(row(theme, "Animate working sessions", "A slow glow crosses Working rows, tabs and pane headers. Paused while Gantry is not focused.", toggle, reset));
+        group(theme, "Status colours", Some("Pick a fill for each status. Text and dot colours follow it."), rows)
     }
 
     fn interface_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {

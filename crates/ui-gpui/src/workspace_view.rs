@@ -34,7 +34,7 @@ use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::hover_card::{self, HoverCard};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::SettingsView;
-use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
 use crate::window_frame;
 
 pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
@@ -229,7 +229,10 @@ impl WorkspaceView {
             this.on_sidebar_event(event.clone(), window, cx)
         });
         // Coming back to the window counts as seeing its visible tab.
-        let activation = cx.observe_window_activation(window, |this, window, cx| this.clear_seen(window, cx));
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.clear_seen(window, cx);
+            this.sidebar.update(cx, |_, cx| cx.notify());
+        });
         let theme_changed = cx.observe_global_in::<Theme>(window, |this, _, cx| this.apply_settings(cx));
         // Following the system: a light/dark switch resolves the theme again.
         let appearance = cx.observe_window_appearance(window, |_, _, cx| {
@@ -1297,6 +1300,7 @@ impl WorkspaceView {
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let theme = theme(cx).clone();
+        let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let sessions = self.sidebar.read(cx).sessions();
         let tabs: Vec<TabView> = self
             .workspace
@@ -1361,6 +1365,7 @@ impl WorkspaceView {
                 };
                 let fill = if settings { Some(theme.tokens.text) } else { colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised)) };
                 let can_drag = self.workspace.can_drag(index);
+                let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
                 let card = HoverCard {
                     title: title.clone(),
                     status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
@@ -1397,6 +1402,7 @@ impl WorkspaceView {
                     .when_some(fill, |tab, fill| tab.bg(rgb(fill)))
                     .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(theme.tokens.raised))))
                     .cursor_pointer()
+                    .when(sweep, |tab| tab.child(working_sweep(("sweep-tab", index), px(RADIUS - 2.), &theme)))
                     .when_some(project, |tab, color| tab.child(side_line(color, &theme)))
                     .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
                     .child(div().min_w(theme.ui(24.)).truncate().child(title))
@@ -1465,7 +1471,7 @@ impl WorkspaceView {
             })
     }
 
-    fn render_active_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_active_tab(&self, animate: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
         let Some(tab) = self.workspace.active_tab() else {
             return div()
@@ -1561,7 +1567,7 @@ impl WorkspaceView {
                                 .bg(rgb(theme.tokens.terminal))
                                 .border_2()
                                 .border_color(rgb(if focused && multiple { theme.tokens.accent } else { theme.tokens.line }))
-                                .when(multiple, |pane| pane.child(pane_header(index, title, status, unseen, container, dir, folder, project, &theme)))
+                                .when(multiple, |pane| pane.child(pane_header(index, title, status, unseen, animate, container, dir, folder, project, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1606,6 +1612,7 @@ fn pane_header(
     title: String,
     status: Option<SessionStatus>,
     unseen: bool,
+    animate: bool,
     container: bool,
     dir: Option<DirBadge>,
     folder: Option<String>,
@@ -1613,6 +1620,7 @@ fn pane_header(
     theme: &Theme,
 ) -> impl IntoElement {
     let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
+    let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
     let card = HoverCard {
         title: title.clone(),
         status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
@@ -1638,6 +1646,7 @@ fn pane_header(
         .font_weight(FontWeight::SEMIBOLD)
         .bg(rgb(colors.and_then(|colors| colors.fill).unwrap_or(theme.tokens.raised)))
         .text_color(rgb(colors.map_or(theme.tokens.text, |colors| colors.ink)))
+        .when(sweep, |header| header.child(working_sweep(("sweep-pane", index), px(RADIUS_SMALL), theme)))
         .when_some(project, |header, color| header.child(side_line(color, theme)))
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme)))
@@ -1681,6 +1690,7 @@ pub(crate) fn round_button(
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let theme = theme(cx).clone();
         // The interface scales with `uiFontSize`; GPUI's rem is 16 px at the default of 14.
         window.set_rem_size(px(16.0 * theme.ui_scale));
@@ -1724,7 +1734,7 @@ impl Render for WorkspaceView {
                     ),
                 )
             })
-            .child(div().flex_1().min_w_0().h_full().flex().flex_col().p(px(PANE_GAP / 2.)).child(self.render_active_tab(cx)));
+            .child(div().flex_1().min_w_0().h_full().flex().flex_col().p(px(PANE_GAP / 2.)).child(self.render_active_tab(animate, cx)));
         let root = div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
