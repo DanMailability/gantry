@@ -375,12 +375,13 @@ impl Workspace {
         self.next_id
     }
 
-    /// Open `launch` in a new last tab and focus it. Returns the new leaf.
+    /// Open `launch` in a new tab (before the Settings tab, which stays last) and focus it. Returns the new leaf.
     pub fn new_tab(&mut self, launch: PaneLaunch) -> NodeId {
         let leaf = self.alloc();
         self.leaves.insert(leaf, Leaf::new(launch));
-        self.tabs.push(Tab { root: Node::Leaf(leaf), focused: leaf, settings: false });
-        self.active = self.tabs.len() - 1;
+        let at = self.settings_tab().unwrap_or(self.tabs.len());
+        self.tabs.insert(at, Tab { root: Node::Leaf(leaf), focused: leaf, settings: false });
+        self.active = at;
         leaf
     }
 
@@ -526,11 +527,23 @@ impl Workspace {
         self.move_tab_to(self.active, target);
     }
 
-    /// Move tab `from` to position `to`; the visible tab stays visible wherever it ends up. Out-of-range
-    /// indices do nothing.
+    /// Whether tab `index` can be dragged or moved (the Settings tab cannot: it stays last).
+    pub fn can_drag(&self, index: usize) -> bool {
+        !self.tabs.get(index).is_some_and(|tab| tab.settings)
+    }
+
+    /// Move tab `from` to position `to`, stopping before the Settings tab; the visible tab stays visible wherever
+    /// it ends up. Out-of-range indices do nothing, and neither does moving the Settings tab.
     pub fn move_tab_to(&mut self, from: usize, to: usize) {
         let len = self.tabs.len();
-        if from >= len || to >= len || from == to {
+        if from >= len || to >= len || !self.can_drag(from) {
+            return;
+        }
+        let to = match self.settings_tab() {
+            Some(settings) if to >= settings => settings - 1,
+            _ => to,
+        };
+        if from == to {
             return;
         }
         let tab = self.tabs.remove(from);
@@ -739,6 +752,39 @@ mod tests {
         assert!(ws.is_consistent());
     }
 
+    fn workspace_with_tabs(count: usize) -> Workspace {
+        let mut ws = Workspace::default();
+        for index in 0..count {
+            ws.new_tab(shell(&format!("/t{index}")));
+        }
+        ws
+    }
+
+    #[test]
+    fn new_tabs_go_before_settings() {
+        let mut ws = workspace_with_tabs(2);
+        ws.open_settings();
+        ws.new_tab(shell("/new"));
+        assert!(ws.tabs.last().unwrap().settings);
+        assert_eq!(ws.active, ws.tabs.len() - 2, "the new tab is visible");
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn move_is_clamped_before_settings() {
+        let mut ws = workspace_with_tabs(3);
+        ws.open_settings();
+        ws.move_tab_to(0, 3);
+        assert!(ws.tabs[3].settings);
+        assert_eq!(ws.tabs[2].focused, 1, "the dragged tab landed just before Settings");
+        ws.active = 2;
+        ws.move_tab(1);
+        assert!(ws.tabs[3].settings, "Move tab right stops before Settings");
+        ws.move_tab_to(3, 0);
+        assert!(ws.tabs[3].settings, "Settings itself never moves");
+        assert!(!ws.can_drag(3) && ws.can_drag(0));
+    }
+
     #[test]
     fn open_settings_twice_gives_one_tab() {
         let mut ws = Workspace::default();
@@ -763,9 +809,9 @@ mod tests {
         ws.cycle_tab(-1);
         assert_eq!(ws.settings_tab(), Some(ws.active));
         ws.move_tab(-2);
-        assert_eq!((ws.active, ws.settings_tab()), (0, Some(0)));
-        assert_eq!(ws.tabs.iter().map(|t| t.focused).skip(1).collect::<Vec<_>>(), vec![a, b]);
-        assert!(ws.select_tab(2));
+        assert_eq!((ws.active, ws.settings_tab()), (2, Some(2)), "the Settings tab does not move");
+        assert_eq!(ws.tabs.iter().map(|t| t.focused).take(2).collect::<Vec<_>>(), vec![a, b]);
+        assert!(ws.select_tab(1));
         assert_eq!(ws.focused(), Some(b));
         assert!(ws.is_consistent());
     }

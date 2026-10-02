@@ -863,6 +863,14 @@ impl WorkspaceView {
                 }
             }),
             MenuAction::UnpinFavorite(dir) => SettingsStore::update(cx, |settings| settings.favorites.retain(|favorite| *favorite != dir)),
+            MenuAction::SetProjectColor { root, color } => SettingsStore::update(cx, |settings| match color {
+                Some(color) => {
+                    settings.project_colors.folders.insert(root, color);
+                }
+                None => {
+                    settings.project_colors.folders.remove(&root);
+                }
+            }),
             MenuAction::RecentsFor(project) => self.show_recents(Some(project), window, cx),
             MenuAction::Continue(leaf) => {
                 self.focus_leaf(leaf, window, cx);
@@ -906,7 +914,7 @@ impl WorkspaceView {
     fn open_tab_menu(&mut self, index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.workspace.tabs.get(index) else { return };
         let items = if tab.settings {
-            vec![MenuItem::Entry(MenuEntry { label: "Close tab".into(), shortcut: Some(Shortcut::Close), accent: false, action: MenuAction::CloseTab(index) })]
+            vec![MenuItem::Entry(MenuEntry { label: "Close tab".into(), shortcut: Some(Shortcut::Close), accent: false, action: MenuAction::CloseTab(index), swatch: None, checked: false })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
             let sessions = self.sidebar.read(cx).sessions();

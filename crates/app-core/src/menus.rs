@@ -7,6 +7,7 @@ use protocol::message::{ContainerPlace, SessionState};
 
 use crate::session_tree::{Row, RowKind, Tone};
 use crate::settings::Settings;
+use crate::theme_colors::ProjectColor;
 use crate::split_tree::{Axis, NodeId};
 
 /// A shortcut whose hint a menu entry shows.
@@ -64,6 +65,13 @@ pub enum MenuAction {
     RecentsFor(PathBuf),
     /// Continue the session of an exited pane.
     Continue(NodeId),
+    /// Set (`Some`) or clear (`None`, automatic) the colour picked for a project.
+    SetProjectColor {
+        /// The project root.
+        root: PathBuf,
+        /// The colour, or `None` for the automatic one.
+        color: Option<ProjectColor>,
+    },
     /// Take over a session running outside Gantry.
     TakeOver {
         /// Session id.
@@ -84,6 +92,10 @@ pub struct MenuEntry {
     pub accent: bool,
     /// What picking it does.
     pub action: MenuAction,
+    /// Drawn as a colour swatch (in a grid) instead of a text row.
+    pub swatch: Option<ProjectColor>,
+    /// Marked as the current choice.
+    pub checked: bool,
 }
 
 /// A menu line.
@@ -109,6 +121,9 @@ pub struct MenuContext {
     pub dirs: Vec<(String, bool, bool)>,
     /// Whether the folder is pinned as a favorite.
     pub favorite: bool,
+    /// The project's colour: `None` = project colours are off (no Colour menu), `Some(None)` = automatic,
+    /// `Some(Some(c))` = picked.
+    pub project_color: Option<Option<ProjectColor>>,
 }
 
 impl MenuContext {
@@ -120,20 +135,43 @@ impl MenuContext {
         MenuContext {
             dirs: settings.claude_dirs.iter().map(|dir| (dir.name.clone(), Some(dir.name.as_str()) == default, remembered == Some(&dir.name))).collect(),
             favorite: settings.favorites.iter().any(|favorite| favorite == folder),
+            project_color: settings.project_colors.enabled.then(|| settings.project_colors.folders.get(folder).copied()),
         }
     }
 }
 
 fn entry(label: &str, action: MenuAction) -> MenuItem {
-    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: None, accent: false, action })
+    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: None, accent: false, action, swatch: None, checked: false })
 }
 
 fn with_shortcut(label: &str, shortcut: Shortcut, action: MenuAction) -> MenuItem {
-    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: Some(shortcut), accent: false, action })
+    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: Some(shortcut), accent: false, action, swatch: None, checked: false })
 }
 
 fn accented(label: &str, action: MenuAction) -> MenuItem {
-    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: None, accent: true, action })
+    MenuItem::Entry(MenuEntry { label: label.into(), shortcut: None, accent: true, action, swatch: None, checked: false })
+}
+
+/// "Colour ▸": the eight swatches, then "Automatic colour". `current` is the project's pick (`None` = automatic).
+fn colour_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
+    let mut items: Vec<MenuItem> = ProjectColor::ALL
+        .into_iter()
+        .map(|color| {
+            let name = color.name();
+            let label = format!("{}{}", name[..1].to_uppercase(), &name[1..]);
+            let action = MenuAction::SetProjectColor { root: root.to_path_buf(), color: Some(color) };
+            MenuItem::Entry(MenuEntry { label, shortcut: None, accent: false, action, swatch: Some(color), checked: current == Some(color) })
+        })
+        .collect();
+    items.push(MenuItem::Entry(MenuEntry {
+        label: "Automatic colour".into(),
+        shortcut: None,
+        accent: false,
+        action: MenuAction::SetProjectColor { root: root.to_path_buf(), color: None },
+        swatch: None,
+        checked: current.is_none(),
+    }));
+    MenuItem::Submenu { label: "Colour".into(), items }
 }
 
 /// "New Claude here with ▸" and the config dirs, when there are two or more.
@@ -277,6 +315,9 @@ pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &M
     } else {
         entry("Pin as favorite", MenuAction::PinFavorite(path.to_path_buf()))
     });
+    if let Some(current) = context.project_color {
+        items.push(colour_menu(path, current));
+    }
     items.extend([
         with_shortcut("Recent sessions here", Shortcut::Recents, MenuAction::RecentsFor(path.to_path_buf())),
         MenuItem::Separator,
@@ -304,7 +345,7 @@ mod tests {
 
     fn two_dirs(remembered: Option<usize>) -> MenuContext {
         let dirs = ["Personal", "Work"].iter().enumerate().map(|(n, name)| (name.to_string(), n == 0, remembered == Some(n))).collect();
-        MenuContext { dirs, favorite: false }
+        MenuContext { dirs, favorite: false, project_color: None }
     }
 
     fn submenu_labels(items: &[MenuItem]) -> Vec<String> {
@@ -446,7 +487,7 @@ mod tests {
     #[test]
     fn the_dir_submenu_needs_two_dirs_and_a_host_folder() {
         let live = session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
-        let one = MenuContext { dirs: vec![("Default".into(), true, false)], favorite: false };
+        let one = MenuContext { dirs: vec![("Default".into(), true, false)], favorite: false, project_color: None };
         assert!(submenu_labels(&row_menu(&live, ALONE, &one).unwrap()).is_empty());
         let items = row_menu(&live, ALONE, &two_dirs(None)).unwrap();
         assert_eq!(labels(&items)[..3], ["New Claude here", "New Claude here with ▸", "│"]);
@@ -499,6 +540,34 @@ mod tests {
     fn a_tab_menu_offers_the_choice_after_the_splits() {
         let items = tab_menu(0, Path::new("/r/app"), vec![], &two_dirs(None));
         assert_eq!(labels(&items)[..4], ["Split right", "Split down", "New Claude here with ▸", "│"]);
+    }
+
+    #[test]
+    fn project_menu_has_colour_submenu_when_on() {
+        let mut ctx = MenuContext { project_color: Some(Some(ProjectColor::Teal)), ..MenuContext::default() };
+        let items = project_menu(Path::new("/r/app"), None, &ctx);
+        let Some(MenuItem::Submenu { label, items: colours }) = items.iter().find(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Colour")) else {
+            panic!("no Colour submenu")
+        };
+        assert_eq!(label, "Colour");
+        let swatches: Vec<&MenuEntry> = colours.iter().filter_map(|i| match i { MenuItem::Entry(e) if e.swatch.is_some() => Some(e), _ => None }).collect();
+        assert_eq!(swatches.len(), 8);
+        assert!(swatches.iter().any(|e| e.checked && e.swatch == Some(ProjectColor::Teal)));
+        assert_eq!(swatches.iter().filter(|e| e.checked).count(), 1);
+        assert!(colours.iter().any(|i| matches!(i, MenuItem::Entry(e) if e.label == "Automatic colour" && !e.checked
+            && e.action == MenuAction::SetProjectColor { root: "/r/app".into(), color: None })));
+        ctx.project_color = None;
+        assert!(!project_menu(Path::new("/r/app"), None, &ctx).iter().any(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Colour")));
+    }
+
+    #[test]
+    fn the_context_reads_the_folders_colour_from_settings() {
+        let mut settings = Settings::default();
+        assert_eq!(MenuContext::for_folder(&settings, Path::new("/r/app")).project_color, Some(None));
+        settings.project_colors.folders.insert("/r/app".into(), ProjectColor::Lime);
+        assert_eq!(MenuContext::for_folder(&settings, Path::new("/r/app")).project_color, Some(Some(ProjectColor::Lime)));
+        settings.project_colors.enabled = false;
+        assert_eq!(MenuContext::for_folder(&settings, Path::new("/r/app")).project_color, None);
     }
 
     #[test]
