@@ -40,10 +40,10 @@ impl Status {
 
     fn description(self) -> &'static str {
         match self {
-            Status::NeedsInput => "Claude is waiting for you",
-            Status::Working => "Claude is busy",
-            Status::Done => "Finished; you have not looked yet",
-            Status::Idle => "Waiting quietly; a muted fill",
+            Status::NeedsInput => "Claude is waiting for you.",
+            Status::Working => "Claude is busy.",
+            Status::Done => "Finished, and you have not looked yet.",
+            Status::Idle => "Waiting quietly. A muted fill.",
         }
     }
 
@@ -94,17 +94,14 @@ const SUGGESTED_FILLS: [u32; 12] =
     [0xc1e5cd, 0xb7e4dd, 0xcfe8b4, 0xe6efb0, 0xa8dcc0, 0xd5ecd9, 0xf7c9a3, 0xf6b8b8, 0xe9c6ef, 0xc9cdf6, 0xb9d5f6, 0xf1e1a6];
 
 const THEME_CARDS: [(ThemeChoice, &str, &str); 3] = [
-    (ThemeChoice::Mist, "Mist", "Dark slate, light-blue accent"),
-    (ThemeChoice::MistLight, "Mist light", "The same look on a light ground"),
-    (ThemeChoice::System, "Follow system", "Dark or light from the desktop"),
+    (ThemeChoice::Mist, "Mist", "Dark slate with a light-blue accent."),
+    (ThemeChoice::MistLight, "Mist light", "The same look on a light ground."),
+    (ThemeChoice::System, "Follow system", "Dark or light, as the desktop is."),
 ];
 
-const PROJECT_COLOURS_HINT: &str =
-    "Each project gets a colour in the sidebar, on its tabs and in recent sessions. Change one from the project's right-click menu.";
-
-/// "Picked colours: 3 folders" ("1 folder" in the singular).
+/// "3 folders have a colour you picked." ("1 folder has" in the singular).
 fn picked_text(count: usize) -> String {
-    format!("Picked colours: {count} {}", if count == 1 { "folder" } else { "folders" })
+    if count == 1 { "1 folder has a colour you picked.".into() } else { format!("{count} folders have a colour you picked.") }
 }
 
 /// The contrast line for a picked `fill`, and whether the fill may be used.
@@ -255,7 +252,7 @@ impl SettingsView {
                 )
                 .child(div().mt(theme.ui(-6.)).child(muted(theme, *hint)))
         });
-        div().flex().flex_col().gap(theme.ui(12.)).child(heading(theme, "Theme")).child(div().flex().flex_wrap().gap(theme.ui(14.)).children(cards))
+        group(theme, "Theme", None, vec![stacked_row(theme, None, div().flex().flex_wrap().gap(theme.ui(14.)).children(cards))])
     }
 
     fn status_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -266,8 +263,7 @@ impl SettingsView {
             let shown = chosen.unwrap_or_else(|| status.default_fill(theme.preset));
             let open = self.popover == Some(Popover::Fill(status));
             let sample = div()
-                .w(theme.ui(300.))
-                .max_w_full()
+                .w(theme.ui(250.))
                 .flex_none()
                 .h(theme.ui(34.))
                 .px_3()
@@ -301,46 +297,11 @@ impl SettingsView {
                 .child(div().size(theme.ui(22.)).rounded(px(6.)).bg(rgb(shown)).border_1().border_color(rgb(theme.tokens.line)))
                 .child(hex(shown));
             let picker = open.then(|| self.fill_picker(status, theme, window, cx));
-            let reset = self
-                .pressable("status-reset", index, None, window, cx, change(move |settings| status.set(&mut settings.status_fills, None)))
-                .h(theme.ui(34.))
-                .px(theme.ui(10.))
-                .flex()
-                .items_center()
-                .rounded(px(RADIUS_SMALL))
-                .text_color(rgb(if chosen.is_some() { theme.tokens.text } else { theme.tokens.muted }))
-                .child("Reset");
-            div().flex().flex_wrap().items_center().gap_x(theme.ui(18.)).gap_y(theme.ui(6.)).py(theme.ui(6.)).child(sample).child(
-                div()
-                    .flex_1()
-                    .min_w(theme.ui(300.))
-                    .flex()
-                    .items_center()
-                    .gap(theme.ui(18.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(theme.ui(90.))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(status.label()))
-                            .child(muted(theme, status.description())),
-                    )
-                    .child(div().relative().flex_none().child(picker_button).children(picker))
-                    .child(reset.flex_none()),
-            )
+            let reset = self.reset_button("status-reset", index, chosen.is_some(), change(move |settings| status.set(&mut settings.status_fills, None)), window, cx);
+            let control = div().flex().items_center().gap(theme.ui(10.)).child(sample).child(div().relative().flex_none().child(picker_button).children(picker));
+            row(theme, status.label(), status.description(), control, reset)
         });
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(10.))
-            .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap(theme.ui(12.))
-                    .child(heading(theme, "Status colours"))
-                    .child(div().text_color(rgb(theme.tokens.muted)).child("Pick a fill; text and dot colours follow it.")),
-            )
-            .children(rows)
+        group(theme, "Status colours", Some("Pick a fill for each status. Text and dot colours follow it."), rows.into_iter().collect())
     }
 
     fn interface_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -352,70 +313,35 @@ impl SettingsView {
     fn project_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let enabled = settings.project_colors.enabled;
         let switch = self.switch("project-colours", 0, enabled, window, cx, change(move |settings| settings.project_colors.enabled = !enabled));
-        let palette = |name: &'static str, preset: Preset| {
-            let ground = preset_tokens(preset);
+        let switch_reset = self.reset_slot("reset-project-colours", 0, settings, |s| s.project_colors.enabled, |s, v| s.project_colors.enabled = v, window, cx);
+        let strip = |preset: Preset| {
             div()
                 .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_x(theme.ui(12.))
-                .gap_y(theme.ui(6.))
-                .child(div().flex_none().w(theme.ui(80.)).child(name))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(theme.ui(8.))
-                        .p(theme.ui(8.))
-                        .rounded(px(RADIUS_SMALL))
-                        .bg(rgb(ground.ground))
-                        .border_1()
-                        .border_color(rgb(theme.tokens.line))
-                        .children(ProjectColor::ALL.map(|color| div().flex_none().size(theme.ui(26.)).rounded(px(RADIUS_SMALL - 2.)).bg(rgb(color.value(preset))))),
-                )
-        };
-        let picked = settings.project_colors.folders.len();
-        let forget = (picked > 0).then(|| {
-            let forget = self
-                .pressable("forget-colours", 0, None, window, cx, change(|settings| settings.project_colors.folders.clear()))
-                .px(theme.ui(10.))
-                .h(theme.ui(30.))
-                .flex()
-                .items_center()
+                .gap(theme.ui(4.))
+                .p(theme.ui(6.))
                 .rounded(px(RADIUS_SMALL))
-                .text_color(rgb(theme.tokens.accent))
-                .child("Forget all");
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_x(theme.ui(12.))
-                .child(div().text_color(rgb(theme.tokens.muted)).child(picked_text(picked)))
-                .child(forget)
-        });
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(12.))
-            .child(heading(theme, "Project colours"))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(theme.ui(16.))
-                    .py(theme.ui(4.))
-                    .child(switch)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Colour projects"))
-                            .child(muted(theme, PROJECT_COLOURS_HINT)),
-                    ),
-            )
-            .child(palette("Mist", Preset::Mist))
-            .child(palette("Mist light", Preset::MistLight))
-            .children(forget)
+                .bg(rgb(preset_tokens(preset).ground))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .children(ProjectColor::ALL.map(|color| div().flex_none().size(theme.ui(18.)).rounded(px(RADIUS_SMALL - 4.)).bg(rgb(color.value(preset)))))
+        };
+        let palette = div().flex().flex_wrap().justify_end().gap(theme.ui(8.)).child(strip(Preset::Mist)).child(strip(Preset::MistLight));
+        let picked = settings.project_colors.folders.len();
+        let mut rows = vec![
+            row(
+                theme,
+                "Project colours",
+                "Each project gets a colour in the sidebar, on its tabs and in recent sessions. Change one from the project's right-click menu.",
+                switch,
+                switch_reset,
+            ),
+            row(theme, "Palette", "Mist, then Mist light.", palette, empty_slot(theme)),
+        ];
+        if picked > 0 {
+            let forget = self.button("forget-colours", 0, "Forget all", window, cx, change(|settings| settings.project_colors.folders.clear()));
+            rows.push(row(theme, "Picked colours", picked_text(picked), forget, empty_slot(theme)));
+        }
+        group(theme, "Project colours", None, rows)
     }
 
     fn fill_picker(&mut self, status: Status, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -507,9 +433,8 @@ mod tests {
 
     #[test]
     fn picked_colours_text_is_singular_for_one_folder() {
-        assert_eq!(picked_text(1), "Picked colours: 1 folder");
-        assert_eq!(picked_text(3), "Picked colours: 3 folders");
-        assert!(PROJECT_COLOURS_HINT.starts_with("Each project gets a colour in the sidebar, on its tabs and in recent sessions."));
+        assert_eq!(picked_text(1), "1 folder has a colour you picked.");
+        assert_eq!(picked_text(3), "3 folders have a colour you picked.");
     }
 
     #[test]

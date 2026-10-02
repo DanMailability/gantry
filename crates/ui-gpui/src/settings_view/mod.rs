@@ -694,6 +694,11 @@ fn stacked_row(theme: &Theme, label: Option<(&'static str, &'static str)>, conte
         .child(content)
 }
 
+/// A trailing slot with nothing in it, so rows without a Reset line up with the ones that have one.
+fn empty_slot(theme: &Theme) -> Div {
+    div().flex_none().w(theme.ui(SLOT_WIDTH))
+}
+
 /// The trailing slot of a list row: as wide as its `actions` need.
 #[allow(dead_code)]
 fn actions_slot(theme: &Theme) -> Div {
