@@ -230,6 +230,9 @@ const DROPDOWN_ROW: f32 = 30.;
 
 /// Widths (before scaling) of the alerts grid's fixed columns; the Event column takes the rest. The tone drop-down and Play button
 /// follow the Sound switch, or wrap under the row when there is no room.
+/// Width of the tone drop-down and Play button; the grid shows them on the row's first line from this much width on.
+const TRAILING_WIDTH: f32 = 255.;
+const GRID_WIDE: f32 = 36. + 120. + BADGE_COLUMN + NOTIFICATION_COLUMN + SOUND_COLUMN + 16. * 4. + TRAILING_WIDTH;
 const BADGE_COLUMN: f32 = 64.;
 const NOTIFICATION_COLUMN: f32 = 84.;
 const SOUND_COLUMN: f32 = 64.;
@@ -356,6 +359,7 @@ pub(crate) struct SettingsView {
     volume_drag: Option<f32>,
     slider_bounds: Rc<Cell<Bounds<Pixels>>>,
     body_scroll: ScrollHandle,
+    grid_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Where each drop-down's button was last drawn, to open its list upward near the window's bottom.
     dropdown_bounds: DropdownBounds,
     /// The hex field's text counts as selected: the next typed character or Backspace replaces it all.
@@ -376,6 +380,7 @@ impl SettingsView {
             volume_drag: None,
             slider_bounds: Rc::new(Cell::new(Bounds::default())),
             body_scroll: ScrollHandle::new(),
+            grid_bounds: Rc::new(Cell::new(Bounds::default())),
             dropdown_bounds: Rc::new(RefCell::new(HashMap::new())),
             hex_selected: false,
         }
@@ -673,6 +678,29 @@ impl Focusable for SettingsView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+/// One line of the alerts grid, used by the header and by each row so their columns cannot differ:
+/// a flexible Event cell, then the fixed Badge, Notification and Sound columns (contents centred), then the trailing group if any.
+fn grid_line(
+    theme: &Theme,
+    event: impl IntoElement,
+    badge: impl IntoElement,
+    notification: impl IntoElement,
+    sound: impl IntoElement,
+    trailing: Option<Div>,
+) -> Div {
+    let column = |width: f32, content: Div| div().flex_none().w(theme.ui(width)).flex().justify_center().child(content);
+    div()
+        .flex()
+        .items_center()
+        .gap(theme.ui(16.))
+        .px(theme.ui(18.))
+        .child(div().flex_1().min_w_0().child(event))
+        .child(column(BADGE_COLUMN, div().child(badge)))
+        .child(column(NOTIFICATION_COLUMN, div().child(notification)))
+        .child(column(SOUND_COLUMN, div().child(sound)))
+        .children(trailing)
 }
 
 fn heading(theme: &Theme, text: &'static str) -> Div {
@@ -1137,17 +1165,21 @@ impl SettingsView {
 
     fn alerts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let alerts = settings.alerts;
-        let columns = |row: Div| row.items_center().gap(theme.ui(16.)).px(theme.ui(18.)).flex();
-        let head = columns(div())
-            .py(theme.ui(10.))
-            .bg(rgb(theme.tokens.raised))
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(theme.tokens.muted))
-            .child(div().flex_1().min_w(theme.ui(120.)).child("Event"))
-            .child(div().flex_none().w(theme.ui(BADGE_COLUMN)).child("Badge"))
-            .child(div().flex_none().w(theme.ui(NOTIFICATION_COLUMN)).child("Notification"))
-            .child(div().flex_none().w(theme.ui(SOUND_COLUMN)).child("Sound"));
+        let wide = f32::from(self.grid_bounds.get().size.width) >= f32::from(theme.ui(GRID_WIDE));
+        let trailing_space = || wide.then(|| div().flex_none().w(theme.ui(TRAILING_WIDTH)));
+        let head = grid_line(
+            theme,
+            div().child("Event"),
+            div().child("Badge"),
+            div().child("Notification"),
+            div().child("Sound"),
+            trailing_space(),
+        )
+        .py(theme.ui(10.))
+        .bg(rgb(theme.tokens.raised))
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme.tokens.muted));
         let rows: Vec<Div> = Event::ALL
             .into_iter()
             .map(|event| {
@@ -1180,16 +1212,8 @@ impl SettingsView {
                     alerts::play(tone, volume);
                 });
                 let play = self.button("play", index, "▶ Play", window, cx, play);
-                columns(div())
-                    .flex_wrap()
-                    .gap_y(theme.ui(10.))
-                    .py(theme.ui(14.))
-                    .border_t_1()
-                    .border_color(rgb(theme.tokens.line))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(theme.ui(120.))
+                let trailing = div().flex_none().flex().items_center().gap(theme.ui(10.)).child(picker).child(play);
+                let event_cell = div()
                             .flex()
                             .items_center()
                             .gap(theme.ui(10.))
@@ -1200,19 +1224,35 @@ impl SettingsView {
                                     .min_w_0()
                                     .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(event.label()))
                                     .child(muted(theme, event.description()).truncate()),
-                            ),
-                    )
-                    .child(div().flex_none().w(theme.ui(BADGE_COLUMN)).child(badge))
-                    .child(div().flex_none().w(theme.ui(NOTIFICATION_COLUMN)).child(notification))
-                    .child(div().flex_none().w(theme.ui(SOUND_COLUMN)).child(sound))
-                    .child(div().flex_none().flex().items_center().gap(theme.ui(10.)).child(picker).child(play))
+                            );
+                let (inline, below) = if wide { (Some(trailing), None) } else { (None, Some(trailing)) };
+                div()
+                    .py(theme.ui(14.))
+                    .border_t_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .child(grid_line(theme, event_cell, badge, notification, sound, inline))
+                    .children(below.map(|group| div().flex().justify_end().px(theme.ui(18.)).pt(theme.ui(10.)).child(group)))
             })
             .collect();
+        let grid_bounds = self.grid_bounds.clone();
+        let wide_at = theme.ui(GRID_WIDE);
+        let measure = canvas(
+            move |area, window, _| {
+                let was_wide = f32::from(grid_bounds.get().size.width) >= f32::from(wide_at);
+                grid_bounds.set(area);
+                if was_wide != (f32::from(area.size.width) >= f32::from(wide_at)) {
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        ).absolute().size_full();
         let grid = div()
+            .relative()
             .overflow_hidden()
             .border_1()
             .border_color(rgb(theme.tokens.line))
             .rounded(px(RADIUS))
+            .child(measure)
             .child(head)
             .children(rows);
 
