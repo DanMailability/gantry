@@ -26,34 +26,6 @@ pub enum Tone {
     Closed,
 }
 
-/// Live entries of a project, by tone.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ToneCounts {
-    /// Sessions needing input.
-    pub needs_input: usize,
-    /// Busy sessions.
-    pub working: usize,
-    /// Sessions with an unseen result.
-    pub done: usize,
-    /// Idle sessions.
-    pub idle: usize,
-    /// Sessions running outside Gantry.
-    pub elsewhere: usize,
-}
-
-impl ToneCounts {
-    fn add(&mut self, tone: Tone) {
-        match tone {
-            Tone::NeedsInput => self.needs_input += 1,
-            Tone::Working => self.working += 1,
-            Tone::Done => self.done += 1,
-            Tone::Idle => self.idle += 1,
-            Tone::Elsewhere => self.elsewhere += 1,
-            Tone::Closed => {}
-        }
-    }
-}
-
 /// A pane of the layout, for the list (Claude panes and shells).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneEntry {
@@ -257,8 +229,6 @@ pub enum RowKind {
         label: String,
         /// Its entries are shown.
         expanded: bool,
-        /// Its live entries by tone.
-        counts: ToneCounts,
     },
     /// A Claude session (in a pane of the layout, or running outside Gantry).
     Session {
@@ -602,16 +572,8 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                 }
             }
         }
-        let mut counts = ToneCounts::default();
-        for row in &rendered {
-            match &row.kind {
-                RowKind::Session { tone, .. } => counts.add(*tone),
-                RowKind::Pane { entry, tone, .. } if entry.claude => counts.add(*tone),
-                _ => {}
-            }
-        }
         let expanded = filtering || !input.toggled.contains(&path);
-        let mut heading = Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded, counts });
+        let mut heading = Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded });
         heading.project = Some(path);
         rows.push(heading);
         if expanded {
@@ -984,22 +946,6 @@ mod tests {
         // A project with nothing but shells counts as now.
         fixture.panes.push(shell_pane(4, "/r/c"));
         assert_eq!(fixture.outline()[0], "▾ c");
-    }
-
-    #[test]
-    fn project_headers_count_claude_entries_by_tone_but_not_shells() {
-        let mut fixture = Fixture::of(
-            vec![
-                with(managed("n", "/r/p", 6), SessionStatus::NeedsInput { reason: None }),
-                with(managed("d", "/r/p", 4), SessionStatus::Idle),
-                external("e", "/r/p", 2),
-            ],
-            vec![pane(1, "/r/p", Some("n")), pane(2, "/r/p", Some("d")), pane(3, "/r/p", Some("new")), shell_pane(4, "/r/p")],
-        );
-        fixture.unseen.insert("d".into());
-        let rows = fixture.rows();
-        let RowKind::Project { counts, .. } = &rows[0].kind else { panic!("{rows:?}") };
-        assert_eq!(*counts, ToneCounts { needs_input: 1, working: 0, done: 1, idle: 1, elsewhere: 1 });
     }
 
     #[test]

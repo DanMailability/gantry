@@ -329,7 +329,7 @@ pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &M
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_tree::{PaneEntry, Row, RowKind, ToneCounts, Tone};
+    use crate::session_tree::{PaneEntry, Row, RowKind, Tone};
     use protocol::message::{SessionInfo, SessionState};
 
     fn labels(items: &[MenuItem]) -> Vec<String> {
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(labels(&items), ["New Claude here", "New shell here", "Pin as favorite", "Recent sessions here", "│", "Copy folder path", "Open folder", "Open in VS Code"]);
         let MenuItem::Entry(recents) = &items[3] else { panic!() };
         assert_eq!((recents.action.clone(), recents.shortcut), (MenuAction::RecentsFor("/r/app".into()), Some(Shortcut::Recents)));
-        let row = Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true, counts: ToneCounts::default() });
+        let row = Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true });
         assert_eq!(row_menu(&row, ALONE, &MenuContext::default()), None, "headings are built with project_menu (they need the container)");
     }
 
