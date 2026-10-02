@@ -637,6 +637,13 @@ impl WorkspaceView {
         self.sync_panes(cx);
     }
 
+    /// Tab `index`'s title as the tab bar and the sidebar show it: the focused pane's, without the Claude glyph
+    /// while the tab has a session status.
+    fn tab_title(&self, index: usize, cx: &App) -> String {
+        let title = self.workspace.tabs.get(index).and_then(|tab| self.slots.get(&tab.focused)).map_or_else(String::new, |slot| slot.view.read(cx).title());
+        if self.workspace.tab_status(index, self.sidebar.read(cx).sessions()).is_some() { without_claude_glyph(&title).to_string() } else { title }
+    }
+
     fn sync_panes(&self, cx: &mut Context<Self>) {
         let panes: Vec<PaneEntry> = self
             .workspace
@@ -663,7 +670,7 @@ impl WorkspaceView {
             .enumerate()
             .map(|(index, tab)| TabEntry {
                 index,
-                title: self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title()),
+                title: self.tab_title(index, cx),
                 focused: tab.focused,
                 leaves: tab.root.leaves(),
             })
@@ -1076,9 +1083,8 @@ impl WorkspaceView {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let title = self.slots.get(&tab.focused).map_or_else(String::new, |slot| slot.view.read(cx).title());
+                let title = self.tab_title(index, cx);
                 let status = self.workspace.tab_status(index, sessions).cloned();
-                let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
                 let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
                 (title, status, unseen, container)

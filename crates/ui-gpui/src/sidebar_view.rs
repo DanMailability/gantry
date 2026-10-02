@@ -296,6 +296,8 @@ impl SidebarView {
                 let container = self.rows[index + 1..]
                     .iter()
                     .take_while(|row| !matches!(row.kind, RowKind::Project { .. }))
+                    // Rows of another project listed under a tab heading are not this project's.
+                    .filter(|row| row.project_label.is_none())
                     .find_map(|row| match &row.kind {
                         RowKind::Session { session, .. } => session.container.as_ref().filter(|place| place.host_folder.is_some()),
                         _ => None,
