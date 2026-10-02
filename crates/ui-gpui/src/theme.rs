@@ -92,20 +92,7 @@ fn embedded_fonts() -> Vec<Cow<'static, [u8]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// WCAG relative luminance of an `0xRRGGBB` colour.
-    fn luminance(color: u32) -> f64 {
-        let channel = |shift: u32| {
-            let c = f64::from((color >> shift) & 0xff) / 255.0;
-            if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-        };
-        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-    }
-
-    fn contrast(a: u32, b: u32) -> f64 {
-        let (light, dark) = if luminance(a) > luminance(b) { (luminance(a), luminance(b)) } else { (luminance(b), luminance(a)) };
-        (light + 0.05) / (dark + 0.05)
-    }
+    use app_core::theme_colors::contrast;
 
     #[test]
     fn row_text_is_readable_on_every_tone() {

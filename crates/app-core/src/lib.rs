@@ -21,5 +21,6 @@ pub mod snapshot;
 pub mod split_tree;
 pub mod term_state;
 pub mod text_field;
+pub mod theme_colors;
 pub mod url;
 pub mod workspace;
