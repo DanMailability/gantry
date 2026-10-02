@@ -19,7 +19,7 @@ use gpui::{
 };
 use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::session_tree::{Activation, ShellEntry, Tone, display_path, session_title, status_tone};
+use app_core::session_tree::{Activation, PaneEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
 use crate::launcher_view::{LauncherEvent, LauncherView};
@@ -492,7 +492,7 @@ impl WorkspaceView {
             PaneEvent::Rerun => self.rerun_leaf(leaf, window, cx),
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
             PaneEvent::TitleChanged => {
-                self.sync_shells(cx);
+                self.sync_panes(cx);
                 cx.notify()
             }
         }
@@ -613,27 +613,32 @@ impl WorkspaceView {
         self.clear_seen(window, cx);
     }
 
-    /// Write the layout (atomically) and refresh the sidebar's shell entries.
+    /// Write the layout (atomically) and refresh the sidebar's pane entries.
     fn save(&self, cx: &mut Context<Self>) {
         if let Err(err) = layout_store::save(&self.layout_file, &self.workspace) {
             tracing::warn!("saving the layout failed: {err}");
         }
-        self.sync_shells(cx);
+        self.sync_panes(cx);
     }
 
-    fn sync_shells(&self, cx: &mut Context<Self>) {
-        let shells: Vec<ShellEntry> = self
+    fn sync_panes(&self, cx: &mut Context<Self>) {
+        let panes: Vec<PaneEntry> = self
             .workspace
             .leaves
             .iter()
-            .filter(|(_, leaf)| leaf.pane.is_some() && !leaf.launch.is_claude())
-            .map(|(id, leaf)| ShellEntry {
-                leaf: *id,
-                cwd: leaf.launch.cwd.clone(),
-                title: self.slots.get(id).map_or_else(|| leaf.launch.label(), |slot| slot.view.read(cx).title()),
+            .map(|(id, leaf)| {
+                let view = self.slots.get(id).map(|slot| slot.view.read(cx));
+                PaneEntry {
+                    leaf: *id,
+                    cwd: leaf.launch.cwd.clone(),
+                    title: view.map_or_else(|| leaf.launch.label(), |view| view.title()),
+                    session: leaf.session.clone(),
+                    claude: leaf.launch.is_claude(),
+                    ended: view.is_some_and(|view| view.has_ended()),
+                }
             })
             .collect();
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_shells(shells, cx));
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, cx));
     }
 
     fn on_sidebar_event(&mut self, event: SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {

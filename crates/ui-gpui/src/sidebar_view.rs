@@ -1,14 +1,14 @@
-//! The sidebar: Claude sessions (and shell panes) by project or by status, coloured by what each needs, with a fuzzy
-//! filter that reaches every session.
+//! The sidebar: the Active list (every pane and every Claude session running outside Gantry, by project), coloured
+//! by what each needs, with a fuzzy filter.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::session_tree::{
-    self, Activation, Row, RowKey, RowKind, ShellEntry, Tone, ToneCounts, TreeInput, project_root, session_title,
+    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, Tone, ToneCounts,
+    session_title,
 };
 use app_core::sessions::SessionStore;
 use app_core::text_field::TextField;
@@ -64,7 +64,8 @@ pub enum SidebarEvent {
 pub struct SidebarView {
     focus_handle: FocusHandle,
     sessions: SessionStore,
-    shells: Vec<ShellEntry>,
+    panes: Vec<PaneEntry>,
+    arrivals: Arrivals,
     filter: TextField,
     toggled: HashSet<PathBuf>,
     details: Option<String>,
@@ -77,7 +78,7 @@ pub struct SidebarView {
     scroll: UniformListScrollHandle,
     home: Option<PathBuf>,
     /// Project of each directory seen (it stats parent directories; cleared on every refresh).
-    projects: RefCell<HashMap<PathBuf, PathBuf>>,
+    roots: ProjectRoots,
     _refresh: Task<()>,
 }
 
@@ -97,7 +98,7 @@ impl SidebarView {
                 cx.background_executor().timer(REFRESH).await;
                 // Also forget project roots, so a repository created (or removed) since shows up.
                 let refreshed = this.update(cx, |this, cx| {
-                    this.projects.borrow_mut().clear();
+                    this.roots.clear();
                     this.rebuild(cx);
                 });
                 if refreshed.is_err() {
@@ -108,7 +109,8 @@ impl SidebarView {
         let mut sidebar = SidebarView {
             focus_handle: cx.focus_handle(),
             sessions: SessionStore::default(),
-            shells: Vec::new(),
+            panes: Vec::new(),
+            arrivals: Arrivals::default(),
             filter: TextField::default(),
             toggled: HashSet::new(),
             details: None,
@@ -118,7 +120,7 @@ impl SidebarView {
             menu: None,
             scroll: UniformListScrollHandle::new(),
             home: std::env::home_dir(),
-            projects: RefCell::default(),
+            roots: ProjectRoots::new(std::env::home_dir()),
             _refresh: refresh,
         };
         sidebar.rebuild(cx);
@@ -150,10 +152,10 @@ impl SidebarView {
         }
     }
 
-    /// The workspace's shell panes.
-    pub fn set_shells(&mut self, shells: Vec<ShellEntry>, cx: &mut Context<Self>) {
-        if shells != self.shells {
-            self.shells = shells;
+    /// The workspace's panes.
+    pub fn set_panes(&mut self, panes: Vec<PaneEntry>, cx: &mut Context<Self>) {
+        if panes != self.panes {
+            self.panes = panes;
             self.rebuild(cx);
         }
     }
@@ -162,10 +164,11 @@ impl SidebarView {
         let rows = {
             let sessions: Vec<&SessionInfo> = self.sessions.all().collect();
             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-            let project_of = |cwd: &Path| self.project_of(cwd);
-            let input = TreeInput {
+            let roots = &self.roots;
+            let project_of = |cwd: &Path| roots.of(cwd);
+            let input = ActiveInput {
                 sessions: &sessions,
-                shells: &self.shells,
+                panes: &self.panes,
                 home: self.home.as_deref(),
                 filter: self.filter.text(),
                 toggled: &self.toggled,
@@ -174,23 +177,13 @@ impl SidebarView {
                 project_of: &project_of,
                 now_ms,
             };
-            session_tree::projects(&input)
+            session_tree::active(&input, &mut self.arrivals)
         };
         self.rows = rows;
         if self.selected_index().is_none() {
             self.selected = None;
         }
         cx.notify();
-    }
-
-    /// The project `cwd` belongs to: its git repository, else the directory itself.
-    fn project_of(&self, cwd: &Path) -> PathBuf {
-        if let Some(project) = self.projects.borrow().get(cwd) {
-            return project.clone();
-        }
-        let project = project_root(cwd, self.home.as_deref(), |dir| dir.join(".git").exists());
-        self.projects.borrow_mut().insert(cwd.to_path_buf(), project.clone());
-        project
     }
 
     fn selected_index(&self) -> Option<usize> {
@@ -250,7 +243,7 @@ impl SidebarView {
                 }
                 self.rebuild(cx);
                 // Enter right after typing opens the first matching session (not a directory row).
-                self.selected = session_tree::first_entry(&self.rows).map(|index| {
+                self.selected = self.rows.iter().position(|row| matches!(row.kind, RowKind::Session { .. } | RowKind::Pane { .. })).map(|index| {
                     self.scroll.scroll_to_item(index, ScrollStrategy::Center);
                     self.rows[index].key()
                 });
@@ -310,19 +303,8 @@ impl SidebarView {
                 })
         };
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
-        let note = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
+        let aside = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
         match &row.kind {
-            RowKind::Group { label, count } => base.child(
-                div()
-                    .size_full()
-                    .px_3()
-                    .flex()
-                    .items_end()
-                    .gap_2()
-                    .pb(px(4.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(*label))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(count.to_string())),
-            ),
             RowKind::Project { path, label, expanded, counts } => {
                 let path = path.clone();
                 base.child(
@@ -339,7 +321,7 @@ impl SidebarView {
                     }),
                 )
             }
-            RowKind::Session { session, tone, age, project } => {
+            RowKind::Session { session, tone, note, .. } => {
                 let colors = tone_colors(*tone);
                 let unseen = self.unseen.contains(&session.id);
                 let lead = match tone {
@@ -356,36 +338,36 @@ impl SidebarView {
                         }))
                         .when(unseen, |pill| pill.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.ink))))
                         .when(session.container.is_some(), |pill| pill.child(theme::container_chip(colors.ink)))
-                        .child(note(row_note(*tone, age, project.as_deref(), session.cwd_exists), colors.ink)),
+                        .child(aside(note.clone(), colors.ink)),
                 )
             }
-            RowKind::Shell { entry, project } => base.child(
+            RowKind::Pane { entry, tone, note } if !entry.claude => base.child(
                 pill(None)
+                    .text_color(rgb(if *tone == Tone::Closed { MUTED } else { TEXT }))
                     .child(div().flex_none().text_xs().text_color(rgb(MUTED)).child(">_"))
                     .child(title(entry.title.clone()))
-                    .when_some(project.clone(), |pill, project| pill.child(note(project, MUTED))),
+                    .child(aside(note.clone(), MUTED)),
             ),
+            RowKind::Pane { tone, note, .. } => {
+                let colors = tone_colors(*tone);
+                let lead = match tone {
+                    Tone::Closed => div().flex_none().size(px(8.)).rounded_full().border_1().border_color(rgb(colors.dot)),
+                    _ => div().flex_none().size(px(8.)).rounded_full().bg(rgb(colors.dot)),
+                };
+                base.child(
+                    pill(colors.fill)
+                        .text_color(rgb(colors.ink))
+                        .child(lead)
+                        .child(title("New session".into()))
+                        .child(aside(note.clone(), colors.ink)),
+                )
+            }
             RowKind::Detail { text, .. } => {
                 base.child(div().pl(px(34.)).text_xs().italic().text_color(rgb(MUTED)).child(text.clone()))
             }
             RowKind::TakeOver { .. } => base.child(pill(None).pl(px(32.)).text_color(rgb(ACCENT)).child("Take over…")),
         }
     }
-}
-
-/// The right-hand note of a session row: its status (Projects view) or its project (Status view), and its age.
-fn row_note(tone: Tone, age: &str, project: Option<&str>, cwd_exists: bool) -> String {
-    let what = match (project, tone) {
-        (Some(project), _) => project,
-        (None, Tone::NeedsInput) => "Needs input",
-        (None, Tone::Working) => "Working",
-        (None, Tone::Done) => "Done",
-        (None, Tone::Idle) => "Idle",
-        (None, Tone::Elsewhere) => "Elsewhere",
-        (None, Tone::Closed) if !cwd_exists => "Folder missing",
-        (None, Tone::Closed) => return age.to_string(),
-    };
-    format!("{what} · {age}")
 }
 
 /// Small rounded counters in the tones of a project's live sessions.
@@ -455,7 +437,7 @@ impl Render for SidebarView {
                         this.focus_handle.focus(window, cx);
                         cx.notify();
                     }))
-                    .child(field::render(&self.filter, "Filter sessions", focused)),
+                    .child(field::render(&self.filter, "Filter active sessions", focused)),
             )
             .child(
                 uniform_list(
@@ -578,18 +560,4 @@ fn menu_item(
         .hover(|style| style.bg(rgb(LINE)))
         .child(label)
         .on_click(on_click)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rows_note_their_status_or_their_project_with_the_age() {
-        assert_eq!(row_note(Tone::NeedsInput, "2m", None, true), "Needs input · 2m");
-        assert_eq!(row_note(Tone::Done, "now", None, true), "Done · now");
-        assert_eq!(row_note(Tone::Working, "1m", Some("api-gateway"), true), "api-gateway · 1m");
-        assert_eq!(row_note(Tone::Closed, "3h", None, true), "3h");
-        assert_eq!(row_note(Tone::Closed, "2d", None, false), "Folder missing · 2d");
-    }
 }
