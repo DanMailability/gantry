@@ -101,15 +101,6 @@ struct Stepped {
 const DROPDOWN_ROWS: f32 = 8.;
 const DROPDOWN_ROW: f32 = 30.;
 
-/// Widths (before scaling) of the alerts grid's fixed columns; the Event column takes the rest. The tone drop-down and Play button
-/// follow the Sound switch, or wrap under the row when there is no room.
-/// Width of the tone drop-down and Play button; the grid shows them on the row's first line from this much width on.
-const TRAILING_WIDTH: f32 = 255.;
-const GRID_WIDE: f32 = 36. + 120. + BADGE_COLUMN + NOTIFICATION_COLUMN + SOUND_COLUMN + 16. * 4. + TRAILING_WIDTH;
-const BADGE_COLUMN: f32 = 64.;
-const NOTIFICATION_COLUMN: f32 = 84.;
-const SOUND_COLUMN: f32 = 64.;
-
 /// Whether a grid measured `width` wide has room for `needed`; an unmeasured grid (width 0, before its first frame) counts as roomy, so the
 /// first frame matches the usual layout.
 fn has_room(width: Pixels, needed: Pixels) -> bool {
@@ -596,29 +587,6 @@ impl Focusable for SettingsView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
-}
-
-/// One line of the alerts grid, used by the header and by each row so their columns cannot differ:
-/// a flexible Event cell, then the fixed Badge, Notification and Sound columns (contents centred), then the trailing group if any.
-fn grid_line(
-    theme: &Theme,
-    event: impl IntoElement,
-    badge: impl IntoElement,
-    notification: impl IntoElement,
-    sound: impl IntoElement,
-    trailing: Option<Div>,
-) -> Div {
-    let column = |width: f32, content: Div| div().flex_none().w(theme.ui(width)).flex().justify_center().child(content);
-    div()
-        .flex()
-        .items_center()
-        .gap(theme.ui(16.))
-        .px(theme.ui(18.))
-        .child(div().flex_1().min_w_0().child(event))
-        .child(column(BADGE_COLUMN, div().child(badge)))
-        .child(column(NOTIFICATION_COLUMN, div().child(notification)))
-        .child(column(SOUND_COLUMN, div().child(sound)))
-        .children(trailing)
 }
 
 fn heading(theme: &Theme, text: &'static str) -> Div {
