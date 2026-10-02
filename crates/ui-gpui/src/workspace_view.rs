@@ -610,6 +610,8 @@ impl WorkspaceView {
             }
             None => self.focus_handle.focus(window, cx),
         }
+        let focused = self.workspace.focused();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_focused(focused, cx));
         self.clear_seen(window, cx);
     }
 

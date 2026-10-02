@@ -11,6 +11,7 @@ use app_core::session_tree::{
     session_title,
 };
 use app_core::sessions::SessionStore;
+use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
 use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
@@ -73,6 +74,8 @@ pub struct SidebarView {
     unseen: HashSet<String>,
     rows: Vec<Row>,
     selected: Option<RowKey>,
+    /// The workspace's focused leaf; its row is selected unless the user moved the ring.
+    focused_leaf: Option<NodeId>,
     /// Project context menu: its directory and where it opened.
     menu: Option<(PathBuf, Point<Pixels>)>,
     scroll: UniformListScrollHandle,
@@ -117,6 +120,7 @@ impl SidebarView {
             unseen: HashSet::new(),
             rows: Vec::new(),
             selected: None,
+            focused_leaf: None,
             menu: None,
             scroll: UniformListScrollHandle::new(),
             home: std::env::home_dir(),
@@ -152,6 +156,13 @@ impl SidebarView {
         }
     }
 
+    /// The workspace's focused leaf: its row gets the selection ring.
+    pub fn set_focused(&mut self, leaf: Option<NodeId>, cx: &mut Context<Self>) {
+        self.focused_leaf = leaf;
+        self.selected = leaf.and_then(|leaf| session_tree::row_of_leaf(&self.rows, leaf)).map(|index| self.rows[index].key());
+        cx.notify();
+    }
+
     /// The workspace's panes.
     pub fn set_panes(&mut self, panes: Vec<PaneEntry>, cx: &mut Context<Self>) {
         if panes != self.panes {
@@ -180,8 +191,9 @@ impl SidebarView {
             session_tree::active(&input, &mut self.arrivals)
         };
         self.rows = rows;
+        // A selection whose row is gone falls back to the focused pane's row.
         if self.selected_index().is_none() {
-            self.selected = None;
+            self.selected = self.focused_leaf.and_then(|leaf| session_tree::row_of_leaf(&self.rows, leaf)).map(|index| self.rows[index].key());
         }
         cx.notify();
     }
