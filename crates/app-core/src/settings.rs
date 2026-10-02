@@ -207,7 +207,7 @@ pub fn parse(text: &str) -> Loaded {
     let raw = match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(map)) => map,
         Ok(_) => return broken("the top level must be a JSON object".into()),
-        Err(error) => return broken(format!("not valid JSON: {error} (line {}, column {})", error.line(), error.column())),
+        Err(error) => return broken(format!("not valid JSON: {error}")),
     };
     let mut reader = Reader { problems: Vec::new() };
     let settings = reader.settings(&raw);
