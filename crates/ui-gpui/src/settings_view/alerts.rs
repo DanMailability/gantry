@@ -43,6 +43,13 @@ impl Event {
         }
     }
 
+    fn tones(self) -> [AlertTone; 4] {
+        match self {
+            Event::NeedsInput => AlertTone::NEEDS_INPUT,
+            Event::Finished => AlertTone::FINISHED,
+        }
+    }
+
     pub(super) fn alerts(self, alerts: &mut AlertSettings) -> &mut EventAlerts {
         match self {
             Event::NeedsInput => &mut alerts.needs_input,
@@ -51,14 +58,15 @@ impl Event {
     }
 }
 
-const TONES: [(AlertTone, &str); 7] = [
-    (AlertTone::Blip, "Blip (short, high)"),
-    (AlertTone::BlipLong, "Blip, long tail"),
-    (AlertTone::Chime, "Chime (two notes)"),
-    (AlertTone::Droplet, "Droplet (glides up)"),
-    (AlertTone::Beep, "Beep (low, soft)"),
-    (AlertTone::BeepSlow, "Beep, slow start"),
-    (AlertTone::Rise, "Rise (three notes)"),
+const TONES: [(AlertTone, &str); 8] = [
+    (AlertTone::ClassicBlip, "Classic blip"),
+    (AlertTone::GentleRise, "Gentle rise"),
+    (AlertTone::SoftBloop, "Soft bloop"),
+    (AlertTone::SoftDrop, "Soft drop"),
+    (AlertTone::FallingBlip, "Falling blip"),
+    (AlertTone::SoftFall, "Soft fall"),
+    (AlertTone::SoftFlutter, "Soft flutter"),
+    (AlertTone::WarmHum, "Warm hum"),
 ];
 
 fn tone_label(tone: AlertTone) -> &'static str {
@@ -116,11 +124,11 @@ impl SettingsView {
                     let e = event.alerts(&mut s.alerts);
                     e.sound = !e.sound;
                 }));
-                let options = TONES
-                    .iter()
-                    .map(|(tone, text)| {
-                        let tone = *tone;
-                        (text.to_string(), tone == channels.tone, change(move |s| event.alerts(&mut s.alerts).tone = tone))
+                let options = event
+                    .tones()
+                    .into_iter()
+                    .map(|tone| {
+                        (tone_label(tone).to_string(), tone == channels.tone, change(move |s| event.alerts(&mut s.alerts).tone = tone))
                     })
                     .collect();
                 let picker = self.dropdown("tone", index, Popover::Tone(event), tone_label(channels.tone).into(), theme.ui(170.), options, window, cx);
