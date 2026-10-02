@@ -65,6 +65,7 @@ const FINISHED_AFTER: Stepped = Stepped {
     delta: 1.0,
     min: 0.0,
     max: 600.0,
+    unit: "s",
 };
 
 

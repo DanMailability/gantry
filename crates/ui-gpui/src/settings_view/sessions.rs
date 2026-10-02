@@ -28,6 +28,7 @@ const SESSIONS_PER_PROJECT: Stepped = Stepped {
     delta: 1.0,
     min: 1.0,
     max: 20.0,
+    unit: "",
 };
 const PROJECT_CHIPS: Stepped = Stepped {
     name: "recents-chips",
@@ -36,6 +37,7 @@ const PROJECT_CHIPS: Stepped = Stepped {
     delta: 1.0,
     min: 0.0,
     max: 12.0,
+    unit: "",
 };
 
 /// Split a command line into words: spaces separate, single quotes keep everything, double quotes keep spaces (and

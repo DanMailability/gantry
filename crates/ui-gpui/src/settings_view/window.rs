@@ -14,6 +14,7 @@ const SCROLLBACK: Stepped = Stepped {
     delta: 1000.0,
     min: 1000.0,
     max: 100_000.0,
+    unit: "lines",
 };
 
 /// The "When Gantry starts" choices: whether `restoreLayout` is on, its title and what it does.

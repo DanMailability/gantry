@@ -89,6 +89,7 @@ const TERMINAL_SIZE: Stepped = Stepped {
     delta: 1.0,
     min: 8.0,
     max: 40.0,
+    unit: "",
 };
 const LINE_HEIGHT: Stepped = Stepped {
     name: "line-height",
@@ -97,6 +98,7 @@ const LINE_HEIGHT: Stepped = Stepped {
     delta: 0.1,
     min: 1.0,
     max: 2.0,
+    unit: "",
 };
 const INTERFACE_SIZE: Stepped = Stepped {
     name: "interface-size",
@@ -105,6 +107,7 @@ const INTERFACE_SIZE: Stepped = Stepped {
     delta: 1.0,
     min: 11.0,
     max: 20.0,
+    unit: "",
 };
 
 const SUGGESTED_FILLS: [u32; 12] =

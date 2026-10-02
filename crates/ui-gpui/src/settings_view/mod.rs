@@ -1,4 +1,4 @@
-//! The Settings tab's page: a left menu of sections (Appearance, Alerts, Shortcuts, Sessions, Window) and the section's controls.
+//! The Settings tab's page: a left menu of sections (Appearance, Terminal, Alerts, Shortcuts, Sessions, Window) and the section's controls.
 //!
 //! Every control is focusable (Tab / Shift+Tab, Space or Enter to press); changes go through
 //! [`SettingsStore::update`], which saves and applies them at once.
@@ -26,6 +26,7 @@ mod alerts;
 mod appearance;
 mod sessions;
 mod shortcuts;
+mod terminal;
 mod window;
 
 use alerts::Event;
@@ -36,22 +37,26 @@ use appearance::{Status, installed_monospace};
 pub(crate) enum Section {
     /// Theme, status colours and fonts.
     Appearance,
+    /// Terminal font, scrollback, text direction and shell.
+    Terminal,
     /// What raises an alert, and how.
     Alerts,
     /// Rebindable keyboard shortcuts.
     Shortcuts,
-    /// Claude config dirs, shell, recent sessions and favorites.
+    /// Claude config dirs, recent sessions and favorites.
     Sessions,
-    /// Start-up behaviour and text display.
+    /// Start-up behaviour.
     Window,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [Section::Appearance, Section::Alerts, Section::Shortcuts, Section::Sessions, Section::Window];
+    const ALL: [Section; 6] =
+        [Section::Appearance, Section::Terminal, Section::Alerts, Section::Shortcuts, Section::Sessions, Section::Window];
 
     fn label(self) -> &'static str {
         match self {
             Section::Appearance => "Appearance",
+            Section::Terminal => "Terminal",
             Section::Alerts => "Alerts",
             Section::Shortcuts => "Shortcuts",
             Section::Sessions => "Sessions",
@@ -62,10 +67,11 @@ impl Section {
     fn subtitle(self) -> &'static str {
         match self {
             Section::Appearance => "Changes apply right away.",
+            Section::Terminal => "Font, scrollback and shell for terminal panes.",
             Section::Alerts => "For sessions running in Gantry's panes.",
-            Section::Shortcuts => "Click a shortcut, then press the new keys. Esc cancels.",
+            Section::Shortcuts => "Click a shortcut, then press the new keys. Esc cancels, Backspace unbinds.",
             Section::Sessions => "How new Claude and shell panes start.",
-            Section::Window => "How Gantry starts and shows text.",
+            Section::Window => "How Gantry starts.",
         }
     }
 }
@@ -86,7 +92,10 @@ struct Stepped {
     delta: f32,
     min: f32,
     max: f32,
+    /// Shown after the value ("lines", "s"); empty for a bare number.
+    unit: &'static str,
 }
+
 /// A drop-down list shows this many rows (each this tall, before scaling) before it scrolls.
 const DROPDOWN_ROWS: f32 = 8.;
 const DROPDOWN_ROW: f32 = 30.;
@@ -109,6 +118,16 @@ fn has_room(width: Pixels, needed: Pixels) -> bool {
 /// `value` moved by `delta`, kept within `min..=max` and rounded to one decimal.
 fn step(value: f32, delta: f32, min: f32, max: f32) -> f32 {
     ((value + delta).clamp(min, max) * 10.0).round() / 10.0
+}
+
+/// A number with its unit after it: "10,000 lines", "3 s"; the bare number when `unit` is empty.
+fn with_unit(value: f32, unit: &str) -> String {
+    if unit.is_empty() { format_number(value) } else { format!("{} {unit}", format_number(value)) }
+}
+
+/// Whether the setting `get` reads differs from its value in `Settings::default()`.
+fn differs<T: PartialEq>(settings: &Settings, get: impl Fn(&Settings) -> T) -> bool {
+    get(settings) != get(&Settings::default())
 }
 
 /// A number as the steppers show it: no decimals for whole numbers, thousands separated (10,000).
@@ -388,7 +407,7 @@ impl SettingsView {
                 cx.stop_propagation();
             }))
             .child(square(self, 0, "−", less, cx))
-            .child(div().min_w(theme.ui(56.)).px(theme.ui(4.)).flex().justify_center().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(format_number(value)))
+            .child(div().min_w(theme.ui(56.)).px(theme.ui(4.)).flex().justify_center().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(with_unit(value, stepped.unit)))
             .child(square(self, 1, "+", more, cx))
     }
 
@@ -484,6 +503,84 @@ impl SettingsView {
         div().relative().child(button).child(measure).children(menu)
     }
 
+    /// The trailing slot with a "Reset" text button when `show`, empty otherwise.
+    #[allow(dead_code)]
+    fn reset_button(&mut self, name: &'static str, index: usize, show: bool, reset: Handler, window: &Window, cx: &mut Context<Self>) -> Div {
+        let theme = theme(cx).clone();
+        let slot = div().flex_none().w(theme.ui(SLOT_WIDTH)).flex().justify_end();
+        if !show {
+            return slot;
+        }
+        slot.child(
+            self.pressable(name, index, None, window, cx, reset)
+                .h(theme.ui(28.))
+                .px(theme.ui(8.))
+                .flex()
+                .items_center()
+                .rounded(px(RADIUS_SMALL))
+                .text_xs()
+                .text_color(rgb(theme.tokens.accent))
+                .child("Reset"),
+        )
+    }
+
+    /// A trailing slot whose "Reset" shows when the setting `get` reads differs from its default and puts the default back with `set`.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    fn reset_slot<T: PartialEq + 'static>(
+        &mut self,
+        name: &'static str,
+        index: usize,
+        settings: &Settings,
+        get: impl Fn(&Settings) -> T + Copy + 'static,
+        set: impl Fn(&mut Settings, T) + Copy + 'static,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let show = differs(settings, get);
+        self.reset_button(name, index, show, change(move |settings| set(settings, get(&Settings::default()))), window, cx)
+    }
+
+    /// A segmented bar: one button per label, the `chosen` one filled; `pick(i)` is the handler for button `i`.
+    #[allow(dead_code)]
+    fn segmented(
+        &mut self,
+        name: &'static str,
+        labels: &[&'static str],
+        chosen: usize,
+        pick: impl Fn(usize) -> Handler,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = theme(cx).clone();
+        let segments: Vec<_> = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                self.pressable(name, index, None, window, cx, pick(index))
+                    .h(theme.ui(32.))
+                    .px(theme.ui(16.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(RADIUS_SMALL))
+                    .text_sm()
+                    .whitespace_nowrap()
+                    .when(index == chosen, |segment| segment.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)).font_weight(FontWeight::SEMIBOLD))
+                    .when(index != chosen, |segment| segment.text_color(rgb(theme.tokens.text)))
+                    .child(*label)
+            })
+            .collect();
+        div()
+            .flex_none()
+            .flex()
+            .p(px(3.))
+            .gap(px(3.))
+            .rounded(px(RADIUS_SMALL + 2.))
+            .bg(rgb(theme.tokens.raised))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .children(segments)
+    }
+
     fn open_settings_button(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let open = handler(|_, _, cx| {
             let path = cx.global::<SettingsStore>().path().to_path_buf();
@@ -531,6 +628,77 @@ fn muted(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div().text_xs().text_color(rgb(theme.tokens.muted)).child(text.into())
 }
 
+/// Width (before scaling) of a row's trailing slot, where "Reset" shows.
+const SLOT_WIDTH: f32 = 56.;
+
+/// A section of a page: heading, optional description under it, then a bordered box of `rows` divided by lines.
+#[allow(dead_code)]
+fn group(theme: &Theme, title: &'static str, description: Option<&'static str>, rows: Vec<Div>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.ui(10.))
+        .child(div().child(heading(theme, title)).children(description.map(|text| muted(theme, text).mt(theme.ui(2.)))))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .rounded(px(RADIUS))
+                .bg(rgb(theme.tokens.surface))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .children(rows.into_iter().enumerate().map(|(index, row)| row.when(index > 0, |row| row.border_t_1().border_color(rgb(theme.tokens.line))))),
+        )
+}
+
+/// A row's label column: the title (medium weight) and its description under it.
+#[allow(dead_code)]
+fn row_label(title: impl Into<SharedString>, description: impl IntoElement) -> Div {
+    div().child(div().font_weight(FontWeight::MEDIUM).child(title.into())).child(description)
+}
+
+/// A row: `label` on the left (it flexes and wraps), then `control` and the `trailing` slot on the right. They wrap under the
+/// label when the row is narrow.
+#[allow(dead_code)]
+fn row_shell(theme: &Theme, label: Div, control: impl IntoElement, trailing: Div) -> Div {
+    div()
+        .min_h(theme.ui(56.))
+        .px(theme.ui(16.))
+        .py(theme.ui(12.))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(theme.ui(16.))
+        .gap_y(theme.ui(8.))
+        .child(label.flex_1().min_w(theme.ui(200.)))
+        .child(div().flex_none().ml_auto().flex().items_center().gap(theme.ui(12.)).child(control).child(trailing))
+}
+
+/// A setting as a row: title, one line of description, the control and the trailing slot.
+#[allow(dead_code)]
+fn row(theme: &Theme, title: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, trailing: Div) -> Div {
+    row_shell(theme, row_label(title, muted(theme, description)), control, trailing)
+}
+
+/// A row whose `content` takes the full width under the optional label (title and description).
+#[allow(dead_code)]
+fn stacked_row(theme: &Theme, label: Option<(&'static str, &'static str)>, content: impl IntoElement) -> Div {
+    div()
+        .px(theme.ui(16.))
+        .py(theme.ui(12.))
+        .flex()
+        .flex_col()
+        .gap(theme.ui(10.))
+        .children(label.map(|(title, description)| row_label(title, muted(theme, description))))
+        .child(content)
+}
+
+/// The trailing slot of a list row: as wide as its `actions` need.
+#[allow(dead_code)]
+fn actions_slot(theme: &Theme) -> Div {
+    div().flex_none().flex().items_center().gap(theme.ui(4.))
+}
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
@@ -541,44 +709,55 @@ impl Render for SettingsView {
         let section = self.section;
         self.end_recording_without_focus(window);
 
-        let menu = div().flex_none().w(theme.ui(200.)).py(theme.ui(24.)).px(theme.ui(12.)).flex().flex_col().gap(theme.ui(4.)).border_r_1().border_color(rgb(theme.tokens.line)).children(
-            Section::ALL.map(|item| {
-                let active = item == section;
-                let choose = handler(move |this, _, cx| {
-                    this.section = item;
-                    this.popover = None;
-                    this.recording = None;
-                    this.shortcut_message = None;
-                    this.pending_replace = None;
-                    this.body_scroll.set_offset(point(px(0.), px(0.)));
-                    cx.notify();
-                });
-                self.pressable("section", item as usize, None, window, cx, choose)
-                    .h(theme.ui(36.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded(px(RADIUS_SMALL))
-                    .text_color(rgb(if active { theme.tokens.text } else { theme.tokens.muted }))
-                    .when(active, |el| el.bg(rgb(theme.tokens.raised)).font_weight(FontWeight::SEMIBOLD))
-                    .when(!active, |el| el.hover(|style| style.bg(rgb(theme.tokens.raised))))
-                    .child(item.label())
-            }),
-        );
+        let items = Section::ALL.map(|item| {
+            let active = item == section;
+            let choose = handler(move |this, _, cx| {
+                this.section = item;
+                this.popover = None;
+                this.recording = None;
+                this.shortcut_message = None;
+                this.pending_replace = None;
+                this.body_scroll.set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            });
+            self.pressable("section", item as usize, None, window, cx, choose)
+                .h(theme.ui(36.))
+                .px_3()
+                .flex()
+                .items_center()
+                .rounded(px(RADIUS_SMALL))
+                .text_color(rgb(if active { theme.tokens.text } else { theme.tokens.muted }))
+                // The fill already shows the active item, so it draws no focus ring.
+                .when(active, |el| el.bg(rgb(theme.tokens.raised)).font_weight(FontWeight::SEMIBOLD).border_color(rgba(0)))
+                .when(!active, |el| el.hover(|style| style.bg(rgb(theme.tokens.raised))))
+                .child(item.label())
+        });
+        let foot = div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(theme.ui(8.))
+            .px_3()
+            .child(muted(&theme, format!("Saved to {path}")).max_w_full().truncate())
+            .child(self.open_settings_button(0, window, cx));
+        let menu = div()
+            .flex_none()
+            .w(theme.ui(230.))
+            .py(theme.ui(24.))
+            .px(theme.ui(12.))
+            .flex()
+            .flex_col()
+            .gap(theme.ui(4.))
+            .border_r_1()
+            .border_color(rgb(theme.tokens.line))
+            .children(items)
+            .child(div().flex_1())
+            .child(foot);
 
         let header = div()
             .flex_none()
-            .flex()
-            .items_center()
-            .gap(theme.ui(16.))
-            .child(
-                div()
-                    .flex_none()
-                    .child(div().text_xl().font_weight(FontWeight::BOLD).child(section.label()))
-                    .child(div().mt(theme.ui(4.)).text_sm().text_color(rgb(theme.tokens.muted)).child(section.subtitle())),
-            )
-            .child(muted(&theme, path).flex_1().min_w_0().truncate().text_right())
-            .child(self.open_settings_button(0, window, cx));
+            .child(div().text_xl().font_weight(FontWeight::BOLD).child(section.label()))
+            .child(div().mt(theme.ui(4.)).text_sm().text_color(rgb(theme.tokens.muted)).child(section.subtitle()));
 
         let banner = (!problems.is_empty()).then(|| {
             let colors = theme.tone(Tone::NeedsInput);
@@ -622,6 +801,7 @@ impl Render for SettingsView {
 
         let body = match section {
             Section::Appearance => self.appearance(&theme, &settings, window, cx),
+            Section::Terminal => self.terminal(&theme, &settings, window, cx),
             Section::Alerts => self.alerts(&theme, &settings, window, cx),
             Section::Shortcuts => self.shortcuts(&theme, &settings, window, cx),
             Section::Sessions => self.sessions(&theme, &settings, window, cx),
@@ -645,7 +825,7 @@ impl Render for SettingsView {
             .flex()
             .flex_row()
             .overflow_hidden()
-            .bg(rgb(theme.tokens.surface))
+            .bg(rgb(theme.tokens.ground))
             .border_1()
             .border_color(rgb(theme.tokens.line))
             .rounded(px(RADIUS_LARGE))
@@ -664,10 +844,17 @@ impl Render for SettingsView {
                     .py(theme.ui(28.))
                     .flex()
                     .flex_col()
-                    .gap(theme.ui(26.))
-                    .child(header)
-                    .children(banner)
-                    .child(div().relative().child(body).child(page_width)),
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(theme.ui(780.))
+                            .flex()
+                            .flex_col()
+                            .gap(theme.ui(26.))
+                            .child(header)
+                            .children(banner)
+                            .child(div().relative().child(body).child(page_width)),
+                    ),
             )
             .children(backdrop)
     }
@@ -708,6 +895,22 @@ mod tests {
         assert_eq!(format_number(10000.0), "10,000");
         assert_eq!(format_number(100000.0), "100,000");
         assert_eq!(format_number(999.0), "999");
+    }
+
+    #[test]
+    fn units_follow_the_number() {
+        assert_eq!(with_unit(10000.0, "lines"), "10,000 lines");
+        assert_eq!(with_unit(3.0, "s"), "3 s");
+        assert_eq!(with_unit(14.0, ""), "14");
+    }
+
+    #[test]
+    fn a_setting_differs_only_from_its_default() {
+        let mut settings = Settings::default();
+        assert!(!differs(&settings, |s| s.ui_font_size));
+        settings.ui_font_size += 1.0;
+        assert!(differs(&settings, |s| s.ui_font_size));
+        assert!(!differs(&settings, |s| s.window.scrollback));
     }
 
     #[test]
