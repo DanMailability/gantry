@@ -15,6 +15,7 @@ use gpui::{
 use protocol::message::SessionInfo;
 
 use crate::field;
+use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, RADIUS_LARGE, container_chip, theme};
 
 const ROW_HEIGHT: f32 = 36.0;
@@ -59,6 +60,8 @@ pub struct RecentsView {
     counts: (usize, usize),
     selected: usize,
     scroll: UniformListScrollHandle,
+    per_project: usize,
+    chip_count: usize,
 }
 
 impl EventEmitter<RecentsEvent> for RecentsView {}
@@ -73,6 +76,7 @@ impl RecentsView {
     /// An overlay over `sessions`; `open` = sessions a leaf of the layout shows; `project` = the project to start on.
     pub fn new(sessions: Vec<SessionInfo>, open: HashSet<String>, project: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let home = std::env::home_dir();
+        let recents = cx.global::<SettingsStore>().settings().recents;
         let mut view = RecentsView {
             focus_handle: cx.focus_handle(),
             sessions,
@@ -88,6 +92,8 @@ impl RecentsView {
             counts: (0, 0),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
+            per_project: recents.per_project,
+            chip_count: recents.chips,
         };
         view.refresh();
         view
@@ -107,6 +113,8 @@ impl RecentsView {
             expanded: &self.expanded,
             project_of: &project_of,
             now_ms,
+            per_project: self.per_project,
+            chips: self.chip_count,
         };
         self.list = if self.choosing { List::Projects(recents::projects(&input)) } else { List::Sessions(recents::items(&input)) };
         self.chips = recents::chips(&input);

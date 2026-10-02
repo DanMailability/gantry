@@ -1,7 +1,8 @@
 //! The settings file (`settings.json`): typed model, tolerant loading, and writing only changed keys.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
@@ -118,7 +119,99 @@ pub struct AlertSettings {
     pub volume: f32,
 }
 
-/// Everything in settings.json (phase 1).
+/// One Claude config dir the user listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaudeDir {
+    /// Unique, non-empty display name.
+    pub name: String,
+    /// Directory as written (`~` kept).
+    pub path: PathBuf,
+    /// Program to run for Claude in this dir.
+    pub command: String,
+    /// Arguments placed before Gantry's own.
+    pub args: Vec<String>,
+}
+
+/// Whether the sidebar is shown when Gantry starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SidebarAtStart {
+    /// Use the saved layout's state.
+    #[default]
+    Remember,
+    /// Always shown.
+    Shown,
+    /// Always hidden.
+    Hidden,
+}
+
+impl SidebarAtStart {
+    /// Whether the sidebar is visible at start, given whether the saved layout had it visible.
+    pub fn visible(self, saved: bool) -> bool {
+        match self {
+            SidebarAtStart::Remember => saved,
+            SidebarAtStart::Shown => true,
+            SidebarAtStart::Hidden => false,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            SidebarAtStart::Remember => "remember",
+            SidebarAtStart::Shown => "shown",
+            SidebarAtStart::Hidden => "hidden",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "remember" => Some(SidebarAtStart::Remember),
+            "shown" => Some(SidebarAtStart::Shown),
+            "hidden" => Some(SidebarAtStart::Hidden),
+            _ => None,
+        }
+    }
+}
+
+/// The shell new shell panes run.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ShellSettings {
+    /// Program; empty = `$SHELL`.
+    pub program: String,
+    /// Arguments.
+    pub args: Vec<String>,
+}
+
+/// Sizes of the recent sessions pop-up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecentsSettings {
+    /// Sessions listed per project (1 to 20).
+    pub per_project: usize,
+    /// Project chips (0 to 12).
+    pub chips: usize,
+}
+
+/// Window behaviour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowSettings {
+    /// Restore tabs and panes on start.
+    pub restore_layout: bool,
+    /// Sidebar state at start.
+    pub sidebar_at_start: SidebarAtStart,
+    /// Scrollback lines for new panes (1000 to 100000).
+    pub scrollback: u32,
+    /// Reorder right-to-left text for display.
+    pub right_to_left: bool,
+}
+
+/// `~/x` becomes `<home>/x`; other paths are unchanged.
+pub fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
+    match (path.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Everything in settings.json.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// Theme choice.
@@ -131,6 +224,22 @@ pub struct Settings {
     pub ui_font_size: f32,
     /// Alert settings.
     pub alerts: AlertSettings,
+    /// Action id to keystroke; `None` = explicitly unset; absent = the default.
+    pub shortcuts: BTreeMap<String, Option<String>>,
+    /// Configured Claude config dirs; empty = the implicit "Default".
+    pub claude_dirs: Vec<ClaudeDir>,
+    /// Name of the default dir; `None` or unknown = the first entry.
+    pub default_claude_dir: Option<String>,
+    /// Folder to the name of the dir picked for it.
+    pub folder_claude_dirs: BTreeMap<PathBuf, String>,
+    /// Shell for new shell panes.
+    pub shell: ShellSettings,
+    /// Recent sessions pop-up sizes.
+    pub recents: RecentsSettings,
+    /// Pinned folders, in order.
+    pub favorites: Vec<PathBuf>,
+    /// Window behaviour.
+    pub window: WindowSettings,
 }
 
 impl Default for Settings {
@@ -149,6 +258,14 @@ impl Default for Settings {
                 play_sounds: true,
                 volume: 0.4,
             },
+            shortcuts: BTreeMap::new(),
+            claude_dirs: Vec::new(),
+            default_claude_dir: None,
+            folder_claude_dirs: BTreeMap::new(),
+            shell: ShellSettings::default(),
+            recents: RecentsSettings { per_project: 5, chips: 6 },
+            favorites: Vec::new(),
+            window: WindowSettings { restore_layout: true, sidebar_at_start: SidebarAtStart::Remember, scrollback: 10_000, right_to_left: true },
         }
     }
 }
@@ -301,6 +418,120 @@ impl Reader {
         }
     }
 
+    fn string(&mut self, map: &Map<String, Value>, prefix: &str, key: &str) -> String {
+        match map.get(key) {
+            None => String::new(),
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => {
+                self.problem(&format!("{prefix}{key}"), "expected a string".into());
+                String::new()
+            }
+        }
+    }
+
+    fn strings(&mut self, map: &Map<String, Value>, prefix: &str, key: &str) -> Vec<String> {
+        match map.get(key) {
+            None => Vec::new(),
+            Some(Value::Array(items)) if items.iter().all(Value::is_string) => {
+                items.iter().filter_map(|item| item.as_str().map(String::from)).collect()
+            }
+            Some(_) => {
+                self.problem(&format!("{prefix}{key}"), "expected a list of strings".into());
+                Vec::new()
+            }
+        }
+    }
+
+    fn shortcuts(&mut self, raw: &Map<String, Value>) -> BTreeMap<String, Option<String>> {
+        let map = self.object(raw, "", "shortcuts");
+        let mut out = BTreeMap::new();
+        for (id, value) in map {
+            match value {
+                Value::String(keystroke) => {
+                    out.insert(id, Some(keystroke));
+                }
+                Value::Null => {
+                    out.insert(id, None);
+                }
+                _ => self.problem(&format!("shortcuts.{id}"), "expected a keystroke or null".into()),
+            }
+        }
+        out
+    }
+
+    fn claude_dirs(&mut self, raw: &Map<String, Value>) -> Vec<ClaudeDir> {
+        let items = match raw.get("claudeDirs") {
+            None => return Vec::new(),
+            Some(Value::Array(items)) => items,
+            Some(_) => {
+                self.problem("claudeDirs", "expected a list".into());
+                return Vec::new();
+            }
+        };
+        let mut dirs: Vec<ClaudeDir> = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let key = format!("claudeDirs[{index}]");
+            let Value::Object(map) = item else {
+                self.problem(&key, "expected an object; dropped".into());
+                continue;
+            };
+            let name = self.string(map, &format!("{key}."), "name");
+            let path = self.string(map, &format!("{key}."), "path");
+            let command = match map.get("command") {
+                None => "claude".to_string(),
+                Some(_) => self.string(map, &format!("{key}."), "command"),
+            };
+            let args = self.strings(map, &format!("{key}."), "args");
+            if name.is_empty() || path.is_empty() || command.is_empty() {
+                self.problem(&key, "needs a name, a path and a command; dropped".into());
+            } else if dirs.iter().any(|dir| dir.name == name) {
+                self.problem(&key, format!("the name \"{name}\" is used twice; dropped"));
+            } else if dirs.iter().any(|dir| dir.path == Path::new(&path)) {
+                self.problem(&key, format!("the path \"{path}\" is used twice; dropped"));
+            } else {
+                dirs.push(ClaudeDir { name, path: path.into(), command, args });
+            }
+        }
+        dirs
+    }
+
+    fn folder_claude_dirs(&mut self, raw: &Map<String, Value>, names: &BTreeSet<&str>) -> BTreeMap<PathBuf, String> {
+        let map = self.object(raw, "", "folderClaudeDirs");
+        let mut out = BTreeMap::new();
+        for (folder, value) in map {
+            let Value::String(name) = value else {
+                self.problem(&format!("folderClaudeDirs.{folder}"), "expected a dir name".into());
+                continue;
+            };
+            if !names.contains(name.as_str()) {
+                self.problem(&format!("folderClaudeDirs.{folder}"), format!("no config dir named \"{name}\"; the default is used"));
+            }
+            out.insert(PathBuf::from(folder), name);
+        }
+        out
+    }
+
+    fn favorites(&mut self, raw: &Map<String, Value>) -> Vec<PathBuf> {
+        match raw.get("favorites") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| match item {
+                    Value::String(path) => Some(PathBuf::from(path)),
+                    _ => {
+                        self.problem(&format!("favorites[{index}]"), "expected a folder; dropped".into());
+                        None
+                    }
+                })
+                .collect(),
+            Some(_) => {
+                self.problem("favorites", "expected a list of strings".into());
+                Vec::new()
+            }
+        }
+    }
+
     fn event(&mut self, parent: &Map<String, Value>, key: &str, default: EventAlerts) -> EventAlerts {
         let map = self.object(parent, "alerts.", key);
         let prefix = format!("alerts.{key}.");
@@ -354,7 +585,59 @@ impl Reader {
             volume: self.number(&map, "alerts.", "volume", 0.4, (0.0, 1.0)) as f32,
         };
 
-        Settings { theme, status_fills, terminal_font, ui_font_size, alerts }
+        let shortcuts = self.shortcuts(raw);
+        let claude_dirs = self.claude_dirs(raw);
+        let implicit = BTreeSet::from(["Default"]);
+        let names: BTreeSet<&str> = if claude_dirs.is_empty() { implicit } else { claude_dirs.iter().map(|dir| dir.name.as_str()).collect() };
+        let default_claude_dir = match raw.get("defaultClaudeDir") {
+            None => None,
+            Some(Value::String(name)) => {
+                if !names.contains(name.as_str()) {
+                    self.problem("defaultClaudeDir", format!("no config dir named \"{name}\"; the first one is the default"));
+                }
+                Some(name.clone())
+            }
+            Some(_) => {
+                self.problem("defaultClaudeDir", "expected a dir name".into());
+                None
+            }
+        };
+        let folder_claude_dirs = self.folder_claude_dirs(raw, &names);
+
+        let map = self.object(raw, "", "shell");
+        let shell = ShellSettings { program: self.string(&map, "shell.", "program"), args: self.strings(&map, "shell.", "args") };
+
+        let map = self.object(raw, "", "recents");
+        let recents = RecentsSettings {
+            per_project: self.number(&map, "recents.", "perProject", 5.0, (1.0, 20.0)).round() as usize,
+            chips: self.number(&map, "recents.", "chips", 6.0, (0.0, 12.0)).round() as usize,
+        };
+
+        let favorites = self.favorites(raw);
+
+        let map = self.object(raw, "", "window");
+        let window = WindowSettings {
+            restore_layout: self.bool(&map, "window.", "restoreLayout", defaults.window.restore_layout),
+            sidebar_at_start: self.choice(&map, "window.", "sidebarAtStart", defaults.window.sidebar_at_start, SidebarAtStart::from_name),
+            scrollback: self.number(&map, "window.", "scrollback", 10_000.0, (1000.0, 100_000.0)).round() as u32,
+            right_to_left: self.bool(&map, "window.", "rightToLeft", defaults.window.right_to_left),
+        };
+
+        Settings {
+            theme,
+            status_fills,
+            terminal_font,
+            ui_font_size,
+            alerts,
+            shortcuts,
+            claude_dirs,
+            default_claude_dir,
+            folder_claude_dirs,
+            shell,
+            recents,
+            favorites,
+            window,
+        }
     }
 }
 
@@ -400,6 +683,30 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     add(&["alerts", "onlyWhenUnfocused"], alerts.only_when_unfocused.into(), alerts.only_when_unfocused != base.only_when_unfocused);
     add(&["alerts", "playSounds"], alerts.play_sounds.into(), alerts.play_sounds != base.play_sounds);
     add(&["alerts", "volume"], number(alerts.volume), alerts.volume != base.volume);
+    let shortcuts: Map<String, Value> =
+        settings.shortcuts.iter().map(|(id, key)| (id.clone(), key.clone().map_or(Value::Null, Value::from))).collect();
+    add(&["shortcuts"], Value::Object(shortcuts), !settings.shortcuts.is_empty());
+    let dirs: Vec<Value> = settings
+        .claude_dirs
+        .iter()
+        .map(|dir| serde_json::json!({"name": dir.name, "path": dir.path.to_string_lossy(), "command": dir.command, "args": dir.args}))
+        .collect();
+    add(&["claudeDirs"], Value::Array(dirs), !settings.claude_dirs.is_empty());
+    add(&["defaultClaudeDir"], settings.default_claude_dir.clone().map_or(Value::Null, Value::from), settings.default_claude_dir.is_some());
+    let folders: Map<String, Value> =
+        settings.folder_claude_dirs.iter().map(|(folder, name)| (folder.to_string_lossy().into_owned(), name.clone().into())).collect();
+    add(&["folderClaudeDirs"], Value::Object(folders), !settings.folder_claude_dirs.is_empty());
+    add(&["shell", "program"], settings.shell.program.clone().into(), settings.shell.program != default.shell.program);
+    add(&["shell", "args"], settings.shell.args.clone().into(), settings.shell.args != default.shell.args);
+    add(&["recents", "perProject"], settings.recents.per_project.into(), settings.recents.per_project != default.recents.per_project);
+    add(&["recents", "chips"], settings.recents.chips.into(), settings.recents.chips != default.recents.chips);
+    let favorites: Vec<Value> = settings.favorites.iter().map(|path| path.to_string_lossy().into_owned().into()).collect();
+    add(&["favorites"], Value::Array(favorites), !settings.favorites.is_empty());
+    let (window, base) = (&settings.window, &default.window);
+    add(&["window", "restoreLayout"], window.restore_layout.into(), window.restore_layout != base.restore_layout);
+    add(&["window", "sidebarAtStart"], window.sidebar_at_start.name().into(), window.sidebar_at_start != base.sidebar_at_start);
+    add(&["window", "scrollback"], window.scrollback.into(), window.scrollback != base.scrollback);
+    add(&["window", "rightToLeft"], window.right_to_left.into(), window.right_to_left != base.right_to_left);
     out
 }
 
@@ -429,10 +736,24 @@ fn put(map: &mut Map<String, Value>, path: &[&str], value: Option<Value>) {
 }
 
 /// Write `settings` to `path` atomically: `raw` with every known key replaced by its value in `settings`, and
-/// known keys equal to their default removed (an object left empty is removed too). Unknown keys stay.
+/// known keys equal to their default removed (an object left empty is removed too). Unknown keys stay. The
+/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `shortcuts`) are only rewritten when `settings`
+/// differs from what `raw` loads as, so hand-written entries that failed validation, and unknown fields in them,
+/// survive other changes.
 pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::Result<()> {
+    let loaded = Reader { problems: Vec::new() }.settings(raw);
+    let untouched = |key: &str| match key {
+        "claudeDirs" => settings.claude_dirs == loaded.claude_dirs,
+        "favorites" => settings.favorites == loaded.favorites,
+        "folderClaudeDirs" => settings.folder_claude_dirs == loaded.folder_claude_dirs,
+        "shortcuts" => settings.shortcuts == loaded.shortcuts,
+        _ => false,
+    };
     let mut out = raw.clone();
     for (key, value, changed) in leaves(settings) {
+        if key.len() == 1 && untouched(key[0]) {
+            continue;
+        }
         put(&mut out, &key, changed.then_some(value));
     }
     let mut text = serde_json::to_string_pretty(&Value::Object(out)).map_err(io::Error::other)?;
@@ -555,6 +876,7 @@ mod tests {
                 play_sounds: false,
                 volume: 0.7,
             },
+            ..Settings::default()
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -562,6 +884,175 @@ mod tests {
         let loaded = load(&path);
         assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
         assert_eq!(loaded.settings, Some(settings));
+    }
+
+    fn phase2_non_default() -> Settings {
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("toggleSidebar".into(), Some("ctrl-alt-s".into()));
+        settings.shortcuts.insert("splitRightClaude".into(), None);
+        settings.claude_dirs = vec![
+            ClaudeDir { name: "Personal".into(), path: "~/.claude".into(), command: "claude".into(), args: vec![] },
+            ClaudeDir { name: "Work".into(), path: "~/.claude-work".into(), command: "claude-w".into(), args: vec!["--model".into(), "opus".into()] },
+        ];
+        settings.default_claude_dir = Some("Work".into());
+        settings.folder_claude_dirs.insert("/home/me/work/ops".into(), "Work".into());
+        settings.shell = ShellSettings { program: "/bin/zsh".into(), args: vec!["-l".into()] };
+        settings.recents = RecentsSettings { per_project: 9, chips: 2 };
+        settings.favorites = vec!["/a".into(), "/b".into()];
+        settings.window = WindowSettings { restore_layout: false, sidebar_at_start: SidebarAtStart::Hidden, scrollback: 50000, right_to_left: false };
+        settings
+    }
+
+    #[test]
+    fn phase2_defaults() {
+        let s = Settings::default();
+        assert!(s.shortcuts.is_empty() && s.claude_dirs.is_empty() && s.folder_claude_dirs.is_empty() && s.favorites.is_empty());
+        assert_eq!(s.default_claude_dir, None);
+        assert_eq!(s.shell, ShellSettings { program: String::new(), args: vec![] });
+        assert_eq!(s.recents, RecentsSettings { per_project: 5, chips: 6 });
+        assert_eq!(s.window, WindowSettings { restore_layout: true, sidebar_at_start: SidebarAtStart::Remember, scrollback: 10000, right_to_left: true });
+    }
+
+    #[test]
+    fn sidebar_at_start_overrides_the_saved_state_only_when_asked() {
+        for saved in [true, false] {
+            assert_eq!(SidebarAtStart::Remember.visible(saved), saved);
+            assert!(SidebarAtStart::Shown.visible(saved));
+            assert!(!SidebarAtStart::Hidden.visible(saved));
+        }
+    }
+
+    #[test]
+    fn phase2_defaults_write_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &Settings::default(), &Map::new()).unwrap();
+        assert_eq!(read_json(&path), serde_json::json!({}));
+    }
+
+    #[test]
+    fn phase2_round_trip() {
+        let settings = phase2_non_default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &Map::new()).unwrap();
+        let loaded = load(&path);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        assert_eq!(loaded.settings, Some(settings));
+    }
+
+    #[test]
+    fn a_dropped_claude_dir_survives_an_unrelated_save() {
+        let text = r#"{"claudeDirs": [
+            {"name": "A", "path": "/a", "comment": "mine"},
+            {"name": "A", "path": "/b", "command": "wrapped"}
+        ]}"#;
+        let loaded = parse(text);
+        assert_eq!(loaded.problems.len(), 1);
+        let mut settings = loaded.settings.unwrap();
+        settings.alerts.volume = 0.7;
+        settings.shortcuts.clear();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written = read_json(&path);
+        assert_eq!(written["claudeDirs"], serde_json::from_str::<Value>(text).unwrap()["claudeDirs"], "dropped entry and the unknown field stay");
+        assert_eq!(written["alerts"]["volume"], 0.7);
+    }
+
+    #[test]
+    fn favorites_keep_the_valid_items_with_one_problem_per_bad_one() {
+        let loaded = parse(r#"{"favorites": ["/a", "/b", 3]}"#);
+        assert_eq!(loaded.problems.len(), 1);
+        let mut settings = loaded.settings.unwrap();
+        assert_eq!(settings.favorites, [PathBuf::from("/a"), PathBuf::from("/b")]);
+        settings.alerts.volume = 0.7;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        assert_eq!(read_json(&path)["favorites"], serde_json::json!(["/a", "/b", 3]));
+    }
+
+    #[test]
+    fn a_changed_whole_leaf_key_is_written() {
+        let loaded = parse(r#"{"favorites": ["/a"], "claudeDirs": [{"name": "A", "path": "/a", "comment": 1}]}"#);
+        let mut settings = loaded.settings.unwrap();
+        settings.favorites.push("/b".into());
+        settings.claude_dirs[0].command = "w".into();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written = read_json(&path);
+        assert_eq!(written["favorites"], serde_json::json!(["/a", "/b"]));
+        assert_eq!(written["claudeDirs"][0]["command"], "w");
+    }
+
+    #[test]
+    fn null_shortcut_survives_round_trip() {
+        let loaded = parse(r#"{"shortcuts": {"splitRightClaude": null, "futureAction": "ctrl-x"}}"#);
+        assert!(loaded.problems.is_empty());
+        let settings = loaded.settings.unwrap();
+        assert_eq!(settings.shortcuts.get("splitRightClaude"), Some(&None));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        assert_eq!(read_json(&path), serde_json::json!({"shortcuts": {"splitRightClaude": null, "futureAction": "ctrl-x"}}));
+    }
+
+    #[test]
+    fn claude_dirs_drop_duplicates_with_problem() {
+        let loaded = parse(
+            r#"{"claudeDirs": [
+                {"name": "A", "path": "/a"},
+                {"name": "A", "path": "/b"},
+                {"name": "B", "path": "/a"},
+                "nope",
+                {"name": "", "path": "/c"},
+                {"name": "C", "path": "/c", "command": "x", "args": ["-y"]}
+            ]}"#,
+        );
+        let dirs = loaded.settings.unwrap().claude_dirs;
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0], ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![] });
+        assert_eq!(dirs[1].args, vec!["-y".to_string()]);
+        let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["claudeDirs[1]", "claudeDirs[2]", "claudeDirs[3]", "claudeDirs[4]"]);
+    }
+
+    #[test]
+    fn folder_memory_for_unknown_dir_is_kept_with_problem() {
+        let loaded = parse(
+            r#"{"claudeDirs": [{"name": "A", "path": "/a"}], "defaultClaudeDir": "Zed",
+                "folderClaudeDirs": {"/x": "A", "/y": "Gone"}}"#,
+        );
+        let settings = loaded.settings.unwrap();
+        assert_eq!(settings.folder_claude_dirs.len(), 2);
+        assert_eq!(settings.folder_claude_dirs.get(Path::new("/y")).map(String::as_str), Some("Gone"));
+        let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["defaultClaudeDir", "folderClaudeDirs./y"]);
+        assert_eq!(settings.default_claude_dir.as_deref(), Some("Zed"));
+    }
+
+    #[test]
+    fn ranges_clamp() {
+        let loaded = parse(r#"{"recents": {"perProject": 99, "chips": -3}, "window": {"scrollback": 5, "sidebarAtStart": "sideways"}}"#);
+        let settings = loaded.settings.unwrap();
+        assert_eq!(settings.recents, RecentsSettings { per_project: 20, chips: 0 });
+        assert_eq!(settings.window.scrollback, 1000);
+        assert_eq!(settings.window.sidebar_at_start, SidebarAtStart::Remember);
+        let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["recents.perProject", "recents.chips", "window.sidebarAtStart", "window.scrollback"]);
+        assert_eq!(parse(r#"{"window": {"scrollback": 1000000}}"#).settings.unwrap().window.scrollback, 100000);
+    }
+
+    #[test]
+    fn expand_home_tilde() {
+        let home = Path::new("/home/me");
+        assert_eq!(expand_home(Path::new("~/x"), Some(home)), PathBuf::from("/home/me/x"));
+        assert_eq!(expand_home(Path::new("~"), Some(home)), PathBuf::from("/home/me"));
+        assert_eq!(expand_home(Path::new("/abs/x"), Some(home)), PathBuf::from("/abs/x"));
+        assert_eq!(expand_home(Path::new("~other/x"), Some(home)), PathBuf::from("~other/x"));
+        assert_eq!(expand_home(Path::new("~/x"), None), PathBuf::from("~/x"));
     }
 
     #[test]

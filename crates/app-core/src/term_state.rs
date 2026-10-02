@@ -109,10 +109,18 @@ pub struct TermState {
 impl TermState {
     /// Create an empty terminal of the given size with kitty keyboard support enabled.
     pub fn new(cols: u16, rows: u16) -> Self {
+        Self::with_config(cols, rows, Config { kitty_keyboard: true, ..Config::default() })
+    }
+
+    /// Like `new`, keeping `lines` lines of scrollback.
+    pub fn with_scrollback(cols: u16, rows: u16, lines: usize) -> Self {
+        Self::with_config(cols, rows, Config { kitty_keyboard: true, scrolling_history: lines, ..Config::default() })
+    }
+
+    fn with_config(cols: u16, rows: u16, config: Config) -> Self {
         let replies = Arc::new(Mutex::new(Vec::new()));
         let title = Arc::new(Mutex::new(None));
         let listener = Listener { replies: replies.clone(), title: title.clone() };
-        let config = Config { kitty_keyboard: true, ..Config::default() };
         let size = GridSize { cols: cols as usize, rows: rows as usize };
         TermState { term: Term::new(config, &size, listener), parser: Processor::new(), replies, title, palette: DARK, cell_size: (0, 0) }
     }
@@ -538,5 +546,15 @@ mod tests {
         }
         t.scroll_viewport(1_000_000);
         assert_eq!(t.row_text(0), "line9996");
+    }
+
+    #[test]
+    fn with_scrollback_keeps_that_many_lines() {
+        let mut t = TermState::with_scrollback(10, 5, 1_000);
+        for i in 0..3_000 {
+            t.feed(format!("line{i}\r\n").as_bytes());
+        }
+        t.scroll_viewport(1_000_000);
+        assert_eq!(t.row_text(0), "line1996");
     }
 }

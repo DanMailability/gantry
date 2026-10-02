@@ -127,12 +127,21 @@ pub struct DaemonClient {
     outgoing: mpsc::UnboundedSender<Outgoing>,
 }
 
+/// What the handshake returned.
+struct Hello {
+    instance: String,
+    claude_dir: Option<PathBuf>,
+    panes: Vec<PaneInfo>,
+}
+
 /// A fresh daemon connection.
 pub struct Connection {
     /// Handle for sending requests.
     pub client: DaemonClient,
     /// Daemon instance id (pane ids are only meaningful within it).
     pub instance: String,
+    /// The daemon's default Claude config dir.
+    pub claude_dir: Option<PathBuf>,
     /// Live panes at connect time, most recently focused first.
     pub panes: Vec<PaneInfo>,
     /// Daemon events, in order.
@@ -156,8 +165,9 @@ impl DaemonClient {
             };
             runtime.block_on(run_connection(paths, spawn, ready_tx, outgoing_rx, events_tx));
         });
-        let (instance, panes) = ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
-        Ok(Connection { client: DaemonClient { outgoing }, instance, panes, events })
+        let Hello { instance, claude_dir, panes } =
+            ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
+        Ok(Connection { client: DaemonClient { outgoing }, instance, claude_dir, panes, events })
     }
 
     /// Start a pane; answered by `Spawned`/`SpawnFailed` with the same `request`.
@@ -200,6 +210,11 @@ impl DaemonClient {
         self.send(&ClientMessage::SetPalette(colors));
     }
 
+    /// Tell the daemon which Claude config dirs to index (empty = its own default dir).
+    pub fn set_claude_dirs(&self, dirs: Vec<PathBuf>) {
+        self.send(&ClientMessage::SetClaudeDirs { dirs });
+    }
+
     /// Mark the pane as most recently focused.
     pub fn focus(&self, pane: PaneId) {
         self.send(&ClientMessage::Focus { pane });
@@ -222,7 +237,7 @@ impl DaemonClient {
 async fn run_connection(
     paths: Paths,
     spawn: impl FnOnce() -> io::Result<()>,
-    ready: std::sync::mpsc::Sender<Result<(String, Vec<PaneInfo>), StartError>>,
+    ready: std::sync::mpsc::Sender<Result<Hello, StartError>>,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
     events: async_channel::Sender<ClientEvent>,
 ) {
@@ -287,22 +302,22 @@ async fn run_connection(
 }
 
 /// `Hello` → `Welcome`, then `ListPanes` → `Panes`. Returns the daemon instance and its live panes.
-async fn hello<R, W>(recv: &mut R, send: &mut W) -> Result<(String, Vec<PaneInfo>), StartError>
+async fn hello<R, W>(recv: &mut R, send: &mut W) -> Result<Hello, StartError>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     let io = |err: io::Error| StartError::Io(err.into());
     write_frame(send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.map_err(io)?;
-    let instance = match next_message(recv).await? {
-        DaemonMessage::Welcome { instance, .. } => instance,
+    let (instance, claude_dir) = match next_message(recv).await? {
+        DaemonMessage::Welcome { instance, claude_dir, .. } => (instance, claude_dir),
         DaemonMessage::VersionMismatch { daemon_protocol } => return Err(StartError::VersionMismatch { daemon_protocol }),
         other => return Err(StartError::Io(anyhow::anyhow!("unexpected handshake reply {other:?}"))),
     };
     write_frame(send, &Frame::control(&ClientMessage::ListPanes)).await.map_err(io)?;
     loop {
         if let DaemonMessage::Panes { panes } = next_message(recv).await? {
-            return Ok((instance, panes));
+            return Ok(Hello { instance, claude_dir, panes });
         }
     }
 }

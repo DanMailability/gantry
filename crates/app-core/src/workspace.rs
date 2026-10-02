@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attention::most_urgent;
 use crate::sessions::SessionStore;
+use crate::settings::{Settings, ShellSettings, expand_home};
 use crate::split_tree::{Axis, Direction, Node, NodeId};
 
 /// Program name of Claude Code.
@@ -26,17 +27,168 @@ pub struct PaneLaunch {
     /// Host folder of the dev container it runs in; `None` = this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<PathBuf>,
+    /// Runs Claude Code, whatever the program is called. Layouts from before this flag leave it unset and
+    /// fall back to the program name (see `is_claude`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude: bool,
+    /// The host Claude config dir it runs with; `None` = the daemon's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_dir: Option<PathBuf>,
+    /// Extra environment variables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+}
+
+/// The config dirs in effect: the configured list, or the implicit Default (the daemon's dir, `claude`, no
+/// arguments).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaudeDirs {
+    /// The dirs, in settings order.
+    pub dirs: Vec<ResolvedDir>,
+    /// Index of the default dir.
+    pub default: usize,
+}
+
+/// One config dir with its path expanded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedDir {
+    /// Display name.
+    pub name: String,
+    /// Directory, `~` expanded.
+    pub path: PathBuf,
+    /// Program that runs Claude.
+    pub command: String,
+    /// Arguments placed before Gantry's own.
+    pub args: Vec<String>,
+}
+
+impl ClaudeDirs {
+    /// The dirs of `settings`; with none configured, the implicit "Default" at `daemon_dir` (else `<home>/.claude`).
+    pub fn from_settings(settings: &Settings, daemon_dir: Option<&Path>, home: Option<&Path>) -> ClaudeDirs {
+        if settings.claude_dirs.is_empty() {
+            let path = daemon_dir.map(Path::to_path_buf).or_else(|| home.map(|home| home.join(".claude"))).unwrap_or_default();
+            return ClaudeDirs { dirs: vec![ResolvedDir { name: "Default".into(), path, command: CLAUDE.into(), args: Vec::new() }], default: 0 };
+        }
+        let dirs: Vec<ResolvedDir> = settings
+            .claude_dirs
+            .iter()
+            .map(|dir| ResolvedDir { name: dir.name.clone(), path: expand_home(&dir.path, home), command: dir.command.clone(), args: dir.args.clone() })
+            .collect();
+        let default = settings.default_claude_dir.as_deref().and_then(|name| dirs.iter().position(|dir| dir.name == name)).unwrap_or(0);
+        ClaudeDirs { dirs, default }
+    }
+
+    /// The dir for a new session in `folder`: the explicit `pick` (a name), else the one remembered for exactly
+    /// this folder, else the default. Names that match no dir are skipped.
+    pub fn for_folder(&self, folder: &Path, pick: Option<&str>, memory: &BTreeMap<PathBuf, String>) -> &ResolvedDir {
+        let named = |name: &str| self.dirs.iter().find(|dir| dir.name == name);
+        pick.and_then(named).or_else(|| memory.get(folder).and_then(|name| named(name))).unwrap_or(&self.dirs[self.default])
+    }
+
+    /// The dir at `path`, if configured.
+    pub fn by_path(&self, path: &Path) -> Option<&ResolvedDir> {
+        self.dirs.iter().find(|dir| dir.path == path)
+    }
 }
 
 impl PaneLaunch {
     /// A new Claude Code session, with its own `--session-id`, in `cwd`.
     pub fn claude(cwd: PathBuf) -> PaneLaunch {
-        PaneLaunch { program: CLAUDE.into(), args: vec!["--session-id".into(), uuid::Uuid::new_v4().to_string()], cwd, container: None }
+        PaneLaunch {
+            program: CLAUDE.into(),
+            args: vec!["--session-id".into(), uuid::Uuid::new_v4().to_string()],
+            cwd,
+            container: None,
+            claude: true,
+            claude_dir: None,
+            env: Vec::new(),
+        }
     }
 
     /// Claude Code resuming `session` in `cwd`, in the dev container serving `container` (`None` = this machine).
     pub fn resume(session: &str, cwd: PathBuf, container: Option<PathBuf>) -> PaneLaunch {
-        PaneLaunch { program: CLAUDE.into(), args: vec!["--resume".into(), session.into()], cwd, container }
+        PaneLaunch {
+            program: CLAUDE.into(),
+            args: vec!["--resume".into(), session.into()],
+            cwd,
+            container,
+            claude: true,
+            claude_dir: None,
+            env: Vec::new(),
+        }
+    }
+
+    /// A new Claude Code session in `cwd` with `dir`'s command and arguments. A dir other than `daemon_dir` adds
+    /// `CLAUDE_CONFIG_DIR`. In a dev container (`container`) the program stays `claude`, the container's own config
+    /// dir applies and only the dir's arguments are kept.
+    pub fn claude_with(cwd: PathBuf, dir: &ResolvedDir, daemon_dir: Option<&Path>, container: Option<PathBuf>) -> PaneLaunch {
+        let mut args = dir.args.clone();
+        args.extend(["--session-id".into(), uuid::Uuid::new_v4().to_string()]);
+        Self::claude_in(cwd, args, dir, daemon_dir, container)
+    }
+
+    /// Claude Code resuming `session` in `cwd`. `session_dir` is the config dir the session was recorded in: its
+    /// command and arguments are used when it is configured (else the default dir's), and `CLAUDE_CONFIG_DIR`
+    /// keeps pointing at it unless it is the daemon's own.
+    pub fn resume_with(
+        session: &str,
+        cwd: PathBuf,
+        container: Option<PathBuf>,
+        session_dir: Option<&Path>,
+        dirs: &ClaudeDirs,
+        daemon_dir: Option<&Path>,
+    ) -> PaneLaunch {
+        Self::session_with("--resume", session, cwd, container, session_dir, dirs, daemon_dir)
+    }
+
+    /// Like `resume_with`, for a session with no transcript yet: starts it afresh under the same id (`--session-id`).
+    pub fn restart_with(
+        session: &str,
+        cwd: PathBuf,
+        container: Option<PathBuf>,
+        session_dir: Option<&Path>,
+        dirs: &ClaudeDirs,
+        daemon_dir: Option<&Path>,
+    ) -> PaneLaunch {
+        Self::session_with("--session-id", session, cwd, container, session_dir, dirs, daemon_dir)
+    }
+
+    fn session_with(
+        flag: &str,
+        session: &str,
+        cwd: PathBuf,
+        container: Option<PathBuf>,
+        session_dir: Option<&Path>,
+        dirs: &ClaudeDirs,
+        daemon_dir: Option<&Path>,
+    ) -> PaneLaunch {
+        let configured = session_dir.and_then(|path| dirs.by_path(path));
+        let dir = configured.unwrap_or(&dirs.dirs[dirs.default]);
+        let mut args = dir.args.clone();
+        args.extend([flag.into(), session.into()]);
+        let recorded = ResolvedDir { path: session_dir.map_or_else(|| dir.path.clone(), Path::to_path_buf), ..dir.clone() };
+        Self::claude_in(cwd, args, &recorded, daemon_dir, container)
+    }
+
+    fn claude_in(cwd: PathBuf, args: Vec<String>, dir: &ResolvedDir, daemon_dir: Option<&Path>, container: Option<PathBuf>) -> PaneLaunch {
+        if container.is_some() {
+            return PaneLaunch { program: CLAUDE.into(), args, cwd, container, claude: true, claude_dir: None, env: Vec::new() };
+        }
+        let own = daemon_dir == Some(dir.path.as_path());
+        PaneLaunch {
+            program: dir.command.clone(),
+            args,
+            cwd,
+            container: None,
+            claude: true,
+            claude_dir: (!own).then(|| dir.path.clone()),
+            env: if own { Vec::new() } else { vec![("CLAUDE_CONFIG_DIR".into(), dir.path.to_string_lossy().into_owned())] },
+        }
+    }
+
+    /// A shell in `cwd`; an empty `shell.program` is the daemon's default shell.
+    pub fn shell(cwd: PathBuf, shell: &ShellSettings) -> PaneLaunch {
+        PaneLaunch { program: shell.program.clone(), args: shell.args.clone(), cwd, container: None, claude: false, claude_dir: None, env: Vec::new() }
     }
 
     /// The same launch, in the dev container serving `host_folder` (`None` = this machine).
@@ -46,18 +198,18 @@ impl PaneLaunch {
 
     /// The Claude session this command line names (`--session-id`, `--resume`, `-r`).
     pub fn session(&self) -> Option<&str> {
-        claude_session(&self.program, &self.args)
+        claude_session(self.is_claude(), &self.program, &self.args)
     }
 
     /// Whether this runs Claude Code.
     pub fn is_claude(&self) -> bool {
-        Path::new(&self.program).file_stem().is_some_and(|stem| stem == CLAUDE)
+        self.claude || Path::new(&self.program).file_stem().is_some_and(|stem| stem == CLAUDE)
     }
 
     /// Short label: program and directory names, e.g. `claude · repo`.
     pub fn label(&self) -> String {
         let name = |path: &Path| path.file_name().map(|n| n.to_string_lossy().into_owned());
-        let program = name(Path::new(&self.program)).unwrap_or_else(|| self.program.clone());
+        let program = name(Path::new(&self.program)).unwrap_or_else(|| if self.program.is_empty() { "shell".into() } else { self.program.clone() });
         match name(&self.cwd) {
             Some(dir) => format!("{program} · {dir}"),
             None => program,
@@ -65,7 +217,7 @@ impl PaneLaunch {
     }
 
     /// The daemon request that starts this, optionally in `cwd_from`'s current directory.
-    pub fn request(&self, cwd_from: Option<PaneId>, cols: u16, rows: u16) -> SpawnRequest {
+    pub fn request(&self, cwd_from: Option<PaneId>, cols: u16, rows: u16, scrollback: u32) -> SpawnRequest {
         SpawnRequest {
             program: self.program.clone(),
             args: self.args.clone(),
@@ -74,6 +226,9 @@ impl PaneLaunch {
             rows,
             cwd_from,
             container: self.container.clone(),
+            claude: self.is_claude(),
+            env: self.env.clone(),
+            scrollback: Some(scrollback),
         }
     }
 }
@@ -109,12 +264,26 @@ impl Leaf {
     /// What Continue / Restart does, given the daemon's sessions: focus the pane that already runs the
     /// leaf's session, refuse while it runs outside Gantry, else start `rerun` — resuming when the session is
     /// known, or when the list has not arrived yet.
-    pub fn rerun_with(&self, sessions: &SessionStore) -> Rerun {
+    pub fn rerun_with(&self, sessions: &SessionStore, dirs: &ClaudeDirs, daemon_dir: Option<&Path>) -> Rerun {
         let known = self.session.as_deref().and_then(|id| sessions.get(id));
         match known.map(|session| session.state) {
             Some(SessionState::Managed { pane }) => Rerun::Focus(pane),
             Some(SessionState::External { .. }) => Rerun::Busy,
-            _ => Rerun::Start(self.rerun(known.is_some() || !sessions.loaded())),
+            _ => Rerun::Start(self.rerun_resolved(known.is_some() || !sessions.loaded(), known.and_then(|info| info.claude_dir.as_deref()), dirs, daemon_dir)),
+        }
+    }
+
+    /// `rerun`, but a Claude leaf with a session is launched through its config dir's current command, arguments and
+    /// environment: `session_dir` (where the session was recorded), else the dir the leaf ran with.
+    pub fn rerun_resolved(&self, resumable: bool, session_dir: Option<&Path>, dirs: &ClaudeDirs, daemon_dir: Option<&Path>) -> PaneLaunch {
+        let launch = &self.launch;
+        let Some(id) = self.session.as_deref().filter(|_| launch.is_claude()) else { return self.rerun(resumable) };
+        let session_dir = session_dir.or(launch.claude_dir.as_deref());
+        let (cwd, container) = (launch.cwd.clone(), launch.container.clone());
+        if resumable {
+            PaneLaunch::resume_with(id, cwd, container, session_dir, dirs, daemon_dir)
+        } else {
+            PaneLaunch::restart_with(id, cwd, container, session_dir, dirs, daemon_dir)
         }
     }
 
@@ -131,7 +300,10 @@ impl Leaf {
             Some(id) => vec!["--session-id".into(), id.clone()],
             None => vec!["--continue".into()],
         };
-        PaneLaunch { program: launch.program.clone(), args, cwd: launch.cwd.clone(), container: launch.container.clone() }
+        // Arguments before the session flag (a config dir's own) are kept.
+        let own = launch.args.iter().position(|arg| matches!(arg.as_str(), "--session-id" | "--resume" | "-r" | "--continue")).unwrap_or(0);
+        let args = launch.args[..own].iter().cloned().chain(args).collect();
+        PaneLaunch { args, ..launch.clone() }
     }
 }
 
@@ -190,6 +362,10 @@ pub struct Workspace {
     /// Sidebar visibility and width.
     #[serde(default)]
     pub sidebar: SidebarState,
+    /// Finished tabs and leaves that "Start with one new tab" dropped at startup; written back into every saved copy
+    /// so that switching to "Restore tabs and panes" brings them back.
+    #[serde(skip)]
+    dropped: Vec<(Tab, Vec<(NodeId, Leaf)>)>,
     next_id: NodeId,
 }
 
@@ -236,10 +412,14 @@ impl Workspace {
         }
     }
 
-    /// A copy without the Settings tab, for saving.
+    /// A copy without the Settings tab, and with the tabs dropped at startup appended, for saving.
     pub fn saveable(&self) -> Workspace {
         let mut saved = self.clone();
         saved.close_settings();
+        for (tab, leaves) in std::mem::take(&mut saved.dropped) {
+            saved.tabs.push(tab);
+            saved.leaves.extend(leaves);
+        }
         saved
     }
 
@@ -275,6 +455,23 @@ impl Workspace {
             }
         }
         self.leaves.remove(&leaf)
+    }
+
+    /// The tabs to keep aside for `dead` leaves: a tab whose leaves are all dead whole, a dead leaf of a tab with live
+    /// ones as a tab of its own.
+    fn park(&self, dead: &[NodeId]) -> Vec<(Tab, Vec<(NodeId, Leaf)>)> {
+        let mut parked = Vec::new();
+        for tab in self.tabs.iter().filter(|tab| !tab.settings) {
+            let leaves = tab.root.leaves();
+            let (gone, kept): (Vec<NodeId>, Vec<NodeId>) = leaves.into_iter().partition(|leaf| dead.contains(leaf));
+            let pair = |id: NodeId| (id, self.leaves[&id].clone());
+            if kept.is_empty() {
+                parked.push((tab.clone(), gone.into_iter().map(pair).collect()));
+            } else {
+                parked.extend(gone.into_iter().map(|id| (Tab { root: Node::Leaf(id), focused: id, settings: false }, vec![pair(id)])));
+            }
+        }
+        parked
     }
 
     /// The visible tab.
@@ -454,8 +651,9 @@ pub struct Restored {
 /// Rebuild the workspace at startup. Leaves keep their live pane; leaves whose pane is gone (or
 /// belongs to another daemon instance) become dead; live panes missing from the layout become new
 /// tabs (most recently focused last, and active); an explicit launch opens a new focused tab; an
-/// empty result opens the default.
-pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], launch: &Launch) -> Restored {
+/// empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped from the workspace (live panes
+/// still reattach) but kept aside for `saveable`.
+pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], launch: &Launch, restore_layout: bool) -> Restored {
     let mut workspace = saved.unwrap_or_default();
     let same_daemon = workspace.instance == instance;
     workspace.instance = instance.into();
@@ -465,13 +663,28 @@ pub fn restore(saved: Option<Workspace>, instance: &str, live: &[PaneInfo], laun
             leaf.pane = None;
         }
     }
+    if !restore_layout {
+        let dead: Vec<NodeId> = workspace.leaves.iter().filter(|(_, leaf)| leaf.pane.is_none()).map(|(id, _)| *id).collect();
+        workspace.dropped = workspace.park(&dead);
+        for leaf in dead {
+            workspace.close(leaf);
+        }
+    }
     let mut attach: Vec<(NodeId, PaneId)> =
         workspace.leaves.iter().filter_map(|(id, leaf)| leaf.pane.map(|pane| (*id, pane))).collect();
     let known: HashSet<PaneId> = attach.iter().map(|(_, pane)| *pane).collect();
     let mut orphans: Vec<&PaneInfo> = live.iter().filter(|info| !known.contains(&info.pane)).collect();
     orphans.sort_by_key(|info| (info.last_focused, info.pane));
     for info in orphans {
-        let leaf = workspace.new_tab(PaneLaunch { program: info.program.clone(), args: info.args.clone(), cwd: info.cwd.clone(), container: info.container.clone() });
+        let leaf = workspace.new_tab(PaneLaunch {
+            program: info.program.clone(),
+            args: info.args.clone(),
+            cwd: info.cwd.clone(),
+            container: info.container.clone(),
+            claude: info.claude,
+            claude_dir: None,
+            env: Vec::new(),
+        });
         workspace.pane_started(leaf, info.pane, info.cwd.clone());
         attach.push((leaf, info.pane));
     }
@@ -502,15 +715,15 @@ mod tests {
         let launch = PaneLaunch::claude("/home/u/app".into()).in_container(Some("/home/u/app".into()));
         let leaf = Leaf::new(launch);
         assert_eq!(leaf.rerun(true).container, Some(PathBuf::from("/home/u/app")));
-        assert_eq!(leaf.launch.request(None, 80, 24).container, Some(PathBuf::from("/home/u/app")));
+        assert_eq!(leaf.launch.request(None, 80, 24, 10_000).container, Some(PathBuf::from("/home/u/app")));
     }
 
     fn shell(cwd: &str) -> PaneLaunch {
-        PaneLaunch { program: "/bin/bash".into(), args: vec![], cwd: cwd.into(), container: None }
+        PaneLaunch { program: "/bin/bash".into(), args: vec![], cwd: cwd.into(), container: None, claude: false, claude_dir: None, env: Vec::new() }
     }
 
     fn info(pane: PaneId, program: &str, last_focused: u64) -> PaneInfo {
-        PaneInfo { pane, program: program.into(), args: vec!["-l".into()], cwd: "/srv".into(), last_focused, container: None }
+        PaneInfo { pane, program: program.into(), args: vec!["-l".into()], cwd: "/srv".into(), last_focused, container: None, claude: false }
     }
 
     #[test]
@@ -729,7 +942,7 @@ mod tests {
     }
 
     fn claude_leaf(session: Option<&str>) -> Leaf {
-        Leaf { pane: None, launch: PaneLaunch { program: "claude".into(), args: vec![], cwd: "/r".into(), container: None }, session: session.map(Into::into) }
+        Leaf { pane: None, launch: PaneLaunch { program: "claude".into(), args: vec![], cwd: "/r".into(), container: None, claude: false, claude_dir: None, env: Vec::new() }, session: session.map(Into::into) }
     }
 
     #[test]
@@ -773,7 +986,7 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
-            container: None,
+            container: None, claude_dir: None,
         }
     }
 
@@ -781,19 +994,61 @@ mod tests {
     fn rerun_never_runs_a_session_twice() {
         use protocol::message::SessionState;
         let leaf = claude_leaf(Some("x"));
+        let dirs = ClaudeDirs::from_settings(&Settings::default(), Some(Path::new("/d/.claude")), None);
+        let daemon = Some(Path::new("/d/.claude"));
+        let again = |resumable| leaf.rerun_resolved(resumable, None, &dirs, daemon);
         let mut store = SessionStore::default();
         // Before the first list: assume it may exist and resume.
-        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(true)));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
         store.replace(vec![]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(false)));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(false)));
         store.replace(vec![session_info("x", SessionState::Closed)]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Start(leaf.rerun(true)));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
         store.replace(vec![session_info("x", SessionState::Managed { pane: 4 })]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Focus(4));
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Focus(4));
         store.replace(vec![session_info("x", SessionState::External { pid: Some(9) })]);
-        assert_eq!(leaf.rerun_with(&store), Rerun::Busy);
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Busy);
         let sh = Leaf::new(shell("/r"));
-        assert_eq!(sh.rerun_with(&store), Rerun::Start(sh.launch.clone()));
+        assert_eq!(sh.rerun_with(&store, &dirs, daemon), Rerun::Start(sh.launch.clone()));
+    }
+
+    #[test]
+    fn continue_uses_the_dirs_current_command() {
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let old = ClaudeDirs::from_settings(&two_dirs_settings(), daemon, Some(Path::new("/home/me")));
+        let mut leaf = Leaf::new(PaneLaunch::claude_with("/r".into(), &old.dirs[1], daemon, None));
+        leaf.session = Some("sid".into());
+        let mut settings = two_dirs_settings();
+        settings.claude_dirs[1].command = "claude-new".into();
+        settings.claude_dirs[1].args = vec!["--model".into(), "sonnet".into()];
+        let dirs = ClaudeDirs::from_settings(&settings, daemon, Some(Path::new("/home/me")));
+        let mut store = SessionStore::default();
+        store.replace(vec![]);
+        let Rerun::Start(restart) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!((restart.program.as_str(), restart.args.clone()), ("claude-new", vec!["--model".to_string(), "sonnet".into(), "--session-id".into(), "sid".into()]));
+        store.replace(vec![session_info("sid", protocol::message::SessionState::Closed)]);
+        let Rerun::Start(resume) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!((resume.program.as_str(), resume.args.clone()), ("claude-new", vec!["--model".to_string(), "sonnet".into(), "--resume".into(), "sid".into()]));
+        assert_eq!(resume.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
+    }
+
+    #[test]
+    fn continue_of_an_orphan_follows_the_sessions_tagged_dir() {
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let dirs = ClaudeDirs::from_settings(&two_dirs_settings(), daemon, Some(Path::new("/home/me")));
+        let mut leaf = claude_leaf(Some("sid"));
+        assert!(leaf.launch.env.is_empty() && leaf.launch.claude_dir.is_none());
+        let mut info = session_info("sid", protocol::message::SessionState::Closed);
+        info.claude_dir = Some("/home/me/.claude-work".into());
+        let mut store = SessionStore::default();
+        store.replace(vec![info]);
+        let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!(launch.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
+        assert_eq!(launch.claude_dir, Some(PathBuf::from("/home/me/.claude-work")));
+        leaf.launch.claude_dir = Some("/home/me/.claude-work".into());
+        store.replace(vec![]);
+        let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
+        assert_eq!(launch.env.len(), 1, "falls back to the leaf's own dir when the session is unknown");
     }
 
     #[test]
@@ -840,8 +1095,8 @@ mod tests {
 
     #[test]
     fn restore_adopted_claude_panes_know_their_session() {
-        let live = [PaneInfo { pane: 4, program: "claude".into(), args: vec!["--resume".into(), "xyz".into()], cwd: "/srv".into(), last_focused: 1, container: None }];
-        let restored = restore(None, "i", &live, &launch());
+        let live = [PaneInfo { pane: 4, program: "claude".into(), args: vec!["--resume".into(), "xyz".into()], cwd: "/srv".into(), last_focused: 1, container: None, claude: false }];
+        let restored = restore(None, "i", &live, &launch(), true);
         let leaf = restored.attach[0].0;
         assert_eq!(restored.workspace.leaves[&leaf].session.as_deref(), Some("xyz"));
     }
@@ -891,7 +1146,7 @@ mod tests {
 
     #[test]
     fn spawn_requests_carry_the_focused_pane() {
-        let request = shell("/a").request(Some(3), 100, 30);
+        let request = shell("/a").request(Some(3), 100, 30, 10_000);
         assert_eq!((request.cwd_from, request.cols, request.rows, request.program.as_str()), (Some(3), 100, 30, "/bin/bash"));
     }
 
@@ -901,7 +1156,7 @@ mod tests {
 
     #[test]
     fn restore_with_nothing_spawns_the_default() {
-        let restored = restore(None, "i1", &[], &launch());
+        let restored = restore(None, "i1", &[], &launch(), true);
         assert_eq!(restored.workspace.tabs.len(), 1);
         assert_eq!(restored.spawn, vec![restored.workspace.focused().unwrap()]);
         assert!(restored.attach.is_empty());
@@ -915,7 +1170,7 @@ mod tests {
         saved.pane_started(a, 1, "/a".into());
         let b = saved.split(Axis::Vertical, shell("/b")).unwrap();
         saved.pane_started(b, 2, "/b".into());
-        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch());
+        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), true);
         assert_eq!(restored.attach, vec![(a, 1)]);
         assert_eq!(restored.workspace.leaves[&b].pane, None, "pane 2 is gone");
         assert!(restored.spawn.is_empty(), "dead panes wait for Continue/Restart");
@@ -927,7 +1182,7 @@ mod tests {
         let mut saved = Workspace { instance: "old".into(), ..Workspace::default() };
         let a = saved.new_tab(shell("/a"));
         saved.pane_started(a, 1, "/a".into());
-        let restored = restore(Some(saved), "new", &[info(1, "zsh", 1)], &launch());
+        let restored = restore(Some(saved), "new", &[info(1, "zsh", 1)], &launch(), true);
         assert_eq!(restored.workspace.leaves[&a].pane, None);
         assert_eq!(restored.workspace.tabs.len(), 2, "the new daemon's pane 1 is adopted as its own tab");
         let (adopted, pane) = restored.attach[0];
@@ -937,7 +1192,7 @@ mod tests {
 
     #[test]
     fn restore_adopts_live_panes_missing_from_the_layout_most_recent_last() {
-        let restored = restore(None, "i", &[info(5, "a", 9), info(4, "b", 2)], &launch());
+        let restored = restore(None, "i", &[info(5, "a", 9), info(4, "b", 2)], &launch(), true);
         let ws = &restored.workspace;
         assert_eq!(restored.attach.iter().map(|(_, pane)| *pane).collect::<Vec<_>>(), vec![4, 5]);
         assert_eq!(ws.leaves[&ws.focused().unwrap()].pane, Some(5));
@@ -950,10 +1205,192 @@ mod tests {
         let mut saved = Workspace::default();
         saved.new_tab(shell("/a"));
         let launch = Launch { explicit: Some(PaneLaunch::claude("/x".into())), default: shell("/home") };
-        let restored = restore(Some(saved), "i", &[], &launch);
+        let restored = restore(Some(saved), "i", &[], &launch, true);
         let focused = restored.workspace.focused().unwrap();
         assert_eq!(restored.spawn, vec![focused]);
         assert!(restored.workspace.leaves[&focused].launch.is_claude());
         assert_eq!(restored.workspace.tabs.len(), 2);
+    }
+
+    fn two_dirs_settings() -> Settings {
+        use crate::settings::ClaudeDir;
+        Settings {
+            claude_dirs: vec![
+            ClaudeDir { name: "Personal".into(), path: "~/.claude".into(), command: "claude".into(), args: vec![] },
+            ClaudeDir { name: "Work".into(), path: "~/.claude-work".into(), command: "claude-w".into(), args: vec!["--model".into(), "opus".into()] },
+        ],
+            ..Settings::default()
+        }
+    }
+
+    fn two_dirs() -> ClaudeDirs {
+        ClaudeDirs::from_settings(&two_dirs_settings(), Some(Path::new("/home/me/.claude")), Some(Path::new("/home/me")))
+    }
+
+    #[test]
+    fn implicit_default_when_no_dirs() {
+        let dirs = ClaudeDirs::from_settings(&Settings::default(), Some(Path::new("/d/.claude")), Some(Path::new("/d")));
+        assert_eq!(dirs.dirs, vec![ResolvedDir { name: "Default".into(), path: "/d/.claude".into(), command: "claude".into(), args: vec![] }]);
+        let launch = PaneLaunch::claude_with("/r".into(), &dirs.dirs[0], Some(Path::new("/d/.claude")), None);
+        assert_eq!((launch.program.as_str(), launch.env.is_empty(), launch.claude_dir), ("claude", true, None));
+    }
+
+    #[test]
+    fn resolution_pick_then_memory_then_default() {
+        let mut settings = two_dirs_settings();
+        settings.default_claude_dir = Some("Work".into());
+        let dirs = ClaudeDirs::from_settings(&settings, None, Some(Path::new("/home/me")));
+        assert_eq!(dirs.dirs[1].path, PathBuf::from("/home/me/.claude-work"));
+        let memory = BTreeMap::from([(PathBuf::from("/r/a"), "Personal".to_string())]);
+        assert_eq!(dirs.for_folder(Path::new("/r/b"), None, &memory).name, "Work");
+        assert_eq!(dirs.for_folder(Path::new("/r/a"), None, &memory).name, "Personal");
+        assert_eq!(dirs.for_folder(Path::new("/r/a"), Some("Work"), &memory).name, "Work");
+    }
+
+    #[test]
+    fn memory_is_exact_folder_not_parent() {
+        let dirs = two_dirs();
+        let memory = BTreeMap::from([(PathBuf::from("/r/a"), "Work".to_string())]);
+        assert_eq!(dirs.for_folder(Path::new("/r/a/sub"), None, &memory).name, "Personal");
+    }
+
+    #[test]
+    fn memory_for_unknown_dir_uses_default() {
+        let dirs = two_dirs();
+        let memory = BTreeMap::from([(PathBuf::from("/r/a"), "Gone".to_string())]);
+        assert_eq!(dirs.for_folder(Path::new("/r/a"), None, &memory).name, "Personal");
+        assert_eq!(dirs.for_folder(Path::new("/r/a"), Some("Nope"), &memory).name, "Personal");
+    }
+
+    #[test]
+    fn claude_with_sets_env_only_for_non_daemon_dir() {
+        let dirs = two_dirs();
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let own = PaneLaunch::claude_with("/r".into(), &dirs.dirs[0], daemon, None);
+        assert_eq!((own.env.is_empty(), own.claude_dir.clone(), own.claude), (true, None, true));
+        let work = PaneLaunch::claude_with("/r".into(), &dirs.dirs[1], daemon, None);
+        assert_eq!(work.program, "claude-w");
+        assert_eq!(&work.args[..2], ["--model", "opus"]);
+        assert_eq!(work.args[2], "--session-id");
+        assert_eq!(work.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
+        assert_eq!(work.claude_dir, Some(PathBuf::from("/home/me/.claude-work")));
+        assert!(work.session().is_some(), "the wrapper program is still tracked");
+    }
+
+    #[test]
+    fn container_launch_keeps_claude_and_dir_args() {
+        let dirs = two_dirs();
+        let launch = PaneLaunch::claude_with("/r".into(), &dirs.dirs[1], Some(Path::new("/home/me/.claude")), Some("/r".into()));
+        assert_eq!((launch.program.as_str(), launch.container.clone(), launch.env.is_empty(), launch.claude_dir.clone()), ("claude", Some(PathBuf::from("/r")), true, None));
+        assert_eq!(&launch.args[..2], ["--model", "opus"]);
+    }
+
+    #[test]
+    fn resume_uses_session_dir_command() {
+        let dirs = two_dirs();
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let launch = PaneLaunch::resume_with("s1", "/r".into(), None, Some(Path::new("/home/me/.claude-work")), &dirs, daemon);
+        assert_eq!(launch.program, "claude-w");
+        assert_eq!(launch.args, ["--model", "opus", "--resume", "s1"]);
+        assert_eq!(launch.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
+        let default = PaneLaunch::resume_with("s1", "/r".into(), None, Some(Path::new("/home/me/.claude")), &dirs, daemon);
+        assert_eq!((default.program.as_str(), default.env.is_empty()), ("claude", true));
+    }
+
+    #[test]
+    fn resume_unconfigured_dir_keeps_its_path() {
+        let dirs = two_dirs();
+        let launch = PaneLaunch::resume_with("s1", "/r".into(), None, Some(Path::new("/old/.claude-removed")), &dirs, Some(Path::new("/home/me/.claude")));
+        assert_eq!((launch.program.as_str(), launch.args.clone()), ("claude", vec!["--resume".to_string(), "s1".to_string()]));
+        assert_eq!(launch.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/old/.claude-removed".to_string())]);
+    }
+
+    #[test]
+    fn old_layout_claude_flag_falls_back_to_name() {
+        let json = r#"{"program":"claude","args":["--resume","s"],"cwd":"/r"}"#;
+        let launch: PaneLaunch = serde_json::from_str(json).unwrap();
+        assert!(!launch.claude && launch.is_claude());
+        assert_eq!(launch.session(), Some("s"));
+        let wrapper: PaneLaunch = serde_json::from_str(r#"{"program":"claude-w","args":["--resume","s"],"cwd":"/r","claude":true}"#).unwrap();
+        assert_eq!(wrapper.session(), Some("s"));
+        let other: PaneLaunch = serde_json::from_str(r#"{"program":"claude-w","args":["--resume","s"],"cwd":"/r"}"#).unwrap();
+        assert_eq!(other.session(), None);
+    }
+
+    #[test]
+    fn shell_launch_program_and_args() {
+        let launch = PaneLaunch::shell("/r".into(), &ShellSettings { program: "/bin/zsh".into(), args: vec!["-l".into()] });
+        assert_eq!((launch.program.as_str(), launch.args.clone(), launch.is_claude()), ("/bin/zsh", vec!["-l".to_string()], false));
+        let default = PaneLaunch::shell("/r".into(), &ShellSettings::default());
+        assert_eq!(default.program, "");
+        assert_eq!(default.label(), "shell · r");
+    }
+
+    #[test]
+    fn restore_without_layout_drops_dead_leaves_keeps_live() {
+        let mut saved = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let a = saved.new_tab(shell("/a"));
+        saved.pane_started(a, 1, "/a".into());
+        let b = saved.split(Axis::Vertical, shell("/b")).unwrap();
+        saved.pane_started(b, 2, "/b".into());
+        let c = saved.new_tab(shell("/c"));
+        saved.pane_started(c, 3, "/c".into());
+        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false);
+        assert_eq!(restored.attach, vec![(a, 1)]);
+        assert_eq!(restored.workspace.leaves.keys().copied().collect::<Vec<_>>(), vec![a]);
+        assert_eq!(restored.workspace.tabs.len(), 1);
+        assert!(restored.spawn.is_empty() && restored.workspace.is_consistent());
+        let none = restore(Some(Workspace { instance: "i1".into(), ..Workspace::default() }), "i1", &[], &launch(), false);
+        assert_eq!(none.spawn.len(), 1, "no tab left: one new tab");
+    }
+
+    #[test]
+    fn restore_without_layout_keeps_dead_leaves_for_saving_and_live_launches() {
+        let mut saved = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let a = saved.new_tab(PaneLaunch { claude_dir: Some("/w".into()), env: vec![("CLAUDE_CONFIG_DIR".into(), "/w".into())], ..shell("/a") });
+        saved.pane_started(a, 1, "/a".into());
+        let b = saved.split(Axis::Vertical, shell("/b")).unwrap();
+        saved.pane_started(b, 2, "/b".into());
+        let c = saved.new_tab(shell("/c"));
+        saved.pane_started(c, 3, "/c".into());
+        let d = saved.split(Axis::Vertical, shell("/d")).unwrap();
+        saved.pane_started(d, 4, "/d".into());
+        saved.sidebar.visible = false;
+        let mut restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false).workspace;
+        restored.sidebar.width = 300.0;
+        let kept = restored.saveable();
+        assert!(kept.is_consistent());
+        assert_eq!(kept.leaves.keys().copied().collect::<Vec<_>>(), vec![a, b, c, d]);
+        assert_eq!(kept.tabs.len(), 3, "the live tab, the dead leaf of the mixed tab, the dead split tab");
+        assert_eq!(kept.tabs[2].root.leaves(), vec![c, d]);
+        assert_eq!((kept.leaves[&a].launch.claude_dir.clone(), kept.leaves[&a].launch.env.len()), (Some("/w".into()), 1));
+        assert_eq!((kept.sidebar.visible, kept.sidebar.width), (false, 300.0));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("layout.json");
+        crate::layout_store::save(&file, &restored).unwrap();
+        let back = restore(crate::layout_store::load(&file).unwrap(), "i1", &[info(1, "bash", 5)], &launch(), true);
+        assert_eq!(back.workspace.leaves.len(), 4, "switching back restores the finished leaves");
+        assert!(!back.workspace.sidebar.visible);
+        assert_eq!(restored.leaves.len(), 1, "the running workspace only has the live leaf");
+    }
+
+    #[test]
+    fn rerun_keeps_dir_and_env() {
+        let dirs = two_dirs();
+        let launch = PaneLaunch::claude_with("/r".into(), &dirs.dirs[1], Some(Path::new("/home/me/.claude")), None);
+        let mut leaf = Leaf::new(launch.clone());
+        leaf.session = Some("sid".into());
+        let rerun = leaf.rerun(true);
+        assert_eq!(rerun.args, ["--model", "opus", "--resume", "sid"]);
+        assert_eq!((rerun.program, rerun.env, rerun.claude_dir, rerun.claude), (launch.program, launch.env, launch.claude_dir, true));
+        assert_eq!(leaf.rerun(false).args, ["--model", "opus", "--session-id", "sid"]);
+    }
+
+    #[test]
+    fn requests_carry_flag_env_and_scrollback() {
+        let dirs = two_dirs();
+        let launch = PaneLaunch::claude_with("/r".into(), &dirs.dirs[1], None, None);
+        let request = launch.request(None, 80, 24, 2_000);
+        assert_eq!((request.claude, request.scrollback, request.env.len()), (true, Some(2_000), 1));
     }
 }

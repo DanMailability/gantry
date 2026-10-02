@@ -130,8 +130,13 @@ fn mirrored(ch: char) -> char {
 
 /// Rearrange `snapshot` into display order and return each row's order, for mapping mouse positions back.
 ///
-/// The cursor moves with its cell and shows that cell's displayed (possibly mirrored) character.
-pub fn to_display(snapshot: &mut ScreenSnapshot) -> Vec<Option<RowOrder>> {
+/// The cursor moves with its cell and shows that cell's displayed (possibly mirrored) character. With
+/// `right_to_left` off nothing moves: every row stays in logical order (no [`RowOrder`], so column maps are the
+/// identity).
+pub fn to_display(snapshot: &mut ScreenSnapshot, right_to_left: bool) -> Vec<Option<RowOrder>> {
+    if !right_to_left {
+        return vec![None; snapshot.rows.len()];
+    }
     let orders: Vec<Option<RowOrder>> = snapshot.rows.iter().map(|row| row_order(row)).collect();
     for (row, order) in snapshot.rows.iter_mut().zip(&orders) {
         if let Some(order) = order {
@@ -266,7 +271,7 @@ mod tests {
         let mut term = TermState::new(12, 2);
         term.feed("hello\r\nשלום עולם".as_bytes());
         let mut snapshot = term.snapshot();
-        let orders = to_display(&mut snapshot);
+        let orders = to_display(&mut snapshot, true);
         assert_eq!(orders.len(), 2);
         assert!(orders[0].is_none());
         assert_eq!(displayed(&snapshot, 0), "hello       ");
@@ -278,14 +283,14 @@ mod tests {
         let mut term = TermState::new(8, 1);
         term.feed("שלום".as_bytes());
         let mut snapshot = term.snapshot();
-        to_display(&mut snapshot);
+        to_display(&mut snapshot, true);
         let cursor = snapshot.cursor.expect("cursor is visible");
         assert_eq!((cursor.col, cursor.ch), (3, ' '));
 
         let mut term = TermState::new(8, 1);
         term.feed("(שלום)\r".as_bytes());
         let mut snapshot = term.snapshot();
-        to_display(&mut snapshot);
+        to_display(&mut snapshot, true);
         let cursor = snapshot.cursor.unwrap();
         // The cursor is on logical column 0, '(' — displayed at the right edge, mirrored.
         assert_eq!((cursor.col, cursor.ch), (7, ')'));
@@ -296,7 +301,7 @@ mod tests {
         let mut term = TermState::new(12, 1);
         term.feed("שלום עולם".as_bytes());
         let mut snapshot = term.snapshot();
-        let orders = to_display(&mut snapshot);
+        let orders = to_display(&mut snapshot, true);
         // "םולש" is displayed in columns 8..=11: press on the right half of 11, release on the left half of 8.
         let (col, right_half) = logical_hit(&orders, 11, 0, true);
         term.start_selection(col as u16, 0, right_half);
@@ -310,5 +315,20 @@ mod tests {
         let orders = vec![None];
         assert_eq!(logical_hit(&orders, 5, 0, true), (5, true));
         assert_eq!(logical_hit(&orders, 5, 3, false), (5, false));
+    }
+
+    #[test]
+    fn with_right_to_left_off_text_stays_in_logical_order() {
+        let mut term = TermState::new(12, 2);
+        term.feed("(שלום)\r\nשלום עולם".as_bytes());
+        let mut snapshot = term.snapshot();
+        let before = snapshot.rows.clone();
+        let orders = to_display(&mut snapshot, false);
+        assert_eq!(orders.len(), 2);
+        assert!(orders.iter().all(Option::is_none));
+        assert_eq!(snapshot.rows, before);
+        assert_eq!(displayed(&snapshot, 1), "שלום עולם   ");
+        assert_eq!(logical_hit(&orders, 5, 1, true), (5, true), "the column map is the identity");
+        assert_eq!((snapshot.cursor.as_ref().unwrap().col, snapshot.cursor.as_ref().unwrap().ch), (9, ' '), "the cursor stays on its logical column");
     }
 }

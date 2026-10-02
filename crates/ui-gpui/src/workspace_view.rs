@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -11,17 +11,18 @@ use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, terminal_palette};
-use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
+use app_core::workspace::{ClaudeDirs, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
-use daemon::pty::default_shell;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     PathPromptOptions, Point, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
 use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
-use app_core::menus::{self, MenuAction, MenuEntry, MenuItem, Shortcut};
+use app_core::settings::Settings;
+use app_core::shortcuts::{self, Platform};
+use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
@@ -29,10 +30,10 @@ use crate::context_menu::{self, OpenMenu};
 use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
-use crate::terminal_view::{PaneEvent, TerminalView};
-use crate::settings_store::SettingsStore;
+use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
+use crate::settings_store::{SettingsStore, dir_name};
 use crate::settings_view::SettingsView;
-use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, theme};
 use crate::window_frame;
 
 pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
@@ -60,52 +61,53 @@ mod workspace_actions {
 }
 use workspace_actions::*;
 
-/// Register workspace shortcuts: `Ctrl+Shift+…` on Linux/Windows, `Cmd+…` on macOS.
-pub fn bind_keys(cx: &mut gpui::App) {
-    cx.bind_keys(key_bindings());
+/// Every key binding: the workspace and terminal actions at their resolved keystrokes (defaults, the user's overrides
+/// from `settings.json`, `null` = none). The text fields and menus handle their keys themselves, so nothing else is bound.
+pub(crate) fn all_bindings(settings: &Settings, platform: Platform) -> Vec<gpui::KeyBinding> {
+    shortcuts::bindings(&settings.shortcuts, platform)
+        .into_iter()
+        .filter_map(|(id, key)| workspace_binding(id, &key).or_else(|| terminal_binding(id, &key)))
+        .collect()
 }
 
-fn key_bindings() -> Vec<gpui::KeyBinding> {
+fn workspace_binding(id: &str, key: &str) -> Option<gpui::KeyBinding> {
     use gpui::KeyBinding;
-    #[cfg(target_os = "macos")]
-    let (m, prev_tab, next_tab, tab_n, settings_key) = ("cmd", "cmd-shift-[", "cmd-shift-]", "cmd", "cmd-,");
-    #[cfg(not(target_os = "macos"))]
-    let (m, prev_tab, next_tab, tab_n, settings_key) = ("ctrl-shift", "ctrl-pageup", "ctrl-pagedown", "alt", "ctrl-,");
     let context = Some("Workspace");
-    vec![
-        KeyBinding::new(&format!("{m}-t"), NewClaudeTab, context),
-        KeyBinding::new(&format!("{m}-alt-t"), NewShellTab, context),
-        KeyBinding::new(&format!("{m}-d"), SplitRightClaude, context),
-        KeyBinding::new(&format!("{m}-alt-d"), SplitRightShell, context),
-        KeyBinding::new(&format!("{m}-e"), SplitDownClaude, context),
-        KeyBinding::new(&format!("{m}-alt-e"), SplitDownShell, context),
-        KeyBinding::new(&format!("{m}-w"), ClosePane, context),
-        KeyBinding::new(&format!("{m}-left"), FocusLeft, context),
-        KeyBinding::new(&format!("{m}-right"), FocusRight, context),
-        KeyBinding::new(&format!("{m}-up"), FocusUp, context),
-        KeyBinding::new(&format!("{m}-down"), FocusDown, context),
-        KeyBinding::new(prev_tab, PreviousTab, context),
-        KeyBinding::new(next_tab, NextTab, context),
-        // Every platform, alongside the platform's own tab keys.
-        KeyBinding::new("ctrl-tab", NextTab, context),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, context),
-        KeyBinding::new(&format!("{m}-pageup"), MoveTabLeft, context),
-        KeyBinding::new(&format!("{m}-pagedown"), MoveTabRight, context),
-        KeyBinding::new(&format!("{tab_n}-1"), ActivateTab1, context),
-        KeyBinding::new(&format!("{tab_n}-2"), ActivateTab2, context),
-        KeyBinding::new(&format!("{tab_n}-3"), ActivateTab3, context),
-        KeyBinding::new(&format!("{tab_n}-4"), ActivateTab4, context),
-        KeyBinding::new(&format!("{tab_n}-5"), ActivateTab5, context),
-        KeyBinding::new(&format!("{tab_n}-6"), ActivateTab6, context),
-        KeyBinding::new(&format!("{tab_n}-7"), ActivateTab7, context),
-        KeyBinding::new(&format!("{tab_n}-8"), ActivateTab8, context),
-        KeyBinding::new(&format!("{tab_n}-9"), ActivateTab9, context),
-        KeyBinding::new(&format!("{m}-b"), ToggleSidebar, context),
-        KeyBinding::new(&format!("{m}-f"), FindSession, context),
-        KeyBinding::new(&format!("{m}-o"), OpenLauncher, context),
-        KeyBinding::new(&format!("{m}-r"), OpenRecents, context),
-        KeyBinding::new(settings_key, OpenSettings, context),
-    ]
+    Some(match id {
+        "newClaudeTab" => KeyBinding::new(key, NewClaudeTab, context),
+        "newShellTab" => KeyBinding::new(key, NewShellTab, context),
+        "nextTab" => KeyBinding::new(key, NextTab, context),
+        "previousTab" => KeyBinding::new(key, PreviousTab, context),
+        "moveTabLeft" => KeyBinding::new(key, MoveTabLeft, context),
+        "moveTabRight" => KeyBinding::new(key, MoveTabRight, context),
+        shortcuts::GO_TO_TAB => match key.rsplit('-').next()?.parse::<u8>().ok()? {
+            1 => KeyBinding::new(key, ActivateTab1, context),
+            2 => KeyBinding::new(key, ActivateTab2, context),
+            3 => KeyBinding::new(key, ActivateTab3, context),
+            4 => KeyBinding::new(key, ActivateTab4, context),
+            5 => KeyBinding::new(key, ActivateTab5, context),
+            6 => KeyBinding::new(key, ActivateTab6, context),
+            7 => KeyBinding::new(key, ActivateTab7, context),
+            8 => KeyBinding::new(key, ActivateTab8, context),
+            9 => KeyBinding::new(key, ActivateTab9, context),
+            _ => return None,
+        },
+        "splitRightClaude" => KeyBinding::new(key, SplitRightClaude, context),
+        "splitRightShell" => KeyBinding::new(key, SplitRightShell, context),
+        "splitDownClaude" => KeyBinding::new(key, SplitDownClaude, context),
+        "splitDownShell" => KeyBinding::new(key, SplitDownShell, context),
+        "closePane" => KeyBinding::new(key, ClosePane, context),
+        "focusLeft" => KeyBinding::new(key, FocusLeft, context),
+        "focusRight" => KeyBinding::new(key, FocusRight, context),
+        "focusUp" => KeyBinding::new(key, FocusUp, context),
+        "focusDown" => KeyBinding::new(key, FocusDown, context),
+        "openLauncher" => KeyBinding::new(key, OpenLauncher, context),
+        "findSession" => KeyBinding::new(key, FindSession, context),
+        "openRecents" => KeyBinding::new(key, OpenRecents, context),
+        "toggleSidebar" => KeyBinding::new(key, ToggleSidebar, context),
+        "openSettings" => KeyBinding::new(key, OpenSettings, context),
+        _ => return None,
+    })
 }
 
 struct Slot {
@@ -131,10 +133,15 @@ enum TakeOverTarget {
 /// A new session waiting to learn whether a dev container mounts its directory.
 struct PendingOpen {
     claude: bool,
+    /// The config dir chosen for this one launch (launcher chip or menu), by name.
+    pick: Option<String>,
     cwd: PathBuf,
     axis: Option<Axis>,
     cwd_from: Option<PaneId>,
 }
+
+/// What the tab bar draws for a tab: title, status, unseen alert, in a container, config dir name, is the Settings tab.
+type TabView = (String, Option<SessionStatus>, bool, bool, Option<String>, bool);
 
 /// Root view of the Gantry window.
 pub struct WorkspaceView {
@@ -146,6 +153,12 @@ pub struct WorkspaceView {
     client: DaemonClient,
     layout_file: PathBuf,
     default_cwd: PathBuf,
+    /// The daemon's own Claude config dir (its panes need no `CLAUDE_CONFIG_DIR`).
+    daemon_dir: Option<PathBuf>,
+    /// The Claude config dirs in effect, from the settings.
+    dirs: ClaudeDirs,
+    /// The paths last sent to the daemon with `SetClaudeDirs`.
+    sent_dirs: Option<Vec<PathBuf>>,
     focus_handle: FocusHandle,
     prompting: Rc<Cell<bool>>,
     /// Divider being dragged.
@@ -195,7 +208,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let Connection { client, events, .. } = connection;
+        let Connection { client, events, claude_dir: daemon_dir, .. } = connection;
         let events_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 let batch = batch_events(first, &events, MAX_BATCH_BYTES);
@@ -237,6 +250,9 @@ impl WorkspaceView {
             client,
             layout_file,
             default_cwd,
+            dirs: ClaudeDirs::from_settings(cx.global::<SettingsStore>().settings(), daemon_dir.as_deref(), std::env::home_dir().as_deref()),
+            daemon_dir,
+            sent_dirs: None,
             focus_handle: cx.focus_handle(),
             prompting: Rc::new(Cell::new(false)),
             dragging: None,
@@ -296,6 +312,13 @@ impl WorkspaceView {
             self.client.set_palette(PaletteColors::from(terminal_palette(preset)));
             self.sent_palette = Some(preset);
         }
+        let settings = cx.global::<SettingsStore>().settings();
+        self.dirs = ClaudeDirs::from_settings(settings, self.daemon_dir.as_deref(), std::env::home_dir().as_deref());
+        let configured: Vec<PathBuf> = if settings.claude_dirs.is_empty() { Vec::new() } else { self.dirs.dirs.iter().map(|dir| dir.path.clone()).collect() };
+        if self.sent_dirs.as_ref() != Some(&configured) {
+            self.client.set_claude_dirs(configured.clone());
+            self.sent_dirs = Some(configured);
+        }
         let seconds = cx.global::<SettingsStore>().settings().alerts.finished_after_seconds;
         self.attention.set_finished_after_ms(u64::from(seconds) * 1000);
         cx.notify();
@@ -312,9 +335,10 @@ impl WorkspaceView {
     fn spawn_leaf(&mut self, leaf: NodeId, cwd_from: Option<PaneId>, cx: &mut Context<Self>) {
         let Some(slot) = self.slots.get(&leaf) else { return };
         let (cols, rows) = slot.view.read(cx).grid_size();
+        let scrollback = cx.global::<SettingsStore>().settings().window.scrollback;
         self.next_request += 1;
         self.pending.insert(self.next_request, leaf);
-        self.client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows));
+        self.client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
     }
 
     fn on_events(&mut self, events: Vec<ClientEvent>, window: &mut Window, cx: &mut Context<Self>) {
@@ -436,6 +460,17 @@ impl WorkspaceView {
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, cx));
     }
 
+    /// The name of the Claude config dir `leaf` runs in, when two or more are configured.
+    fn leaf_dir_name(&self, leaf: NodeId, cx: &App) -> Option<String> {
+        let entry = self.workspace.leaves.get(&leaf)?;
+        if !entry.launch.is_claude() || entry.launch.container.is_some() {
+            return None;
+        }
+        let recorded = entry.session.as_deref().and_then(|id| self.sidebar.read(cx).sessions().get(id)).and_then(|info| info.claude_dir.clone());
+        let path = recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone());
+        dir_name(cx.global::<SettingsStore>().settings(), path.as_deref())
+    }
+
     /// Start `launch` in the finished `leaf`.
     fn start_leaf(&mut self, leaf: NodeId, launch: PaneLaunch, cx: &mut Context<Self>) {
         let Some(slot) = self.slots.get(&leaf) else { return };
@@ -452,7 +487,7 @@ impl WorkspaceView {
     fn rerun_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
         let session = entry.session.clone();
-        match entry.rerun_with(self.sidebar.read(cx).sessions()) {
+        match entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref()) {
             Rerun::Start(launch) => self.start_leaf(leaf, launch, cx),
             Rerun::Focus(pane) => {
                 if let Some(running) = self.workspace.leaf_for_pane(pane) {
@@ -499,10 +534,13 @@ impl WorkspaceView {
             TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
                 Some(TakeOverTarget::NewPane { cwd, split, container }) => {
                     let axis = split.then_some(Axis::Horizontal);
-                    self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
+                    let launch = self.resume_launch(&session, cwd, container, cx);
+                    self.open_launch(launch, axis, None, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
-                    if let Some(launch) = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun(true)) {
+                    let session_dir = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.claude_dir.clone());
+                    let launch = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun_resolved(true, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref()));
+                    if let Some(launch) = launch {
                         self.start_leaf(leaf, launch, cx);
                         self.focus_leaf(leaf, window, cx);
                     }
@@ -564,7 +602,7 @@ impl WorkspaceView {
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.pane);
-        self.open_new(claude, cwd, axis, cwd_from);
+        self.open_new(claude, cwd, axis, cwd_from, None);
     }
 
     /// The Settings tab is the active one (it has no pane to split).
@@ -573,17 +611,56 @@ impl WorkspaceView {
     }
 
     /// Start a new Claude or shell pane in `cwd` — after asking where, when a dev container mounts `cwd`.
-    fn open_new(&mut self, claude: bool, cwd: PathBuf, axis: Option<Axis>, cwd_from: Option<PaneId>) {
+    fn open_new(&mut self, claude: bool, cwd: PathBuf, axis: Option<Axis>, cwd_from: Option<PaneId>, pick: Option<String>) {
         self.next_request += 1;
         self.client.find_container(self.next_request, &cwd);
-        self.pending_opens.insert(self.next_request, PendingOpen { claude, cwd, axis, cwd_from });
+        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from });
+    }
+
+    /// Start a new Claude session (or shell) in `cwd`: Claude with the config dir `pick` names, else the one remembered
+    /// for exactly this folder, else the default.
+    fn new_launch(&self, claude: bool, cwd: PathBuf, pick: Option<&str>, container: Option<PathBuf>, cx: &App) -> PaneLaunch {
+        let settings = cx.global::<SettingsStore>().settings();
+        if !claude {
+            return PaneLaunch::shell(cwd, &settings.shell).in_container(container);
+        }
+        let dir = self.dirs.for_folder(&cwd, pick, &settings.folder_claude_dirs);
+        PaneLaunch::claude_with(cwd, dir, self.daemon_dir.as_deref(), container)
+    }
+
+    /// Resume `session` where it ran: with the command and config dir recorded for it.
+    fn resume_launch(&self, session: &str, cwd: PathBuf, container: Option<PathBuf>, cx: &App) -> PaneLaunch {
+        let session_dir = self.sidebar.read(cx).sessions().get(session).and_then(|info| info.claude_dir.clone());
+        PaneLaunch::resume_with(session, cwd, container, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
+    }
+
+    /// A new session from the launcher; an explicit config dir pick is remembered for the folder.
+    fn open_launcher_pick(&mut self, claude: bool, dir: PathBuf, dir_pick: Option<String>, cx: &mut Context<Self>) {
+        if let Some(name) = &dir_pick {
+            self.remember_pick(&dir, name, cx);
+        }
+        self.open_new(claude, dir, None, None, dir_pick);
+    }
+
+    /// An explicit pick of a config dir for `folder` is remembered for it; picking the default forgets it.
+    fn remember_pick(&self, folder: &Path, name: &str, cx: &mut App) {
+        let is_default = self.dirs.dirs.get(self.dirs.default).is_some_and(|dir| dir.name == name);
+        let (folder, name) = (folder.to_path_buf(), name.to_string());
+        SettingsStore::update(cx, move |settings| {
+            if is_default {
+                settings.folder_claude_dirs.remove(&folder);
+            } else {
+                settings.folder_claude_dirs.insert(folder, name);
+            }
+        });
     }
 
     /// The daemon said which dev container (if any) mounts a waiting session's directory: open it locally, or ask.
     fn on_container_found(&mut self, request: u64, container: Option<ContainerChoice>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(PendingOpen { claude, cwd, axis, cwd_from }) = self.pending_opens.remove(&request) else { return };
+        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from }) = self.pending_opens.remove(&request) else { return };
         let Some(container) = container else {
-            self.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx);
+            let launch = self.new_launch(claude, cwd, pick.as_deref(), None, cx);
+            self.open_launch(launch, axis, cwd_from, window, cx);
             return;
         };
         let folder = &container.host_folder;
@@ -600,9 +677,15 @@ impl WorkspaceView {
         cx.spawn_in(window, async move |this, cx| {
             let answer = answer.await;
             let _ = this.update_in(cx, |this, window, cx| match answer {
-                // Splits of a container pane start in the session's directory, not the docker client's.
-                Ok(0) => this.open_launch(new_launch(claude, cwd).in_container(Some(container.host_folder)), axis, None, window, cx),
-                Ok(1) => this.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx),
+                Ok(0) => {
+                    // Splits of a container pane start in the session's directory, not the docker client's.
+                    let launch = this.new_launch(claude, cwd, pick.as_deref(), Some(container.host_folder), cx);
+                    this.open_launch(launch, axis, None, window, cx)
+                }
+                Ok(1) => {
+                    let launch = this.new_launch(claude, cwd, pick.as_deref(), None, cx);
+                    this.open_launch(launch, axis, cwd_from, window, cx)
+                }
                 _ => this.focus_current(window, cx),
             });
         })
@@ -690,7 +773,8 @@ impl WorkspaceView {
         self.clear_seen(window, cx);
     }
 
-    /// Write the layout (atomically) and refresh the sidebar's pane entries.
+    /// Write the layout (atomically) and refresh the sidebar's pane entries. With "Start with one new tab" the
+    /// finished leaves dropped at startup are written back too, so switching back restores them.
     fn save(&self, cx: &mut Context<Self>) {
         if let Err(err) = layout_store::save(&self.layout_file, &self.workspace) {
             tracing::warn!("saving the layout failed: {err}");
@@ -768,7 +852,17 @@ impl WorkspaceView {
                     None => {}
                 }
             }
-            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
+            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, None),
+            MenuAction::NewClaudeWith { dir, dir_name } => {
+                self.remember_pick(&dir, &dir_name, cx);
+                self.open_new(true, dir, None, None, Some(dir_name));
+            }
+            MenuAction::PinFavorite(dir) => SettingsStore::update(cx, |settings| {
+                if !settings.favorites.contains(&dir) {
+                    settings.favorites.push(dir);
+                }
+            }),
+            MenuAction::UnpinFavorite(dir) => SettingsStore::update(cx, |settings| settings.favorites.retain(|favorite| *favorite != dir)),
             MenuAction::RecentsFor(project) => self.show_recents(Some(project), window, cx),
             MenuAction::Continue(leaf) => {
                 self.focus_leaf(leaf, window, cx);
@@ -812,17 +906,22 @@ impl WorkspaceView {
     fn open_tab_menu(&mut self, index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.workspace.tabs.get(index) else { return };
         let items = if tab.settings {
-            vec![MenuItem::Entry(MenuEntry { label: "Close tab", shortcut: Some(Shortcut::Close), accent: false, action: MenuAction::CloseTab(index) })]
+            vec![MenuItem::Entry(MenuEntry { label: "Close tab".into(), shortcut: Some(Shortcut::Close), accent: false, action: MenuAction::CloseTab(index) })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
             let sessions = self.sidebar.read(cx).sessions();
             let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
             let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
-            menus::tab_menu(index, &leaf.launch.cwd, vscode)
+            let context = if leaf.launch.container.is_some() {
+                MenuContext::default()
+            } else {
+                MenuContext::for_folder(cx.global::<SettingsStore>().settings(), &leaf.launch.cwd)
+            };
+            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context)
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        self.tab_menu = Some(OpenMenu { items, position, focus });
+        self.tab_menu = Some(OpenMenu::new(items, position, focus));
         cx.notify();
     }
 
@@ -876,7 +975,8 @@ impl WorkspaceView {
                     Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
                     place => {
                         let container = place.and_then(|place| place.host_folder);
-                        self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
+                        let launch = self.resume_launch(&session, cwd, container, cx);
+                    self.open_launch(launch, axis, None, window, cx);
                     }
                 }
             }
@@ -957,8 +1057,8 @@ impl WorkspaceView {
     fn on_launcher_event(&mut self, event: LauncherEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.launcher = None;
         match event {
-            LauncherEvent::Open { dir, claude } => self.open_new(claude, dir, None, None),
-            LauncherEvent::Browse { claude } => {
+            LauncherEvent::Open { dir, claude, dir_pick } => self.open_launcher_pick(claude, dir, dir_pick, cx),
+            LauncherEvent::Browse { claude, dir_pick } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
                 cx.spawn_in(window, async move |this, cx| {
                     let dir = match picked.await {
@@ -966,7 +1066,7 @@ impl WorkspaceView {
                         _ => None,
                     };
                     let _ = this.update_in(cx, |this, window, cx| match dir {
-                        Some(dir) => this.open_new(claude, dir, None, None),
+                        Some(dir) => this.open_launcher_pick(claude, dir, dir_pick, cx),
                         None => this.focus_current(window, cx),
                     });
                 })
@@ -1096,7 +1196,7 @@ impl WorkspaceView {
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace.open_settings();
         if self.settings.is_none() {
-            self.settings = Some(cx.new(|cx| SettingsView::new(window, cx)));
+            self.settings = Some(cx.new(|cx| SettingsView::new(self.daemon_dir.clone(), window, cx)));
         }
         self.focus_current(window, cx);
         self.save(cx);
@@ -1174,7 +1274,7 @@ impl WorkspaceView {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let theme = theme(cx).clone();
         let sessions = self.sidebar.read(cx).sessions();
-        let tabs: Vec<(String, Option<SessionStatus>, bool, bool, bool)> = self
+        let tabs: Vec<TabView> = self
             .workspace
             .tabs
             .iter()
@@ -1184,7 +1284,8 @@ impl WorkspaceView {
                 let status = self.workspace.tab_status(index, sessions).cloned();
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
                 let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
-                (title, status, unseen, container, tab.settings)
+                let dir = self.leaf_dir_name(tab.focused, cx);
+                (title, status, unseen, container, dir, tab.settings)
             })
             .collect();
         let sidebar = &self.workspace.sidebar;
@@ -1219,7 +1320,9 @@ impl WorkspaceView {
                     bar.pl_2()
                 }
             })
-            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, settings))| {
+            // The tabs scroll sideways when even their narrowest widths don't fit, so the buttons and window
+            // controls after them stay visible.
+            .child(div().id("tabs").min_w_0().flex_shrink(1.).h_full().flex().flex_row().items_center().gap(theme.ui(6.)).overflow_x_scroll().children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings))| {
                 let dragged = DraggedTab { index, title: title.clone() };
                 let line = theme.tokens.line;
                 let active = index == self.workspace.active;
@@ -1233,9 +1336,10 @@ impl WorkspaceView {
                     .pl_3()
                     .pr_1()
                     .max_w(theme.ui(220.))
-                    // Tabs shrink (titles truncate) so the buttons and window controls stay visible.
-                    .min_w(theme.ui(56.))
+                    // Tabs shrink (titles truncate, tags clip away) down to what the dot, a short title and × need.
+                    .min_w(theme.ui(if colors.is_some() || settings { 96. } else { 80. }))
                     .flex_shrink(1.)
+                    .overflow_hidden()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1249,8 +1353,9 @@ impl WorkspaceView {
                     .cursor_pointer()
                     .when_some(colors, |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
                     .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
-                    .child(div().min_w_0().truncate().child(title))
+                    .child(div().min_w(theme.ui(24.)).truncate().child(title))
                     .when(container, |tab| tab.child(container_chip(ink)))
+                    .children(dir.map(|name| dir_chip(ink, name)))
                     .when(unseen, |tab| tab.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(ink))))
                     .child(
                         div()
@@ -1291,7 +1396,7 @@ impl WorkspaceView {
                             cx.stop_propagation();
                         }),
                     )
-            }))
+            })))
             .child(round_button("new-claude", "+", &theme, cx.listener(|this, _, _, _| this.open(true, None))))
             .child(round_button("open-settings", "⚙", &theme, cx.listener(|this, _, window, cx| this.open_settings(&OpenSettings, window, cx))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
@@ -1385,6 +1490,7 @@ impl WorkspaceView {
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen.contains_key(&leaf);
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
+                let dir = self.leaf_dir_name(leaf, cx);
                 Some(
                     div()
                         .absolute()
@@ -1404,7 +1510,7 @@ impl WorkspaceView {
                                 .bg(rgb(theme.tokens.terminal))
                                 .border_2()
                                 .border_color(rgb(if focused && multiple { theme.tokens.accent } else { theme.tokens.line }))
-                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, &theme)))
+                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, dir, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1443,7 +1549,7 @@ impl WorkspaceView {
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
-fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, theme: &Theme) -> impl IntoElement {
+fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, dir: Option<String>, theme: &Theme) -> impl IntoElement {
     let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
     let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
         Tone::NeedsInput => "Needs input",
@@ -1467,6 +1573,7 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
         .when_some(colors, |header, colors| header.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| header.child(container_chip(colors.map_or(theme.tokens.text, |colors| colors.ink))))
+        .children(dir.map(|name| dir_chip(colors.map_or(theme.tokens.text, |colors| colors.ink), name)))
         .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
 }
 
@@ -1503,11 +1610,6 @@ pub(crate) fn round_button(
         .cursor_pointer()
         .child(label)
         .on_click(on_click)
-}
-
-/// A new Claude session (or the user's shell) in `cwd`.
-pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
-    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd, container: None } }
 }
 
 impl Render for WorkspaceView {
@@ -1629,6 +1731,7 @@ impl Render for WorkspaceView {
                     "tab-menu",
                     menu,
                     &theme,
+                    cx.global::<SettingsStore>().settings(),
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))
@@ -1669,9 +1772,13 @@ mod tests {
     use gpui::Keystroke;
 
     fn action_for(keys: &str) -> Option<&'static str> {
+        action_in(&all_bindings(&Settings::default(), Platform::Linux), keys)
+    }
+
+    fn action_in(bindings: &[gpui::KeyBinding], keys: &str) -> Option<&'static str> {
         let keystroke = Keystroke::parse(keys).unwrap();
-        key_bindings()
-            .into_iter()
+        bindings
+            .iter()
             .find(|binding| binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false))
             .map(|binding| binding.action().name())
     }
@@ -1688,8 +1795,6 @@ mod tests {
             ("ctrl-shift-w", "workspace::ClosePane"),
             ("ctrl-shift-left", "workspace::FocusLeft"),
             ("ctrl-shift-down", "workspace::FocusDown"),
-            ("ctrl-pageup", "workspace::PreviousTab"),
-            ("ctrl-pagedown", "workspace::NextTab"),
             ("ctrl-tab", "workspace::NextTab"),
             ("ctrl-shift-tab", "workspace::PreviousTab"),
             ("ctrl-shift-pageup", "workspace::MoveTabLeft"),
@@ -1711,5 +1816,54 @@ mod tests {
         for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab", "tab"] {
             assert_eq!(action_for(keys), None, "{keys}");
         }
+    }
+
+    #[test]
+    fn ctrl_page_keys_no_longer_switch_tabs() {
+        assert_eq!(action_for("ctrl-pageup"), None);
+        assert_eq!(action_for("ctrl-pagedown"), None);
+    }
+
+    #[test]
+    fn no_default_binding_is_reserved() {
+        let bindings = shortcuts::bindings(&Default::default(), Platform::Linux);
+        for (id, key) in &bindings {
+            if *id == shortcuts::GO_TO_TAB || key == "ctrl-+" {
+                continue;
+            }
+            assert!(!matches!(shortcuts::check(key, id, &[]), shortcuts::Check::Reserved(_)), "{id} {key}");
+        }
+    }
+
+    #[test]
+    fn an_override_replaces_the_default_and_the_old_keystroke_is_gone() {
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("toggleSidebar".into(), Some("ctrl-alt-s".into()));
+        let bindings = all_bindings(&settings, Platform::Linux);
+        assert_eq!(action_in(&bindings, "ctrl-alt-s"), Some("workspace::ToggleSidebar"));
+        assert_eq!(action_in(&bindings, "ctrl-shift-b"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-f"), Some("workspace::FindSession"), "others keep theirs");
+    }
+
+    #[test]
+    fn null_removes_the_binding() {
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("closePane".into(), None);
+        settings.shortcuts.insert("copy".into(), None);
+        let bindings = all_bindings(&settings, Platform::Linux);
+        assert_eq!(action_in(&bindings, "ctrl-shift-w"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-c"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-v"), Some("terminal::Paste"));
+    }
+
+    #[test]
+    fn go_to_tab_follows_its_modifiers_and_terminal_actions_are_bound() {
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("goToTab".into(), Some("ctrl-alt".into()));
+        let bindings = all_bindings(&settings, Platform::Linux);
+        assert_eq!(action_in(&bindings, "ctrl-alt-4"), Some("workspace::ActivateTab4"));
+        assert_eq!(action_in(&bindings, "alt-4"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-c"), Some("terminal::Copy"));
+        assert_eq!(action_in(&bindings, "ctrl-="), Some("terminal::ZoomIn"));
     }
 }

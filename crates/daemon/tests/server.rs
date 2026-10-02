@@ -40,7 +40,7 @@ impl TestClient {
         let mut client = TestClient { recv, send, instance: String::new() };
         client.send(&ClientMessage::Hello { protocol: PROTOCOL_VERSION }).await;
         match client.control().await {
-            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance } => client.instance = instance,
+            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance, .. } => client.instance = instance,
             other => panic!("unexpected handshake reply {other:?}"),
         }
         client
@@ -105,6 +105,9 @@ fn sh(script: &str, cwd_from: Option<PaneId>) -> SpawnRequest {
         rows: 24,
         cwd_from,
         container: None,
+        claude: false,
+        env: Vec::new(),
+        scrollback: None,
     }
 }
 

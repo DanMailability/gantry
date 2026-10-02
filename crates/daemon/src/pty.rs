@@ -44,12 +44,13 @@ pub struct PtyProcess {
 }
 
 impl PtyProcess {
-    /// Start `spec` in a new PTY. Returns the process and a blocking reader of its output.
+    /// Start `spec` in a new PTY (an empty program runs the default shell). Returns the process and a blocking reader of its output.
     ///
     /// `TERM=xterm-256color` and `COLORTERM=truecolor` are set before `spec.env`.
     pub fn spawn(spec: &SpawnSpec) -> anyhow::Result<(PtyProcess, Box<dyn Read + Send>)> {
         let pair = native_pty_system().openpty(pty_size(spec.cols, spec.rows))?;
-        let mut cmd = CommandBuilder::new(&spec.program);
+        let program = if spec.program.is_empty() { default_shell() } else { spec.program.clone() };
+        let mut cmd = CommandBuilder::new(program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
         if let Some(env) = &spec.base_env {

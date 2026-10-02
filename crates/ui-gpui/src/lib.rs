@@ -44,8 +44,6 @@ pub const APP_ID: &str = "io.github.idogrf.Gantry";
 pub fn run(launch: Launch) {
     gpui_platform::application().run(move |cx: &mut App| {
         theme::load_fonts(cx);
-        terminal_view::bind_keys(cx);
-        workspace_view::bind_keys(cx);
         let paths = Paths::for_profile(&current_profile());
         SettingsStore::init(paths.settings_file.clone(), cx);
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
@@ -105,7 +103,9 @@ fn workspace(connection: Connection, launch: &Launch, paths: &Paths, window: &mu
         tracing::warn!("ignoring the saved layout: {err}");
         None
     });
-    let restored = restore(saved, &connection.instance, &connection.panes, launch);
+    let window_settings = cx.global::<SettingsStore>().settings().window;
+    let mut restored = restore(saved, &connection.instance, &connection.panes, launch, window_settings.restore_layout);
+    restored.workspace.sidebar.visible = window_settings.sidebar_at_start.visible(restored.workspace.sidebar.visible);
     let default_cwd: PathBuf = launch.default.cwd.clone();
     WorkspaceView::new(connection, restored, paths.layout_file.clone(), default_cwd, window, cx)
 }

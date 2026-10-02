@@ -297,6 +297,7 @@ mod tests {
             activity_since_ms: 0,
             proc_start: None,
             container_id: container_id.map(Into::into),
+            claude_dir: None,
         }
     }
 

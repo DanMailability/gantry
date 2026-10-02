@@ -40,10 +40,10 @@ impl LaunchArgs {
     /// Turn the arguments into a launch request.
     pub fn into_launch(self) -> std::io::Result<Launch> {
         let current = std::env::current_dir()?;
-        let default = PaneLaunch { program: default_shell(), args: Vec::new(), cwd: current.clone(), container: None };
+        let default = PaneLaunch { program: default_shell(), args: Vec::new(), cwd: current.clone(), container: None, claude: false, claude_dir: None, env: Vec::new() };
         let explicit = (self.cwd.is_some() || !self.command.is_empty()).then(|| {
             let mut command = self.command.into_iter();
-            PaneLaunch { program: command.next().unwrap_or_else(default_shell), args: command.collect(), cwd: self.cwd.unwrap_or(current), container: None }
+            PaneLaunch { program: command.next().unwrap_or_else(default_shell), args: command.collect(), cwd: self.cwd.unwrap_or(current), container: None, claude: false, claude_dir: None, env: Vec::new() }
         });
         Ok(Launch { explicit, default })
     }

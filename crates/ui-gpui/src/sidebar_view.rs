@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use app_core::menus::{self, MenuAction};
+use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
     self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
     session_title,
@@ -23,16 +23,13 @@ use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
+use crate::settings_store::{SettingsStore, dir_name, shortcut_label};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, theme};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
 /// Ages ("5m") and project roots are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
-#[cfg(target_os = "macos")]
-const RECENTS_SHORTCUT: &str = "⌘⇧R";
-#[cfg(not(target_os = "macos"))]
-const RECENTS_SHORTCUT: &str = "Ctrl+Shift+R";
 
 /// What the sidebar asks the workspace to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -286,6 +283,14 @@ impl SidebarView {
             cx.notify();
             return;
         }
+        let settings = cx.global::<SettingsStore>().settings();
+        let folder = match &row.kind {
+            RowKind::Project { path, .. } => Some(path.as_path()),
+            RowKind::Session { session, .. } => Some(session.cwd.as_path()),
+            RowKind::Pane { entry, .. } => Some(entry.cwd.as_path()),
+            _ => None,
+        };
+        let context = folder.map(|folder| MenuContext::for_folder(settings, folder)).unwrap_or_default();
         let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
         let items = match &row.kind {
             RowKind::Project { path, .. } => {
@@ -299,14 +304,14 @@ impl SidebarView {
                         RowKind::Session { session, .. } => session.container.as_ref().filter(|place| place.host_folder.is_some()),
                         _ => None,
                     });
-                Some(menus::project_menu(path, container))
+                Some(menus::project_menu(path, container, &context))
             }
-            _ => menus::row_menu(row, &alone),
+            _ => menus::row_menu(row, &alone, &context),
         };
         let Some(items) = items else { return };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        self.menu = Some(OpenMenu { items, position, focus });
+        self.menu = Some(OpenMenu::new(items, position, focus));
         cx.notify();
     }
 
@@ -398,6 +403,7 @@ impl SidebarView {
                         }))
                         .when(unseen, |pill| pill.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.ink))))
                         .when(session.container.is_some(), |pill| pill.child(container_chip(colors.ink)))
+                        .children(dir_name(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|name| dir_chip(colors.ink, name)))
                         .children(project())
                         .child(aside(note.clone(), colors.ink)),
                 )
@@ -549,7 +555,7 @@ impl Render for SidebarView {
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(theme.tokens.text)))
                     .child(div().flex_1().child("Recent sessions"))
-                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(theme.tokens.raised)).child(RECENTS_SHORTCUT))
+                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(theme.tokens.raised)).child(shortcut_label(cx.global::<SettingsStore>().settings(), "openRecents")))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenRecents))),
             )
             .child(
@@ -611,6 +617,7 @@ impl Render for SidebarView {
                     "sidebar-menu",
                     menu,
                     &theme,
+                    cx.global::<SettingsStore>().settings(),
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))

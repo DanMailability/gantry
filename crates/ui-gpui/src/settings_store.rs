@@ -1,10 +1,13 @@
 //! The applied settings (a GPUI global): loading `settings.json`, watching it, saving changes, and rebuilding
 //! the [`Theme`] from them.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use app_core::settings::{self, Loaded, Problem, Settings};
+use app_core::shortcuts::{self, Check, Platform};
+use app_core::workspace::ClaudeDirs;
 use app_core::theme_colors::{readable_fill, resolve, tokens};
 use gpui::{App, Global, Task, WindowAppearance};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -21,14 +24,14 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 #[derive(Debug, PartialEq)]
 enum Reload {
     /// Replace the applied settings.
-    Apply(Settings),
+    Apply(Box<Settings>),
     /// Leave them alone (unchanged, or the file is not JSON).
     Keep,
 }
 
 fn reload_decision(applied: &Settings, loaded: &Loaded) -> Reload {
     match &loaded.settings {
-        Some(settings) if settings != applied => Reload::Apply(settings.clone()),
+        Some(settings) if settings != applied => Reload::Apply(Box::new(settings.clone())),
         _ => Reload::Keep,
     }
 }
@@ -64,6 +67,8 @@ pub(crate) struct SettingsStore {
     /// `file_problems` plus the status fills the theme cannot draw readably.
     problems: Vec<Problem>,
     path: PathBuf,
+    /// The `shortcuts` the key bindings were last built from.
+    bound: Option<BTreeMap<String, Option<String>>>,
     _watcher: Option<RecommendedWatcher>,
     _reload: Option<Task<()>>,
 }
@@ -82,6 +87,7 @@ impl SettingsStore {
             file_problems: loaded.problems,
             problems: Vec::new(),
             path,
+            bound: None,
             _watcher: watcher,
             _reload: reload,
         });
@@ -134,7 +140,7 @@ impl SettingsStore {
         let reapply = reload_needs_apply(&decision, &store.file_problems, &loaded.problems);
         store.file_problems = loaded.problems;
         if let Reload::Apply(settings) = decision {
-            store.settings = settings;
+            store.settings = *settings;
         }
         if reapply {
             apply(cx);
@@ -162,10 +168,49 @@ fn apply(cx: &mut App) {
             problems.push(Problem { key: format!("statusColors.{name}"), message: "too low contrast".into() });
         }
     }
+    problems.extend(shortcut_problems(&settings.shortcuts));
     let ui_scale = settings.ui_font_size / BASE_UI_FONT_SIZE;
     store.problems = problems;
+    let rebind = store.bound.as_ref() != Some(&store.settings.shortcuts);
+    if rebind {
+        store.bound = Some(store.settings.shortcuts.clone());
+        let bindings = crate::workspace_view::all_bindings(&store.settings, Platform::current());
+        cx.clear_key_bindings();
+        cx.bind_keys(bindings);
+    }
     cx.set_global(Theme { preset, tokens, fills, ui_scale });
     cx.refresh_windows();
+}
+
+/// A problem for each override that is not a usable keystroke (it is ignored; the action keeps its default).
+fn shortcut_problems(overrides: &BTreeMap<String, Option<String>>) -> Vec<Problem> {
+    overrides
+        .iter()
+        .filter(|(id, _)| shortcuts::ACTIONS.iter().any(|action| action.id == id.as_str()))
+        .filter_map(|(id, keystroke)| {
+            let message = match shortcuts::check(keystroke.as_deref()?, id, &[]) {
+                Check::Invalid => "not a keystroke",
+                Check::Reserved(_) => "reserved for the terminal",
+                Check::Ok | Check::Conflict(_) => return None,
+            };
+            Some(Problem { key: format!("shortcuts.{id}"), message: format!("{message}; the default is used") })
+        })
+        .collect()
+}
+
+/// The label of `action`'s keystroke as the settings have it ("Not set" when unbound).
+pub(crate) fn shortcut_label(settings: &Settings, action: &str) -> String {
+    let platform = Platform::current();
+    shortcuts::label(shortcuts::current(action, &settings.shortcuts, platform).as_deref(), platform)
+}
+
+/// The name of the config dir at `claude_dir`, when two or more are configured (a lone dir needs no tag).
+pub(crate) fn dir_name(settings: &Settings, claude_dir: Option<&Path>) -> Option<String> {
+    if settings.claude_dirs.len() < 2 {
+        return None;
+    }
+    let dirs = ClaudeDirs::from_settings(settings, None, std::env::home_dir().as_deref());
+    dirs.by_path(claude_dir?).map(|dir| dir.name.clone())
 }
 
 /// Watch the settings file's directory; a foreground task reloads after the events settle.
@@ -229,7 +274,7 @@ mod tests {
         assert!(!reload_needs_apply(&Reload::Keep, std::slice::from_ref(&problem), std::slice::from_ref(&problem)));
         assert!(reload_needs_apply(&Reload::Keep, &[], std::slice::from_ref(&problem)));
         assert!(reload_needs_apply(&Reload::Keep, std::slice::from_ref(&problem), &[]));
-        assert!(reload_needs_apply(&Reload::Apply(Settings::default()), &[], &[]));
+        assert!(reload_needs_apply(&Reload::Apply(Box::default()), &[], &[]));
     }
 
     #[test]
@@ -266,6 +311,44 @@ mod tests {
     fn changed_file_applies() {
         let mut changed = Settings::default();
         changed.terminal_font.size = 18.0;
-        assert_eq!(reload_decision(&Settings::default(), &loaded(Some(changed.clone()), Vec::new())), Reload::Apply(changed));
+        assert_eq!(reload_decision(&Settings::default(), &loaded(Some(changed.clone()), Vec::new())), Reload::Apply(Box::new(changed)));
+    }
+
+    #[test]
+    fn unusable_shortcut_overrides_are_problems_and_the_rest_are_not() {
+        let overrides: BTreeMap<String, Option<String>> = [
+            ("closePane", Some("ctrl-c")),
+            ("copy", Some("bogus-key")),
+            ("toggleSidebar", Some("ctrl-alt-s")),
+            ("openRecents", None),
+            ("unknownAction", Some("ctrl-c")),
+        ]
+        .into_iter()
+        .map(|(id, key)| (id.to_string(), key.map(String::from)))
+        .collect();
+        let keys: Vec<String> = shortcut_problems(&overrides).into_iter().map(|problem| problem.key).collect();
+        assert_eq!(keys, ["shortcuts.closePane", "shortcuts.copy"]);
+    }
+
+    #[test]
+    fn the_dir_name_is_shown_only_with_two_or_more_dirs() {
+        use app_core::settings::ClaudeDir;
+        let dir = |name: &str, path: &str| ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![] };
+        let mut settings = Settings { claude_dirs: vec![dir("Personal", "/c/one")], ..Settings::default() };
+        assert_eq!(dir_name(&settings, Some(Path::new("/c/one"))), None);
+        settings.claude_dirs.push(dir("Work", "/c/two"));
+        assert_eq!(dir_name(&settings, Some(Path::new("/c/two"))).as_deref(), Some("Work"));
+        assert_eq!(dir_name(&settings, Some(Path::new("/c/else"))), None);
+        assert_eq!(dir_name(&settings, None), None);
+    }
+
+    #[test]
+    fn labels_follow_the_overrides() {
+        let mut settings = Settings::default();
+        assert_eq!(shortcut_label(&settings, "openRecents"), "Ctrl+Shift+R");
+        settings.shortcuts.insert("openRecents".into(), Some("ctrl-alt-r".into()));
+        assert_eq!(shortcut_label(&settings, "openRecents"), "Ctrl+Alt+R");
+        settings.shortcuts.insert("openRecents".into(), None);
+        assert_eq!(shortcut_label(&settings, "openRecents"), "Not set");
     }
 }

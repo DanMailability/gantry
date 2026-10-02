@@ -22,7 +22,7 @@ use tokio::sync::Notify;
 use crate::containers::{self, PANE_MARKER, Registry, marker};
 use crate::outbox::Outbox;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
-use crate::sessions::{ContainerView, Gone, PaneSession, diff, resolve, spawn_indexer, still_claimed};
+use crate::sessions::{ContainerView, Gone, PaneSession, diff, merge_records, resolve, spawn_indexer, still_claimed};
 use crate::take_over::{self, FORCE_WAIT, GRACE};
 
 const OUTPUT_QUEUE_CHUNKS: usize = 32;
@@ -59,6 +59,8 @@ struct Pane {
     cwd: PathBuf,
     /// Session its command line names.
     session_arg: Option<String>,
+    /// Whether it runs Claude Code.
+    claude: bool,
     /// Start time of its process (to recognise that process in the index after it exits).
     start: Option<String>,
     /// Host folder of the dev container it runs in.
@@ -89,8 +91,12 @@ struct State {
     ever_connected: bool,
     /// Whether session messages are sent (an index runs).
     sessions_enabled: bool,
-    /// Latest index scan; `None` until the first scan finishes.
+    /// Latest index scans of every indexed dir, merged; `None` until the first scan finishes.
     records: Option<Arc<Vec<SessionRecord>>>,
+    /// Each indexed dir's latest scan.
+    dir_records: HashMap<PathBuf, Arc<Vec<SessionRecord>>>,
+    /// The tasks that follow each dir's indexer (aborting one stops that indexer).
+    indexers: HashMap<PathBuf, tokio::task::JoinHandle<()>>,
     /// Sessions as last sent to (or computed for) the client.
     sent: Vec<SessionInfo>,
     /// Processes seen exiting that the index still lists as running.
@@ -122,6 +128,8 @@ struct Shared {
     instance: String,
     /// The `docker` program; `None` = no dev containers.
     docker: Option<String>,
+    /// The daemon's default Claude config dir.
+    claude_dir: Option<PathBuf>,
 }
 
 impl Shared {
@@ -277,6 +285,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         owner_uid: options.owner_uid,
         instance,
         docker: options.docker,
+        claude_dir: claude_dir.clone(),
     });
     refresh_containers(&shared);
     let probes = shared.docker.is_some().then(|| {
@@ -313,33 +322,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
             }
         })
     };
-    let sessions = claude_dir.map(|dir| {
-        let (tx, mut rx) = tokio::sync::watch::channel(None);
-        spawn_indexer(dir, tx);
-        let shared = shared.clone();
-        tokio::spawn(async move {
-            while rx.changed().await.is_ok() {
-                let records = rx.borrow_and_update().clone();
-                let mut state = shared.lock();
-                if let Some(records) = &records {
-                    state.gone.retain(|gone| still_claimed(gone, records));
-                }
-                let unknown = records.iter().flat_map(|r| r.iter()).filter_map(|r| r.container_id.as_deref()).any(|id| !state.registry.knows(id));
-                if unknown && state.last_unknown_refresh.is_none_or(|at| at.elapsed() >= UNKNOWN_CONTAINER_REFRESH) {
-                    state.last_unknown_refresh = Some(Instant::now());
-                    refresh_containers(&shared);
-                }
-                // Sessions seen in a container reopen there after they close.
-                for record in records.iter().flat_map(|r| r.iter()) {
-                    state.registry.remember(record);
-                }
-                // The first scan is the first list a connected client gets.
-                let first = state.records.is_none();
-                state.records = records;
-                state.publish_sessions(first);
-            }
-        })
-    });
+    set_claude_dirs(&shared, Vec::new());
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -351,7 +334,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     }
     idle.abort();
     ticker.abort();
-    if let Some(task) = sessions {
+    for task in shared.lock().indexers.values() {
         task.abort();
     }
     if let Some(task) = probes {
@@ -400,7 +383,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             old.outbox.close();
             old.kicked.notify_one();
         }
-        outbox.push_control(Frame::control(&DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: shared.instance.clone() }));
+        outbox.push_control(Frame::control(&DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: shared.instance.clone(), claude_dir: shared.claude_dir.clone() }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id
     };
@@ -605,12 +588,14 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
                     cwd: pane.cwd.clone(),
                     last_focused: pane.last_focused,
                     container: pane.container.clone(),
+                    claude: pane.claude,
                 })
                 .collect();
             panes.sort_by(|a, b| b.last_focused.cmp(&a.last_focused).then(b.pane.cmp(&a.pane)));
             state.control(&DaemonMessage::Panes { panes });
             state.publish_sessions(true);
         }
+        ClientMessage::SetClaudeDirs { dirs } => set_claude_dirs(shared, dirs),
         ClientMessage::Spawn { request, spec } => spawn_pane(shared, client_id, request, spec),
         ClientMessage::Attach { pane } => {
             let mut state = shared.lock();
@@ -655,6 +640,67 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             }
         }
     }
+}
+
+/// Index `dirs` (empty = the daemon's default dir): stop the indexers of dirs no longer listed, start those of new
+/// ones, and publish the merged sessions.
+fn set_claude_dirs(shared: &Arc<Shared>, dirs: Vec<PathBuf>) {
+    let mut wanted: Vec<PathBuf> = Vec::new();
+    for dir in if dirs.is_empty() { shared.claude_dir.iter().cloned().collect() } else { dirs } {
+        if !wanted.contains(&dir) {
+            wanted.push(dir);
+        }
+    }
+    let mut state = shared.lock();
+    state.sessions_enabled = !wanted.is_empty();
+    let stale: Vec<PathBuf> = state.indexers.keys().filter(|dir| !wanted.contains(dir)).cloned().collect();
+    for dir in &stale {
+        if let Some(task) = state.indexers.remove(dir) {
+            task.abort();
+        }
+        state.dir_records.remove(dir);
+    }
+    let changed = !stale.is_empty() && state.records.is_some();
+    for dir in wanted {
+        if state.indexers.contains_key(&dir) {
+            continue;
+        }
+        let (tx, mut rx) = tokio::sync::watch::channel(None);
+        spawn_indexer(dir.clone(), tx);
+        let task_shared = shared.clone();
+        let task_dir = dir.clone();
+        let task = tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                let Some(records) = rx.borrow_and_update().clone() else { continue };
+                let mut state = task_shared.lock();
+                state.dir_records.insert(task_dir.clone(), records);
+                on_records(&task_shared, &mut state);
+            }
+        });
+        state.indexers.insert(dir, task);
+    }
+    if changed {
+        on_records(shared, &mut state);
+    }
+}
+
+/// The indexed dirs' scans changed: merge them and publish what changed.
+fn on_records(shared: &Arc<Shared>, state: &mut State) {
+    let merged = Arc::new(merge_records(state.dir_records.values()));
+    state.gone.retain(|gone| still_claimed(gone, &merged));
+    let unknown = merged.iter().filter_map(|r| r.container_id.as_deref()).any(|id| !state.registry.knows(id));
+    if unknown && state.last_unknown_refresh.is_none_or(|at| at.elapsed() >= UNKNOWN_CONTAINER_REFRESH) {
+        state.last_unknown_refresh = Some(Instant::now());
+        refresh_containers(shared);
+    }
+    // Sessions seen in a container reopen there after they close.
+    for record in merged.iter() {
+        state.registry.remember(record);
+    }
+    // The first scan is the first list a connected client gets.
+    let first = state.records.is_none();
+    state.records = Some(merged);
+    state.publish_sessions(first);
 }
 
 fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnRequest) {
@@ -726,7 +772,7 @@ fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: S
         })
         .await;
         let Ok((mut registry, ready, folder)) = looked_up else { return fail(&shared, "the Docker lookup failed".into()) };
-        if let (Ok(container), Some(session)) = (&ready, claude_session(&spec.program, &spec.args)) {
+        if let (Ok(container), Some(session)) = (&ready, claude_session(spec.claude, &spec.program, &spec.args)) {
             registry.remember_session(session, &container.id);
         }
         shared.lock().registry = registry;
@@ -762,7 +808,7 @@ fn start_pane(
     command: impl FnOnce(PaneId) -> (String, Vec<String>),
     container: Option<(PathBuf, String)>,
 ) {
-    let session_arg = claude_session(&spec.program, &spec.args).map(String::from);
+    let session_arg = claude_session(spec.claude, &spec.program, &spec.args).map(String::from);
     let mut state = shared.lock();
     let id = state.next_pane;
     let (program, args) = command(id);
@@ -770,7 +816,7 @@ fn start_pane(
         program,
         args,
         cwd: cwd.clone(),
-        env: Vec::new(),
+        env: if container.is_some() { Vec::new() } else { spec.env.clone() },
         base_env: Some(shared.base_env.clone()),
         cols: spec.cols,
         rows: spec.rows,
@@ -786,7 +832,10 @@ fn start_pane(
     state.focus_seq += 1;
     let exit = pty.exit_signal();
     let start = pty.pid().and_then(claude_index::host::process_start);
-    let mut term = TermState::new(spec.cols, spec.rows);
+    let mut term = match spec.scrollback {
+        Some(lines) => TermState::with_scrollback(spec.cols, spec.rows, lines as usize),
+        None => TermState::new(spec.cols, spec.rows),
+    };
     term.set_palette(state.palette);
     let pane = Pane {
         pty,
@@ -795,6 +844,7 @@ fn start_pane(
         args: spec.args,
         cwd: cwd.clone(),
         session_arg,
+        claude: spec.claude,
         start,
         container_id: container.as_ref().map(|(_, id)| id.clone()),
         container: container.map(|(folder, _)| folder),
@@ -890,6 +940,7 @@ mod tests {
             activity_since_ms: 0,
             proc_start: None,
             container_id: None,
+            claude_dir: None,
         };
         state.records = Some(Arc::new(vec![record]));
         state.publish_sessions(true);
@@ -911,8 +962,9 @@ mod tests {
             owner_uid: None,
             instance: String::new(),
             docker: None,
+            claude_dir: None,
         });
-        let spec = || SpawnRequest { program: "sleep".into(), args: vec!["30".into()], cwd: "/".into(), cols: 80, rows: 24, cwd_from: None, container: None };
+        let spec = || SpawnRequest { program: "sleep".into(), args: vec!["30".into()], cwd: "/".into(), cols: 80, rows: 24, cwd_from: None, container: None, claude: false, env: Vec::new(), scrollback: None };
         handle_message(&shared, 1, ClientMessage::Spawn { request: 1, spec: spec() });
         handle_message(&shared, 1, ClientMessage::SetPalette(LIGHT.into()));
         handle_message(&shared, 1, ClientMessage::Spawn { request: 2, spec: spec() });
@@ -929,6 +981,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn scrollback_request_sets_history() {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State { next_pane: 1, ..State::default() }),
+            shutdown: Notify::new(),
+            base_env: std::env::vars().collect(),
+            owner_uid: None,
+            instance: String::new(),
+            docker: None,
+            claude_dir: None,
+        });
+        let spec = SpawnRequest {
+            program: "sh".into(),
+            args: vec!["-c".into(), "seq 1 500; sleep 5".into()],
+            cwd: "/".into(),
+            cols: 80,
+            rows: 24,
+            cwd_from: None,
+            container: None,
+            claude: false,
+            env: Vec::new(),
+            scrollback: Some(50),
+        };
+        handle_message(&shared, 1, ClientMessage::Spawn { request: 1, spec });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let top = loop {
+            assert!(Instant::now() < deadline, "timed out");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut state = shared.lock();
+            let Some(pane) = state.panes.values_mut().next() else { continue };
+            pane.term.scroll_viewport(1_000_000);
+            let top = pane.term.row_text(0);
+            pane.term.scroll_to_bottom();
+            if top == "428" {
+                break top;
+            }
+        };
+        assert_eq!(top, "428");
+        let ids: Vec<PaneId> = shared.lock().panes.keys().copied().collect();
+        for pane in ids {
+            handle_message(&shared, 1, ClientMessage::Kill { pane });
+        }
+    }
+
     #[test]
     fn a_panic_while_holding_the_state_lock_does_not_wedge_the_daemon() {
         let shared = Arc::new(Shared {
@@ -938,6 +1034,7 @@ mod tests {
             owner_uid: None,
             instance: String::new(),
             docker: None,
+            claude_dir: None,
         });
         let poisoner = shared.clone();
         let _ = std::thread::spawn(move || {
