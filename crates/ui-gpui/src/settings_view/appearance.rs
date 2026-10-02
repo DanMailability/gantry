@@ -6,6 +6,7 @@ use app_core::theme_colors::{Preset, Tokens, contrast, derive, readable_fill, te
 use gpui::{App, Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, div, px, rgb, rgba, deferred};
 
 use super::*;
+use crate::settings_store::shortcut_label;
 use crate::terminal_view::FONT_FAMILY;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
 
@@ -472,7 +473,7 @@ impl SettingsView {
             .gap(theme.ui(12.))
             .child(div().w(theme.ui(150.)).child("Terminal font"))
             .child(self.dropdown("font-family", 0, Popover::Font, label, theme.ui(210.), options, window, cx));
-        let stepper_row = |this: &mut Self, label: &'static str, stepped: &'static Stepped, hint: &'static str, cx: &mut Context<Self>| {
+        let stepper_row = |this: &mut Self, label: &'static str, stepped: &'static Stepped, hint: String, cx: &mut Context<Self>| {
             div()
                 .flex()
                 .items_center()
@@ -488,9 +489,9 @@ impl SettingsView {
             .flex_col()
             .gap(theme.ui(12.))
             .child(family_row)
-            .child(stepper_row(self, "Terminal size", &TERMINAL_SIZE, "Ctrl+= / Ctrl+- change this too", cx))
-            .child(stepper_row(self, "Line height", &LINE_HEIGHT, "", cx))
-            .child(stepper_row(self, "Interface size", &INTERFACE_SIZE, "Sidebar, tabs, menus", cx));
+            .child(stepper_row(self, "Terminal size", &TERMINAL_SIZE, format!("{} / {} change this too", shortcut_label(settings, "zoomIn"), shortcut_label(settings, "zoomOut")), cx))
+            .child(stepper_row(self, "Line height", &LINE_HEIGHT, String::new(), cx))
+            .child(stepper_row(self, "Interface size", &INTERFACE_SIZE, "Sidebar, tabs, menus".into(), cx));
 
         let palette = terminal_palette(theme.preset);
         let ok = color(palette.ansi[2]);

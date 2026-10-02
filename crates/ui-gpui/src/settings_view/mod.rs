@@ -14,7 +14,7 @@ use app_core::snapshot::Rgb;
 use app_core::text_field::TextField;
 use gpui::{
     App, Bounds, Context, DispatchPhase, Div, ElementId, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString, Stateful, Window, canvas, deferred, div, point, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString, Stateful, Subscription, Window, canvas, deferred, div, point, prelude::*, px,
     relative, rgb, rgba,
 };
 
@@ -24,6 +24,7 @@ use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, theme};
 
 mod alerts;
 mod appearance;
+mod shortcuts;
 
 use alerts::Event;
 use appearance::{Status, installed_monospace};
@@ -166,11 +167,29 @@ pub(crate) struct SettingsView {
     dropdown_bounds: DropdownBounds,
     /// The hex field's text counts as selected: the next typed character or Backspace replaces it all.
     hex_selected: bool,
+    /// The Shortcuts page: the action whose key is being recorded.
+    recording: Option<&'static str>,
+    /// Why the last recorded key was refused, under that action's row.
+    shortcut_message: Option<(&'static str, String)>,
+    /// A key another action has, waiting for "Replace".
+    pending_replace: Option<shortcuts::Replace>,
+    /// The Shortcuts page's filter field.
+    shortcut_filter: TextField,
+    filter_focus: FocusHandle,
+    _keystrokes: Subscription,
 }
 
 impl SettingsView {
     /// A page on the Appearance section.
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Recording a shortcut must see keys before the key bindings do, or the chord would run its action.
+        let view = cx.weak_entity();
+        let keystrokes = cx.intercept_keystrokes(move |event, window, cx| {
+            let consumed = view.update(cx, |this, cx| this.record(&event.keystroke, window, cx));
+            if consumed.unwrap_or(false) {
+                cx.stop_propagation();
+            }
+        });
         SettingsView {
             section: Section::Appearance,
             focus_handle: cx.focus_handle(),
@@ -185,6 +204,12 @@ impl SettingsView {
             grid_bounds: Rc::new(Cell::new(Bounds::default())),
             dropdown_bounds: Rc::new(RefCell::new(HashMap::new())),
             hex_selected: false,
+            recording: None,
+            shortcut_message: None,
+            pending_replace: None,
+            shortcut_filter: TextField::default(),
+            filter_focus: cx.focus_handle(),
+            _keystrokes: keystrokes,
         }
     }
 
@@ -479,6 +504,7 @@ impl Render for SettingsView {
         let problems = store.problems().to_vec();
         let path = display_path(store.path(), std::env::home_dir().as_deref());
         let section = self.section;
+        self.end_recording_without_focus(window);
 
         let menu = div().flex_none().w(theme.ui(200.)).py(theme.ui(24.)).px(theme.ui(12.)).flex().flex_col().gap(theme.ui(4.)).border_r_1().border_color(rgb(theme.tokens.line)).children(
             Section::ALL.map(|item| {
@@ -486,6 +512,9 @@ impl Render for SettingsView {
                 let choose = handler(move |this, _, cx| {
                     this.section = item;
                     this.popover = None;
+                    this.recording = None;
+                    this.shortcut_message = None;
+                    this.pending_replace = None;
                     this.body_scroll.set_offset(point(px(0.), px(0.)));
                     cx.notify();
                 });
@@ -543,7 +572,8 @@ impl Render for SettingsView {
         let body = match section {
             Section::Appearance => self.appearance(&theme, &settings, window, cx),
             Section::Alerts => self.alerts(&theme, &settings, window, cx),
-            Section::Shortcuts | Section::Sessions | Section::Window => div(),
+            Section::Shortcuts => self.shortcuts(&theme, &settings, window, cx),
+            Section::Sessions | Section::Window => div(),
         };
 
         let backdrop = self.popover.is_some().then(|| {

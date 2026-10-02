@@ -21,6 +21,8 @@ use gpui::{
 };
 use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
+use app_core::settings::Settings;
+use app_core::shortcuts::{self, Platform};
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
 
@@ -29,7 +31,7 @@ use crate::context_menu::{self, OpenMenu};
 use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
-use crate::terminal_view::{PaneEvent, TerminalView};
+use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::settings_store::SettingsStore;
 use crate::settings_view::SettingsView;
 use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
@@ -60,52 +62,53 @@ mod workspace_actions {
 }
 use workspace_actions::*;
 
-/// Register workspace shortcuts: `Ctrl+Shift+…` on Linux/Windows, `Cmd+…` on macOS.
-pub fn bind_keys(cx: &mut gpui::App) {
-    cx.bind_keys(key_bindings());
+/// Every key binding: the workspace and terminal actions at their resolved keystrokes (defaults, the user's overrides
+/// from `settings.json`, `null` = none). The text fields and menus handle their keys themselves, so nothing else is bound.
+pub(crate) fn all_bindings(settings: &Settings, platform: Platform) -> Vec<gpui::KeyBinding> {
+    shortcuts::bindings(&settings.shortcuts, platform)
+        .into_iter()
+        .filter_map(|(id, key)| workspace_binding(id, &key).or_else(|| terminal_binding(id, &key)))
+        .collect()
 }
 
-fn key_bindings() -> Vec<gpui::KeyBinding> {
+fn workspace_binding(id: &str, key: &str) -> Option<gpui::KeyBinding> {
     use gpui::KeyBinding;
-    #[cfg(target_os = "macos")]
-    let (m, prev_tab, next_tab, tab_n, settings_key) = ("cmd", "cmd-shift-[", "cmd-shift-]", "cmd", "cmd-,");
-    #[cfg(not(target_os = "macos"))]
-    let (m, prev_tab, next_tab, tab_n, settings_key) = ("ctrl-shift", "ctrl-pageup", "ctrl-pagedown", "alt", "ctrl-,");
     let context = Some("Workspace");
-    vec![
-        KeyBinding::new(&format!("{m}-t"), NewClaudeTab, context),
-        KeyBinding::new(&format!("{m}-alt-t"), NewShellTab, context),
-        KeyBinding::new(&format!("{m}-d"), SplitRightClaude, context),
-        KeyBinding::new(&format!("{m}-alt-d"), SplitRightShell, context),
-        KeyBinding::new(&format!("{m}-e"), SplitDownClaude, context),
-        KeyBinding::new(&format!("{m}-alt-e"), SplitDownShell, context),
-        KeyBinding::new(&format!("{m}-w"), ClosePane, context),
-        KeyBinding::new(&format!("{m}-left"), FocusLeft, context),
-        KeyBinding::new(&format!("{m}-right"), FocusRight, context),
-        KeyBinding::new(&format!("{m}-up"), FocusUp, context),
-        KeyBinding::new(&format!("{m}-down"), FocusDown, context),
-        KeyBinding::new(prev_tab, PreviousTab, context),
-        KeyBinding::new(next_tab, NextTab, context),
-        // Every platform, alongside the platform's own tab keys.
-        KeyBinding::new("ctrl-tab", NextTab, context),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, context),
-        KeyBinding::new(&format!("{m}-pageup"), MoveTabLeft, context),
-        KeyBinding::new(&format!("{m}-pagedown"), MoveTabRight, context),
-        KeyBinding::new(&format!("{tab_n}-1"), ActivateTab1, context),
-        KeyBinding::new(&format!("{tab_n}-2"), ActivateTab2, context),
-        KeyBinding::new(&format!("{tab_n}-3"), ActivateTab3, context),
-        KeyBinding::new(&format!("{tab_n}-4"), ActivateTab4, context),
-        KeyBinding::new(&format!("{tab_n}-5"), ActivateTab5, context),
-        KeyBinding::new(&format!("{tab_n}-6"), ActivateTab6, context),
-        KeyBinding::new(&format!("{tab_n}-7"), ActivateTab7, context),
-        KeyBinding::new(&format!("{tab_n}-8"), ActivateTab8, context),
-        KeyBinding::new(&format!("{tab_n}-9"), ActivateTab9, context),
-        KeyBinding::new(&format!("{m}-b"), ToggleSidebar, context),
-        KeyBinding::new(&format!("{m}-f"), FindSession, context),
-        KeyBinding::new(&format!("{m}-o"), OpenLauncher, context),
-        KeyBinding::new(&format!("{m}-r"), OpenRecents, context),
-        KeyBinding::new(settings_key, OpenSettings, context),
-    ]
+    Some(match id {
+        "newClaudeTab" => KeyBinding::new(key, NewClaudeTab, context),
+        "newShellTab" => KeyBinding::new(key, NewShellTab, context),
+        "nextTab" => KeyBinding::new(key, NextTab, context),
+        "previousTab" => KeyBinding::new(key, PreviousTab, context),
+        "moveTabLeft" => KeyBinding::new(key, MoveTabLeft, context),
+        "moveTabRight" => KeyBinding::new(key, MoveTabRight, context),
+        shortcuts::GO_TO_TAB => match key.rsplit('-').next()?.parse::<u8>().ok()? {
+            1 => KeyBinding::new(key, ActivateTab1, context),
+            2 => KeyBinding::new(key, ActivateTab2, context),
+            3 => KeyBinding::new(key, ActivateTab3, context),
+            4 => KeyBinding::new(key, ActivateTab4, context),
+            5 => KeyBinding::new(key, ActivateTab5, context),
+            6 => KeyBinding::new(key, ActivateTab6, context),
+            7 => KeyBinding::new(key, ActivateTab7, context),
+            8 => KeyBinding::new(key, ActivateTab8, context),
+            9 => KeyBinding::new(key, ActivateTab9, context),
+            _ => return None,
+        },
+        "splitRightClaude" => KeyBinding::new(key, SplitRightClaude, context),
+        "splitRightShell" => KeyBinding::new(key, SplitRightShell, context),
+        "splitDownClaude" => KeyBinding::new(key, SplitDownClaude, context),
+        "splitDownShell" => KeyBinding::new(key, SplitDownShell, context),
+        "closePane" => KeyBinding::new(key, ClosePane, context),
+        "focusLeft" => KeyBinding::new(key, FocusLeft, context),
+        "focusRight" => KeyBinding::new(key, FocusRight, context),
+        "focusUp" => KeyBinding::new(key, FocusUp, context),
+        "focusDown" => KeyBinding::new(key, FocusDown, context),
+        "openLauncher" => KeyBinding::new(key, OpenLauncher, context),
+        "findSession" => KeyBinding::new(key, FindSession, context),
+        "openRecents" => KeyBinding::new(key, OpenRecents, context),
+        "toggleSidebar" => KeyBinding::new(key, ToggleSidebar, context),
+        "openSettings" => KeyBinding::new(key, OpenSettings, context),
+        _ => return None,
+    })
 }
 
 struct Slot {
@@ -1631,6 +1634,7 @@ impl Render for WorkspaceView {
                     "tab-menu",
                     menu,
                     &theme,
+                    cx.global::<SettingsStore>().settings(),
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))
@@ -1671,9 +1675,13 @@ mod tests {
     use gpui::Keystroke;
 
     fn action_for(keys: &str) -> Option<&'static str> {
+        action_in(&all_bindings(&Settings::default(), Platform::Linux), keys)
+    }
+
+    fn action_in(bindings: &[gpui::KeyBinding], keys: &str) -> Option<&'static str> {
         let keystroke = Keystroke::parse(keys).unwrap();
-        key_bindings()
-            .into_iter()
+        bindings
+            .iter()
             .find(|binding| binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false))
             .map(|binding| binding.action().name())
     }
@@ -1690,8 +1698,6 @@ mod tests {
             ("ctrl-shift-w", "workspace::ClosePane"),
             ("ctrl-shift-left", "workspace::FocusLeft"),
             ("ctrl-shift-down", "workspace::FocusDown"),
-            ("ctrl-pageup", "workspace::PreviousTab"),
-            ("ctrl-pagedown", "workspace::NextTab"),
             ("ctrl-tab", "workspace::NextTab"),
             ("ctrl-shift-tab", "workspace::PreviousTab"),
             ("ctrl-shift-pageup", "workspace::MoveTabLeft"),
@@ -1713,5 +1719,54 @@ mod tests {
         for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab", "tab"] {
             assert_eq!(action_for(keys), None, "{keys}");
         }
+    }
+
+    #[test]
+    fn ctrl_page_keys_no_longer_switch_tabs() {
+        assert_eq!(action_for("ctrl-pageup"), None);
+        assert_eq!(action_for("ctrl-pagedown"), None);
+    }
+
+    #[test]
+    fn no_default_binding_is_reserved() {
+        let bindings = shortcuts::bindings(&Default::default(), Platform::Linux);
+        for (id, key) in &bindings {
+            if *id == shortcuts::GO_TO_TAB || key == "ctrl-+" {
+                continue;
+            }
+            assert!(!matches!(shortcuts::check(key, id, &[]), shortcuts::Check::Reserved(_)), "{id} {key}");
+        }
+    }
+
+    #[test]
+    fn an_override_replaces_the_default_and_the_old_keystroke_is_gone() {
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("toggleSidebar".into(), Some("ctrl-alt-s".into()));
+        let bindings = all_bindings(&settings, Platform::Linux);
+        assert_eq!(action_in(&bindings, "ctrl-alt-s"), Some("workspace::ToggleSidebar"));
+        assert_eq!(action_in(&bindings, "ctrl-shift-b"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-f"), Some("workspace::FindSession"), "others keep theirs");
+    }
+
+    #[test]
+    fn null_removes_the_binding() {
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("closePane".into(), None);
+        settings.shortcuts.insert("copy".into(), None);
+        let bindings = all_bindings(&settings, Platform::Linux);
+        assert_eq!(action_in(&bindings, "ctrl-shift-w"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-c"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-v"), Some("terminal::Paste"));
+    }
+
+    #[test]
+    fn go_to_tab_follows_its_modifiers_and_terminal_actions_are_bound() {
+        let mut settings = Settings::default();
+        settings.shortcuts.insert("goToTab".into(), Some("ctrl-alt".into()));
+        let bindings = all_bindings(&settings, Platform::Linux);
+        assert_eq!(action_in(&bindings, "ctrl-alt-4"), Some("workspace::ActivateTab4"));
+        assert_eq!(action_in(&bindings, "alt-4"), None);
+        assert_eq!(action_in(&bindings, "ctrl-shift-c"), Some("terminal::Copy"));
+        assert_eq!(action_in(&bindings, "ctrl-="), Some("terminal::ZoomIn"));
     }
 }

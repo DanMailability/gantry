@@ -188,6 +188,11 @@ pub fn current(action: &str, overrides: &BTreeMap<String, Option<String>>, platf
     }
 }
 
+/// Whether `keystroke` is `action`'s default on `platform` (spelled in any modifier order).
+pub fn is_default(action: &str, keystroke: &str, platform: Platform) -> bool {
+    ACTIONS.iter().find(|entry| entry.id == action).and_then(|entry| default_of(entry, platform)).is_some_and(|default| canonical(default) == canonical(keystroke))
+}
+
 /// The alias that stays bound while Zoom in is on its default: `ctrl-+` is what Ctrl+Shift+= reports.
 fn zoom_alias(platform: Platform) -> &'static str {
     match platform {
@@ -343,6 +348,14 @@ mod tests {
         assert_eq!(ks(&mac, "previousTab"), ["cmd-shift-[", "ctrl-shift-tab"]);
         assert_eq!(ks(&mac, "newClaudeTab"), ["cmd-t"]);
         assert_eq!(ks(&mac, "openSettings"), ["cmd-,"]);
+    }
+
+    #[test]
+    fn is_default_ignores_modifier_order() {
+        assert!(is_default("newShellTab", "ctrl-alt-shift-t", Platform::Linux));
+        assert!(is_default("newShellTab", "ctrl-shift-alt-t", Platform::Linux));
+        assert!(!is_default("newShellTab", "ctrl-shift-t", Platform::Linux));
+        assert!(!is_default("nope", "ctrl-shift-t", Platform::Linux));
     }
 
     #[test]

@@ -3,8 +3,10 @@
 use std::rc::Rc;
 
 use app_core::menus::{MenuAction, MenuItem, Shortcut};
+use app_core::settings::Settings;
 use gpui::{App, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, deferred, div, prelude::*, px, rgb};
 
+use crate::settings_store::shortcut_label;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
 
 /// An open menu: its items, where it opened, and the focus handle that takes `Esc`.
@@ -17,23 +19,15 @@ pub(crate) struct OpenMenu {
     pub focus: FocusHandle,
 }
 
-/// The hint shown for `shortcut`.
-pub(crate) fn shortcut_text(shortcut: Shortcut) -> &'static str {
-    #[cfg(target_os = "macos")]
-    let text = match shortcut {
-        Shortcut::SplitRight => "⌘D",
-        Shortcut::SplitDown => "⌘E",
-        Shortcut::Close => "⌘W",
-        Shortcut::Recents => "⌘⇧R",
+/// The hint shown for `shortcut`, following the user's key bindings.
+fn shortcut_text(shortcut: Shortcut, settings: &Settings) -> String {
+    let action = match shortcut {
+        Shortcut::SplitRight => "splitRightClaude",
+        Shortcut::SplitDown => "splitDownClaude",
+        Shortcut::Close => "closePane",
+        Shortcut::Recents => "openRecents",
     };
-    #[cfg(not(target_os = "macos"))]
-    let text = match shortcut {
-        Shortcut::SplitRight => "Ctrl+Shift+D",
-        Shortcut::SplitDown => "Ctrl+Shift+E",
-        Shortcut::Close => "Ctrl+Shift+W",
-        Shortcut::Recents => "Ctrl+Shift+R",
-    };
-    text
+    shortcut_label(settings, action)
 }
 
 /// Draw `menu` floating above everything; a pick or a click outside calls back, `Esc` dismisses.
@@ -41,6 +35,7 @@ pub(crate) fn render(
     id: &'static str,
     menu: &OpenMenu,
     theme: &Theme,
+    settings: &Settings,
     on_pick: impl Fn(&MenuAction, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -65,7 +60,7 @@ pub(crate) fn render(
                 .hover(|style| style.bg(rgb(theme.tokens.line)))
                 .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
                 .child(div().flex_1().child(entry.label.clone()))
-                .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut))))
+                .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings))))
                 .on_click(move |_, window, cx| on_pick(&action, window, cx))
                 .into_any_element()
         }

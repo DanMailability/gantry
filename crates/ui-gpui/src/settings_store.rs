@@ -1,10 +1,12 @@
 //! The applied settings (a GPUI global): loading `settings.json`, watching it, saving changes, and rebuilding
 //! the [`Theme`] from them.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use app_core::settings::{self, Loaded, Problem, Settings};
+use app_core::shortcuts::{self, Check, Platform};
 use app_core::theme_colors::{readable_fill, resolve, tokens};
 use gpui::{App, Global, Task, WindowAppearance};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -64,6 +66,8 @@ pub(crate) struct SettingsStore {
     /// `file_problems` plus the status fills the theme cannot draw readably.
     problems: Vec<Problem>,
     path: PathBuf,
+    /// The `shortcuts` the key bindings were last built from.
+    bound: Option<BTreeMap<String, Option<String>>>,
     _watcher: Option<RecommendedWatcher>,
     _reload: Option<Task<()>>,
 }
@@ -82,6 +86,7 @@ impl SettingsStore {
             file_problems: loaded.problems,
             problems: Vec::new(),
             path,
+            bound: None,
             _watcher: watcher,
             _reload: reload,
         });
@@ -162,10 +167,40 @@ fn apply(cx: &mut App) {
             problems.push(Problem { key: format!("statusColors.{name}"), message: "too low contrast".into() });
         }
     }
+    problems.extend(shortcut_problems(&settings.shortcuts));
     let ui_scale = settings.ui_font_size / BASE_UI_FONT_SIZE;
     store.problems = problems;
+    let rebind = store.bound.as_ref() != Some(&store.settings.shortcuts);
+    if rebind {
+        store.bound = Some(store.settings.shortcuts.clone());
+        let bindings = crate::workspace_view::all_bindings(&store.settings, Platform::current());
+        cx.clear_key_bindings();
+        cx.bind_keys(bindings);
+    }
     cx.set_global(Theme { preset, tokens, fills, ui_scale });
     cx.refresh_windows();
+}
+
+/// A problem for each override that is not a usable keystroke (it is ignored; the action keeps its default).
+fn shortcut_problems(overrides: &BTreeMap<String, Option<String>>) -> Vec<Problem> {
+    overrides
+        .iter()
+        .filter(|(id, _)| shortcuts::ACTIONS.iter().any(|action| action.id == id.as_str()))
+        .filter_map(|(id, keystroke)| {
+            let message = match shortcuts::check(keystroke.as_deref()?, id, &[]) {
+                Check::Invalid => "not a keystroke",
+                Check::Reserved(_) => "reserved for the terminal",
+                Check::Ok | Check::Conflict(_) => return None,
+            };
+            Some(Problem { key: format!("shortcuts.{id}"), message: format!("{message}; the default is used") })
+        })
+        .collect()
+}
+
+/// The label of `action`'s keystroke as the settings have it ("Not set" when unbound).
+pub(crate) fn shortcut_label(settings: &Settings, action: &str) -> String {
+    let platform = Platform::current();
+    shortcuts::label(shortcuts::current(action, &settings.shortcuts, platform).as_deref(), platform)
 }
 
 /// Watch the settings file's directory; a foreground task reloads after the events settle.
@@ -267,5 +302,31 @@ mod tests {
         let mut changed = Settings::default();
         changed.terminal_font.size = 18.0;
         assert_eq!(reload_decision(&Settings::default(), &loaded(Some(changed.clone()), Vec::new())), Reload::Apply(Box::new(changed)));
+    }
+
+    #[test]
+    fn unusable_shortcut_overrides_are_problems_and_the_rest_are_not() {
+        let overrides: BTreeMap<String, Option<String>> = [
+            ("closePane", Some("ctrl-c")),
+            ("copy", Some("bogus-key")),
+            ("toggleSidebar", Some("ctrl-alt-s")),
+            ("openRecents", None),
+            ("unknownAction", Some("ctrl-c")),
+        ]
+        .into_iter()
+        .map(|(id, key)| (id.to_string(), key.map(String::from)))
+        .collect();
+        let keys: Vec<String> = shortcut_problems(&overrides).into_iter().map(|problem| problem.key).collect();
+        assert_eq!(keys, ["shortcuts.closePane", "shortcuts.copy"]);
+    }
+
+    #[test]
+    fn labels_follow_the_overrides() {
+        let mut settings = Settings::default();
+        assert_eq!(shortcut_label(&settings, "openRecents"), "Ctrl+Shift+R");
+        settings.shortcuts.insert("openRecents".into(), Some("ctrl-alt-r".into()));
+        assert_eq!(shortcut_label(&settings, "openRecents"), "Ctrl+Alt+R");
+        settings.shortcuts.insert("openRecents".into(), None);
+        assert_eq!(shortcut_label(&settings, "openRecents"), "Not set");
     }
 }

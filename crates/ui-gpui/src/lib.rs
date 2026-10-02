@@ -44,8 +44,6 @@ pub const APP_ID: &str = "io.github.idogrf.Gantry";
 pub fn run(launch: Launch) {
     gpui_platform::application().run(move |cx: &mut App| {
         theme::load_fonts(cx);
-        terminal_view::bind_keys(cx);
-        workspace_view::bind_keys(cx);
         let paths = Paths::for_profile(&current_profile());
         SettingsStore::init(paths.settings_file.clone(), cx);
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);

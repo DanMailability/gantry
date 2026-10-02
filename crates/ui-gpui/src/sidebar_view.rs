@@ -23,16 +23,13 @@ use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
+use crate::settings_store::{SettingsStore, shortcut_label};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
 /// Ages ("5m") and project roots are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
-#[cfg(target_os = "macos")]
-const RECENTS_SHORTCUT: &str = "⌘⇧R";
-#[cfg(not(target_os = "macos"))]
-const RECENTS_SHORTCUT: &str = "Ctrl+Shift+R";
 
 /// What the sidebar asks the workspace to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -549,7 +546,7 @@ impl Render for SidebarView {
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(theme.tokens.text)))
                     .child(div().flex_1().child("Recent sessions"))
-                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(theme.tokens.raised)).child(RECENTS_SHORTCUT))
+                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(theme.tokens.raised)).child(shortcut_label(cx.global::<SettingsStore>().settings(), "openRecents")))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenRecents))),
             )
             .child(
@@ -611,6 +608,7 @@ impl Render for SidebarView {
                     "sidebar-menu",
                     menu,
                     &theme,
+                    cx.global::<SettingsStore>().settings(),
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))

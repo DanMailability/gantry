@@ -35,31 +35,17 @@ mod terminal_actions {
 }
 use terminal_actions::{Copy, Paste, ZoomIn, ZoomOut, ZoomReset};
 
-/// Register terminal shortcuts: `Ctrl+Shift+…` on Linux/Windows, `Cmd+…` on macOS.
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys(key_bindings());
-}
-
-fn key_bindings() -> Vec<KeyBinding> {
-    #[cfg(target_os = "macos")]
-    let m = "cmd";
-    #[cfg(not(target_os = "macos"))]
-    let m = "ctrl-shift";
+/// The binding of a terminal action (`id` is its settings key) at `key`.
+pub(crate) fn terminal_binding(id: &str, key: &str) -> Option<KeyBinding> {
     let context = Some("Terminal");
-    let mut bindings =
-        vec![KeyBinding::new(&format!("{m}-c"), Copy, context), KeyBinding::new(&format!("{m}-v"), Paste, context)];
-    #[cfg(target_os = "macos")]
-    let z = "cmd";
-    #[cfg(not(target_os = "macos"))]
-    let z = "ctrl";
-    // Like GNOME Terminal; `ctrl-+` is what Ctrl+Shift+= reports. Ctrl+Shift+- (ctrl-_) stays undo in the pane.
-    bindings.extend([
-        KeyBinding::new(&format!("{z}-="), ZoomIn, context),
-        KeyBinding::new(&format!("{z}-+"), ZoomIn, context),
-        KeyBinding::new(&format!("{z}--"), ZoomOut, context),
-        KeyBinding::new(&format!("{z}-0"), ZoomReset, context),
-    ]);
-    bindings
+    Some(match id {
+        "copy" => KeyBinding::new(key, Copy, context),
+        "paste" => KeyBinding::new(key, Paste, context),
+        "zoomIn" => KeyBinding::new(key, ZoomIn, context),
+        "zoomOut" => KeyBinding::new(key, ZoomOut, context),
+        "zoomReset" => KeyBinding::new(key, ZoomReset, context),
+        _ => return None,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -895,7 +881,7 @@ mod tests {
     use gpui::{Keystroke, Modifiers};
 
     fn action_for(keystroke: Keystroke) -> Option<&'static str> {
-        key_bindings()
+        crate::workspace_view::all_bindings(&Default::default(), app_core::shortcuts::Platform::Linux)
             .into_iter()
             .find(|binding| binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false))
             .map(|binding| binding.action().name())
