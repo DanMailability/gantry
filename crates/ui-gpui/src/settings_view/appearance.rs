@@ -2,12 +2,10 @@
 
 use app_core::session_tree::Tone;
 use app_core::settings::{Settings, StatusFills, ThemeChoice, parse_hex};
-use app_core::theme_colors::{Preset, ProjectColor, Tokens, contrast, derive, readable_fill, terminal_palette, tokens as preset_tokens, tone_colors};
-use gpui::{App, Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, div, px, rgb, rgba, deferred};
+use app_core::theme_colors::{Preset, ProjectColor, Tokens, contrast, derive, readable_fill, tokens as preset_tokens, tone_colors};
+use gpui::{Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, div, px, rgb, rgba, deferred};
 
 use super::*;
-use crate::settings_store::shortcut_label;
-use crate::terminal_view::FONT_FAMILY;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
 
 /// A session status whose sidebar fill can be chosen.
@@ -42,10 +40,10 @@ impl Status {
 
     fn description(self) -> &'static str {
         match self {
-            Status::NeedsInput => "Claude is waiting for you",
-            Status::Working => "Claude is busy",
-            Status::Done => "Finished; you have not looked yet",
-            Status::Idle => "Waiting quietly; a muted fill",
+            Status::NeedsInput => "Claude is waiting for you.",
+            Status::Working => "Claude is busy.",
+            Status::Done => "Finished, and you have not looked yet.",
+            Status::Idle => "Waiting quietly. A muted fill.",
         }
     }
 
@@ -82,22 +80,6 @@ impl Status {
     }
 }
 
-const TERMINAL_SIZE: Stepped = Stepped {
-    name: "terminal-size",
-    get: |s| s.terminal_font.size,
-    set: |s, value| s.terminal_font.size = value,
-    delta: 1.0,
-    min: 8.0,
-    max: 40.0,
-};
-const LINE_HEIGHT: Stepped = Stepped {
-    name: "line-height",
-    get: |s| s.terminal_font.line_height,
-    set: |s, value| s.terminal_font.line_height = value,
-    delta: 0.1,
-    min: 1.0,
-    max: 2.0,
-};
 const INTERFACE_SIZE: Stepped = Stepped {
     name: "interface-size",
     get: |s| s.ui_font_size,
@@ -105,23 +87,21 @@ const INTERFACE_SIZE: Stepped = Stepped {
     delta: 1.0,
     min: 11.0,
     max: 20.0,
+    unit: "",
 };
 
 const SUGGESTED_FILLS: [u32; 12] =
     [0xc1e5cd, 0xb7e4dd, 0xcfe8b4, 0xe6efb0, 0xa8dcc0, 0xd5ecd9, 0xf7c9a3, 0xf6b8b8, 0xe9c6ef, 0xc9cdf6, 0xb9d5f6, 0xf1e1a6];
 
 const THEME_CARDS: [(ThemeChoice, &str, &str); 3] = [
-    (ThemeChoice::Mist, "Mist", "Dark slate, light-blue accent"),
-    (ThemeChoice::MistLight, "Mist light", "The same look on a light ground"),
-    (ThemeChoice::System, "Follow system", "Dark or light from the desktop"),
+    (ThemeChoice::Mist, "Mist", "Dark slate with a light-blue accent."),
+    (ThemeChoice::MistLight, "Mist light", "The same look on a light ground."),
+    (ThemeChoice::System, "Follow system", "Dark or light, as the desktop is."),
 ];
 
-const PROJECT_COLOURS_HINT: &str =
-    "Each project gets a colour in the sidebar, on its tabs and in recent sessions. Change one from the project's right-click menu.";
-
-/// "Picked colours: 3 folders" ("1 folder" in the singular).
+/// "3 folders have a colour you picked." ("1 folder has" in the singular).
 fn picked_text(count: usize) -> String {
-    format!("Picked colours: {count} {}", if count == 1 { "folder" } else { "folders" })
+    if count == 1 { "1 folder has a colour you picked.".into() } else { format!("{count} folders have a colour you picked.") }
 }
 
 /// The contrast line for a picked `fill`, and whether the fill may be used.
@@ -143,26 +123,6 @@ fn fill_to_store(fill: u32, default: u32) -> Option<u32> {
 fn parse_fill(text: &str) -> Option<u32> {
     let text = text.trim();
     parse_hex(&if text.starts_with('#') { text.to_string() } else { format!("#{text}") })
-}
-
-/// The families whose `m` and `i` advance the same: `(family, advance of m, advance of i)` in, sorted names out.
-fn monospace_families(measured: impl IntoIterator<Item = (String, f32, f32)>) -> Vec<String> {
-    let mut names: Vec<String> =
-        measured.into_iter().filter(|(_, m, i)| (m - i).abs() < 0.01).map(|(name, _, _)| name).collect();
-    names.sort();
-    names.dedup();
-    names
-}
-
-pub(super) fn installed_monospace(cx: &App) -> Vec<String> {
-    let text_system = cx.text_system();
-    let measured = text_system.all_font_names().into_iter().filter_map(|name| {
-        let id = text_system.resolve_font(&gpui::font(name.clone()));
-        let m = text_system.advance(id, px(14.), 'm').ok()?.width;
-        let i = text_system.advance(id, px(14.), 'i').ok()?.width;
-        Some((name, f32::from(m), f32::from(i)))
-    });
-    monospace_families(measured)
 }
 
 impl SettingsView {
@@ -215,7 +175,7 @@ impl SettingsView {
             .gap(theme.ui(26.))
             .child(self.theme_cards(theme, settings, window, cx))
             .child(self.status_colours(theme, settings, window, cx))
-            .child(self.fonts(theme, settings, window, cx))
+            .child(self.interface_group(theme, settings, window, cx))
             .child(self.project_colours(theme, settings, window, cx))
     }
 
@@ -292,7 +252,7 @@ impl SettingsView {
                 )
                 .child(div().mt(theme.ui(-6.)).child(muted(theme, *hint)))
         });
-        div().flex().flex_col().gap(theme.ui(12.)).child(heading(theme, "Theme")).child(div().flex().flex_wrap().gap(theme.ui(14.)).children(cards))
+        group(theme, "Theme", None, vec![stacked_row(theme, None, div().flex().flex_wrap().gap(theme.ui(14.)).children(cards))])
     }
 
     fn status_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -303,8 +263,7 @@ impl SettingsView {
             let shown = chosen.unwrap_or_else(|| status.default_fill(theme.preset));
             let open = self.popover == Some(Popover::Fill(status));
             let sample = div()
-                .w(theme.ui(300.))
-                .max_w_full()
+                .w(theme.ui(250.))
                 .flex_none()
                 .h(theme.ui(34.))
                 .px_3()
@@ -338,115 +297,51 @@ impl SettingsView {
                 .child(div().size(theme.ui(22.)).rounded(px(6.)).bg(rgb(shown)).border_1().border_color(rgb(theme.tokens.line)))
                 .child(hex(shown));
             let picker = open.then(|| self.fill_picker(status, theme, window, cx));
-            let reset = self
-                .pressable("status-reset", index, None, window, cx, change(move |settings| status.set(&mut settings.status_fills, None)))
-                .h(theme.ui(34.))
-                .px(theme.ui(10.))
-                .flex()
-                .items_center()
-                .rounded(px(RADIUS_SMALL))
-                .text_color(rgb(if chosen.is_some() { theme.tokens.text } else { theme.tokens.muted }))
-                .child("Reset");
-            div().flex().flex_wrap().items_center().gap_x(theme.ui(18.)).gap_y(theme.ui(6.)).py(theme.ui(6.)).child(sample).child(
-                div()
-                    .flex_1()
-                    .min_w(theme.ui(300.))
-                    .flex()
-                    .items_center()
-                    .gap(theme.ui(18.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(theme.ui(90.))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(status.label()))
-                            .child(muted(theme, status.description())),
-                    )
-                    .child(div().relative().flex_none().child(picker_button).children(picker))
-                    .child(reset.flex_none()),
-            )
+            let reset = self.reset_button("status-reset", index, chosen.is_some(), change(move |settings| status.set(&mut settings.status_fills, None)), window, cx);
+            let control = div().flex().items_center().gap(theme.ui(10.)).child(sample).child(div().relative().flex_none().child(picker_button).children(picker));
+            row(theme, status.label(), status.description(), control, reset)
         });
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(10.))
-            .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap(theme.ui(12.))
-                    .child(heading(theme, "Status colours"))
-                    .child(div().text_color(rgb(theme.tokens.muted)).child("Pick a fill; text and dot colours follow it.")),
-            )
-            .children(rows)
+        group(theme, "Status colours", Some("Pick a fill for each status. Text and dot colours follow it."), rows.into_iter().collect())
+    }
+
+    fn interface_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+        let control = self.stepper(&INTERFACE_SIZE, settings, window, cx);
+        let reset = self.reset_slot("reset-interface-size", 0, settings, |s| s.ui_font_size, |s, v| s.ui_font_size = v, window, cx);
+        group(theme, "Interface", None, vec![row(theme, "Interface size", "Sidebar, tabs and menus.", control, reset)])
     }
 
     fn project_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let enabled = settings.project_colors.enabled;
         let switch = self.switch("project-colours", 0, enabled, window, cx, change(move |settings| settings.project_colors.enabled = !enabled));
-        let palette = |name: &'static str, preset: Preset| {
-            let ground = preset_tokens(preset);
+        let switch_reset = self.reset_slot("reset-project-colours", 0, settings, |s| s.project_colors.enabled, |s, v| s.project_colors.enabled = v, window, cx);
+        let strip = |preset: Preset| {
             div()
                 .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_x(theme.ui(12.))
-                .gap_y(theme.ui(6.))
-                .child(div().flex_none().w(theme.ui(80.)).child(name))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(theme.ui(8.))
-                        .p(theme.ui(8.))
-                        .rounded(px(RADIUS_SMALL))
-                        .bg(rgb(ground.ground))
-                        .border_1()
-                        .border_color(rgb(theme.tokens.line))
-                        .children(ProjectColor::ALL.map(|color| div().flex_none().size(theme.ui(26.)).rounded(px(RADIUS_SMALL - 2.)).bg(rgb(color.value(preset))))),
-                )
-        };
-        let picked = settings.project_colors.folders.len();
-        let forget = (picked > 0).then(|| {
-            let forget = self
-                .pressable("forget-colours", 0, None, window, cx, change(|settings| settings.project_colors.folders.clear()))
-                .px(theme.ui(10.))
-                .h(theme.ui(30.))
-                .flex()
-                .items_center()
+                .gap(theme.ui(4.))
+                .p(theme.ui(6.))
                 .rounded(px(RADIUS_SMALL))
-                .text_color(rgb(theme.tokens.accent))
-                .child("Forget all");
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_x(theme.ui(12.))
-                .child(div().text_color(rgb(theme.tokens.muted)).child(picked_text(picked)))
-                .child(forget)
-        });
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(12.))
-            .child(heading(theme, "Project colours"))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(theme.ui(16.))
-                    .py(theme.ui(4.))
-                    .child(switch)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Colour projects"))
-                            .child(muted(theme, PROJECT_COLOURS_HINT)),
-                    ),
-            )
-            .child(palette("Mist", Preset::Mist))
-            .child(palette("Mist light", Preset::MistLight))
-            .children(forget)
+                .bg(rgb(preset_tokens(preset).ground))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .children(ProjectColor::ALL.map(|color| div().flex_none().size(theme.ui(18.)).rounded(px(RADIUS_SMALL - 4.)).bg(rgb(color.value(preset)))))
+        };
+        let palette = div().flex().flex_wrap().justify_end().gap(theme.ui(8.)).child(strip(Preset::Mist)).child(strip(Preset::MistLight));
+        let picked = settings.project_colors.folders.len();
+        let mut rows = vec![
+            row(
+                theme,
+                "Project colours",
+                "Each project gets a colour in the sidebar, on its tabs and in recent sessions. Change one from the project's right-click menu.",
+                switch,
+                switch_reset,
+            ),
+            row(theme, "Palette", "Mist, then Mist light.", palette, empty_slot(theme)),
+        ];
+        if picked > 0 {
+            let forget = self.button("forget-colours", 0, "Forget all", window, cx, change(|settings| settings.project_colors.folders.clear()));
+            rows.push(row(theme, "Picked colours", picked_text(picked), forget, empty_slot(theme)));
+        }
+        group(theme, "Project colours", None, rows)
     }
 
     fn fill_picker(&mut self, status: Status, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -529,86 +424,6 @@ impl SettingsView {
         )
         .with_priority(1)
     }
-
-    fn fonts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
-        let font = &settings.terminal_font;
-        let label = match &font.family {
-            Some(family) => family.clone(),
-            None => format!("{FONT_FAMILY} (default)"),
-        };
-        let mut options: Vec<(String, bool, Handler)> = vec![(
-            format!("{FONT_FAMILY} (default)"),
-            font.family.is_none(),
-            change(|settings| settings.terminal_font.family = None),
-        )];
-        options.extend(self.families.iter().filter(|family| *family != FONT_FAMILY).map(|family| {
-            let name = family.clone();
-            (family.clone(), font.family.as_deref() == Some(family.as_str()), change(move |settings| settings.terminal_font.family = Some(name.clone())))
-        }));
-        let family_row = div()
-            .flex()
-            .items_center()
-            .gap(theme.ui(12.))
-            .child(div().w(theme.ui(150.)).child("Terminal font"))
-            .child(self.dropdown("font-family", 0, Popover::Font, label, theme.ui(210.), options, window, cx));
-        let stepper_row = |this: &mut Self, label: &'static str, stepped: &'static Stepped, hint: String, cx: &mut Context<Self>| {
-            div()
-                .flex()
-                .items_center()
-                .gap(theme.ui(12.))
-                .child(div().flex_none().w(theme.ui(150.)).child(label))
-                .child(this.stepper(stepped, settings, window, cx))
-                .child(muted(theme, hint).flex_1().min_w_0())
-        };
-        let controls = div()
-            .w(theme.ui(520.))
-            .max_w_full()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(12.))
-            .child(family_row)
-            .child(stepper_row(self, "Terminal size", &TERMINAL_SIZE, format!("{} / {} change this too", shortcut_label(settings, "zoomIn"), shortcut_label(settings, "zoomOut")), cx))
-            .child(stepper_row(self, "Line height", &LINE_HEIGHT, String::new(), cx))
-            .child(stepper_row(self, "Interface size", &INTERFACE_SIZE, "Sidebar, tabs, menus".into(), cx));
-
-        let palette = terminal_palette(theme.preset);
-        let ok = color(palette.ansi[2]);
-        let line = |parts: Vec<(String, Option<u32>)>| {
-            div().flex().flex_row().whitespace_nowrap().children(parts.into_iter().map(move |(text, ink)| {
-                div().when_some(ink, |part, ink| part.text_color(rgb(ink))).child(text)
-            }))
-        };
-        let family = font.family.clone().unwrap_or_else(|| FONT_FAMILY.to_string());
-        let sample = div()
-            .flex_1()
-            .min_w(theme.ui(300.))
-            .px(theme.ui(16.))
-            .py(theme.ui(14.))
-            .rounded(px(RADIUS))
-            .bg(rgb(theme.tokens.terminal))
-            .border_1()
-            .border_color(rgb(theme.tokens.line))
-            .overflow_hidden()
-            .font_family(family)
-            .text_size(px(font.size))
-            .line_height(px(font.size * font.line_height))
-            .text_color(rgb(color(palette.foreground)))
-            .child(line(vec![("~/rust_terminal".into(), Some(theme.tokens.accent)), (" $ cargo test -p app-core settings".into(), None)]))
-            .child(line(vec![("running 12 tests".into(), None)]))
-            .child(line(vec![("test settings::missing_keys_use_defaults ... ".into(), None), ("ok".into(), Some(ok))]))
-            .child(line(vec![("test settings::low_contrast_fill_is_refused ... ".into(), None), ("ok".into(), Some(ok))]))
-            .child(line(vec![
-                ("test result: ".into(), None),
-                ("ok".into(), Some(ok)),
-                (". 12 passed; 0 failed".into(), None),
-            ]));
-        div()
-            .flex()
-            .flex_col()
-            .gap(theme.ui(12.))
-            .child(heading(theme, "Fonts"))
-            .child(div().flex().flex_wrap().items_start().gap(theme.ui(20.)).child(controls).child(sample))
-    }
 }
 
 #[cfg(test)]
@@ -618,9 +433,8 @@ mod tests {
 
     #[test]
     fn picked_colours_text_is_singular_for_one_folder() {
-        assert_eq!(picked_text(1), "Picked colours: 1 folder");
-        assert_eq!(picked_text(3), "Picked colours: 3 folders");
-        assert!(PROJECT_COLOURS_HINT.starts_with("Each project gets a colour in the sidebar, on its tabs and in recent sessions."));
+        assert_eq!(picked_text(1), "1 folder has a colour you picked.");
+        assert_eq!(picked_text(3), "3 folders have a colour you picked.");
     }
 
     #[test]
@@ -659,16 +473,5 @@ mod tests {
         assert_eq!(parse_fill(" c1e5cd "), Some(0xc1e5cd));
         assert_eq!(parse_fill("#c1e5"), None);
         assert_eq!(parse_fill(""), None);
-    }
-
-    #[test]
-    fn only_fixed_width_families_are_listed_once_and_sorted() {
-        let measured = [
-            ("Noto Sans Mono".to_string(), 8.4, 8.4),
-            ("Figtree".to_string(), 12.0, 4.0),
-            ("Adwaita Mono".to_string(), 8.4, 8.4),
-            ("Noto Sans Mono".to_string(), 8.4, 8.4),
-        ];
-        assert_eq!(monospace_families(measured), ["Adwaita Mono", "Noto Sans Mono"]);
     }
 }
