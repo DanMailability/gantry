@@ -1,10 +1,11 @@
 //! A right-click menu: entries in groups, a hint for the entry's shortcut, the row's main action in the accent colour.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
-use app_core::menus::{MenuAction, MenuItem, Shortcut};
+use app_core::menus::{MenuAction, MenuEntry, MenuItem, Shortcut};
 use app_core::settings::Settings;
-use gpui::{App, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, deferred, div, prelude::*, px, rgb};
+use gpui::{App, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, deferred, div, prelude::*, px, relative, rgb};
 
 use crate::settings_store::shortcut_label;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
@@ -17,6 +18,15 @@ pub(crate) struct OpenMenu {
     pub position: Point<Pixels>,
     /// Focused while open, so `Esc` closes it.
     pub focus: FocusHandle,
+    /// The index of the submenu that is open, if any.
+    pub sub: Rc<Cell<Option<usize>>>,
+}
+
+impl OpenMenu {
+    /// A closed-submenu menu at `position`.
+    pub fn new(items: Vec<MenuItem>, position: Point<Pixels>, focus: FocusHandle) -> OpenMenu {
+        OpenMenu { items, position, focus, sub: Rc::new(Cell::new(None)) }
+    }
 }
 
 /// The hint shown for `shortcut`, following the user's key bindings.
@@ -30,7 +40,8 @@ fn shortcut_text(shortcut: Shortcut, settings: &Settings) -> String {
     shortcut_label(settings, action)
 }
 
-/// Draw `menu` floating above everything; a pick or a click outside calls back, `Esc` dismisses.
+/// Draw `menu` floating above everything; a pick or a click outside calls back, `Esc` dismisses. A submenu opens beside
+/// its row on hover or `Right`, and closes on `Left` or `Esc`.
 pub(crate) fn render(
     id: &'static str,
     menu: &OpenMenu,
@@ -42,14 +53,63 @@ pub(crate) fn render(
     let on_pick = Rc::new(on_pick);
     let on_dismiss = Rc::new(on_dismiss);
     let dismiss_key = on_dismiss.clone();
+    let open_sub = menu.sub.get();
+    let entry_row = |row_id: (&'static str, usize), entry: &MenuEntry, closes_sub: Option<Rc<Cell<Option<usize>>>>| {
+        let action = entry.action.clone();
+        let on_pick = on_pick.clone();
+        div()
+            .id(row_id)
+            .px_3()
+            .py_1()
+            .flex()
+            .items_center()
+            .gap_4()
+            .rounded(px(RADIUS_SMALL))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tokens.line)))
+            .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
+            .child(div().flex_1().whitespace_nowrap().child(entry.label.clone()))
+            .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings))))
+            .when_some(closes_sub, |item, sub| {
+                item.on_hover(move |hovered, window, _| {
+                    if *hovered && sub.get().is_some() {
+                        sub.set(None);
+                        window.refresh();
+                    }
+                })
+            })
+            .on_click(move |_, window, cx| on_pick(&action, window, cx))
+            .into_any_element()
+    };
     let rows = menu.items.iter().enumerate().map(|(index, item)| match item {
-        MenuItem::Submenu { .. } => div().into_any_element(),
         MenuItem::Separator => div().h(px(1.)).mx_2().my_1().bg(rgb(theme.tokens.line)).into_any_element(),
-        MenuItem::Entry(entry) => {
-            let action = entry.action.clone();
-            let on_pick = on_pick.clone();
+        MenuItem::Entry(entry) => entry_row(("menu-item", index), entry, Some(menu.sub.clone())),
+        MenuItem::Submenu { label, items } => {
+            let (hover, click) = (menu.sub.clone(), menu.sub.clone());
+            let open = open_sub == Some(index);
+            let children = open.then(|| {
+                let entries = items.iter().enumerate().filter_map(|(position, item)| match item {
+                    MenuItem::Entry(entry) => Some(entry_row(("menu-sub-item", index * 100 + position), entry, None)),
+                    _ => None,
+                });
+                div()
+                    .absolute()
+                    .left(relative(1.))
+                    .top(px(-4.))
+                    .min_w(theme.ui(200.))
+                    .p_1()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(theme.tokens.raised))
+                    .border_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .rounded(px(RADIUS))
+                    .shadow_lg()
+                    .children(entries)
+            });
             div()
                 .id(("menu-item", index))
+                .relative()
                 .px_3()
                 .py_1()
                 .flex()
@@ -57,14 +117,26 @@ pub(crate) fn render(
                 .gap_4()
                 .rounded(px(RADIUS_SMALL))
                 .cursor_pointer()
+                .when(open, |item| item.bg(rgb(theme.tokens.line)))
                 .hover(|style| style.bg(rgb(theme.tokens.line)))
-                .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
-                .child(div().flex_1().child(entry.label.clone()))
-                .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings))))
-                .on_click(move |_, window, cx| on_pick(&action, window, cx))
+                .on_hover(move |hovered, window, _| {
+                    if *hovered && hover.get() != Some(index) {
+                        hover.set(Some(index));
+                        window.refresh();
+                    }
+                })
+                .on_click(move |_, window, _| {
+                    click.set(Some(index));
+                    window.refresh();
+                })
+                .child(div().flex_1().whitespace_nowrap().child(label.clone()))
+                .child(div().text_color(rgb(theme.tokens.muted)).child("▸"))
+                .children(children)
                 .into_any_element()
         }
     });
+    let sub = menu.sub.clone();
+    let first_submenu = menu.items.iter().position(|item| matches!(item, MenuItem::Submenu { .. }));
     deferred(
         anchored().position(menu.position).snap_to_window().child(
             div()
@@ -73,8 +145,17 @@ pub(crate) fn render(
                 .occlude()
                 .track_focus(&menu.focus)
                 .on_key_down(move |event, window, cx| {
-                    if event.keystroke.key == "escape" {
-                        dismiss_key(window, cx);
+                    match event.keystroke.key.as_str() {
+                        "escape" | "left" if sub.get().is_some() => {
+                            sub.set(None);
+                            window.refresh();
+                        }
+                        "escape" => dismiss_key(window, cx),
+                        "right" if sub.get().is_none() && first_submenu.is_some() => {
+                            sub.set(first_submenu);
+                            window.refresh();
+                        }
+                        _ => {}
                     }
                     // Keys must not reach what is beneath the menu (the sidebar filter).
                     cx.stop_propagation();

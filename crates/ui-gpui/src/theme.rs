@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use app_core::session_tree::Tone;
 use app_core::settings::StatusFills;
 use app_core::theme_colors::{Preset, ToneColors, Tokens, tone_colors};
-use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, Styled, div, px, rgba};
+use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, SharedString, Styled, div, px, rgba};
 
 /// The colours and sizes views draw with, a GPUI global replaced whenever the settings change.
 #[derive(Clone)]
@@ -58,6 +58,16 @@ const FONTS: [&[u8]; 5] = [
 
 /// The small "container" tag on dev container sessions, tabs and pane headers, drawn in `ink`.
 pub(crate) fn container_chip(ink: u32) -> Div {
+    tag_chip(ink, "container")
+}
+
+/// The Claude config dir's name on sessions, tabs and pane headers, drawn like [`container_chip`]; shown only with
+/// two or more config dirs.
+pub(crate) fn dir_chip(ink: u32, name: String) -> Div {
+    tag_chip(ink, name)
+}
+
+fn tag_chip(ink: u32, text: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
         .px(px(5.))
@@ -66,7 +76,7 @@ pub(crate) fn container_chip(ink: u32) -> Div {
         .border_color(rgba((ink << 8) | 0x66))
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
-        .child("container")
+        .child(text.into())
 }
 
 /// Make the embedded interface font available.

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use protocol::message::{ContainerPlace, SessionState};
 
 use crate::session_tree::{Row, RowKind, Tone};
+use crate::settings::Settings;
 use crate::split_tree::{Axis, NodeId};
 
 /// A shortcut whose hint a menu entry shows.
@@ -108,6 +109,19 @@ pub struct MenuContext {
     pub dirs: Vec<(String, bool, bool)>,
     /// Whether the folder is pinned as a favorite.
     pub favorite: bool,
+}
+
+impl MenuContext {
+    /// The context for `folder` from the settings: the configured dirs (the default one marked, the one remembered
+    /// for exactly this folder marked) and whether the folder is a favorite.
+    pub fn for_folder(settings: &Settings, folder: &Path) -> MenuContext {
+        let default = settings.default_claude_dir.as_deref().filter(|name| settings.claude_dirs.iter().any(|dir| dir.name == *name)).or_else(|| settings.claude_dirs.first().map(|dir| dir.name.as_str()));
+        let remembered = settings.folder_claude_dirs.get(folder);
+        MenuContext {
+            dirs: settings.claude_dirs.iter().map(|dir| (dir.name.clone(), Some(dir.name.as_str()) == default, remembered == Some(&dir.name))).collect(),
+            favorite: settings.favorites.iter().any(|favorite| favorite == folder),
+        }
+    }
 }
 
 fn entry(label: &str, action: MenuAction) -> MenuItem {
@@ -461,6 +475,24 @@ mod tests {
         assert_eq!(work.action, MenuAction::NewClaudeWith { dir: "/r/app".into(), dir_name: "Work".into() });
         let remembered_default = project_menu(Path::new("/r/app"), None, &two_dirs(Some(0)));
         assert_eq!(submenu_labels(&remembered_default)[0], "Personal (default) ✓ this folder");
+    }
+
+    #[test]
+    fn the_context_follows_the_settings() {
+        use crate::settings::ClaudeDir;
+        let dir = |name: &str| ClaudeDir { name: name.into(), path: format!("~/.{name}").into(), command: "claude".into(), args: vec![] };
+        let mut settings = Settings { claude_dirs: vec![dir("Personal"), dir("Work")], ..Settings::default() };
+        settings.default_claude_dir = Some("Work".into());
+        settings.folder_claude_dirs.insert("/r/app".into(), "Personal".into());
+        settings.favorites = vec!["/r/app".into()];
+        let here = MenuContext::for_folder(&settings, Path::new("/r/app"));
+        assert_eq!(here.dirs, [("Personal".to_string(), false, true), ("Work".to_string(), true, false)]);
+        assert!(here.favorite);
+        let elsewhere = MenuContext::for_folder(&settings, Path::new("/r/other"));
+        assert_eq!(elsewhere.dirs, [("Personal".to_string(), false, false), ("Work".to_string(), true, false)]);
+        assert!(!elsewhere.favorite);
+        // No configured dirs: the implicit Default is not a choice.
+        assert!(MenuContext::for_folder(&Settings::default(), Path::new("/r/app")).dirs.is_empty());
     }
 
     #[test]

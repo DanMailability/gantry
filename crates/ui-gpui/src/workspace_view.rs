@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -11,10 +11,9 @@ use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, terminal_palette};
-use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
+use app_core::workspace::{ClaudeDirs, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
-use daemon::pty::default_shell;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     PathPromptOptions, Point, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
@@ -32,9 +31,9 @@ use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
-use crate::settings_store::SettingsStore;
+use crate::settings_store::{SettingsStore, dir_name};
 use crate::settings_view::SettingsView;
-use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, theme};
 use crate::window_frame;
 
 pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
@@ -134,10 +133,15 @@ enum TakeOverTarget {
 /// A new session waiting to learn whether a dev container mounts its directory.
 struct PendingOpen {
     claude: bool,
+    /// The config dir chosen for this one launch (launcher chip or menu), by name.
+    pick: Option<String>,
     cwd: PathBuf,
     axis: Option<Axis>,
     cwd_from: Option<PaneId>,
 }
+
+/// What the tab bar draws for a tab: title, status, unseen alert, in a container, config dir name, is the Settings tab.
+type TabView = (String, Option<SessionStatus>, bool, bool, Option<String>, bool);
 
 /// Root view of the Gantry window.
 pub struct WorkspaceView {
@@ -149,6 +153,12 @@ pub struct WorkspaceView {
     client: DaemonClient,
     layout_file: PathBuf,
     default_cwd: PathBuf,
+    /// The daemon's own Claude config dir (its panes need no `CLAUDE_CONFIG_DIR`).
+    daemon_dir: Option<PathBuf>,
+    /// The Claude config dirs in effect, from the settings.
+    dirs: ClaudeDirs,
+    /// The paths last sent to the daemon with `SetClaudeDirs`.
+    sent_dirs: Option<Vec<PathBuf>>,
     focus_handle: FocusHandle,
     prompting: Rc<Cell<bool>>,
     /// Divider being dragged.
@@ -198,7 +208,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let Connection { client, events, .. } = connection;
+        let Connection { client, events, claude_dir: daemon_dir, .. } = connection;
         let events_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 let batch = batch_events(first, &events, MAX_BATCH_BYTES);
@@ -240,6 +250,9 @@ impl WorkspaceView {
             client,
             layout_file,
             default_cwd,
+            dirs: ClaudeDirs::from_settings(cx.global::<SettingsStore>().settings(), daemon_dir.as_deref(), std::env::home_dir().as_deref()),
+            daemon_dir,
+            sent_dirs: None,
             focus_handle: cx.focus_handle(),
             prompting: Rc::new(Cell::new(false)),
             dragging: None,
@@ -298,6 +311,13 @@ impl WorkspaceView {
         if self.sent_palette != Some(preset) {
             self.client.set_palette(PaletteColors::from(terminal_palette(preset)));
             self.sent_palette = Some(preset);
+        }
+        let settings = cx.global::<SettingsStore>().settings();
+        self.dirs = ClaudeDirs::from_settings(settings, self.daemon_dir.as_deref(), std::env::home_dir().as_deref());
+        let configured: Vec<PathBuf> = if settings.claude_dirs.is_empty() { Vec::new() } else { self.dirs.dirs.iter().map(|dir| dir.path.clone()).collect() };
+        if self.sent_dirs.as_ref() != Some(&configured) {
+            self.client.set_claude_dirs(configured.clone());
+            self.sent_dirs = Some(configured);
         }
         let seconds = cx.global::<SettingsStore>().settings().alerts.finished_after_seconds;
         self.attention.set_finished_after_ms(u64::from(seconds) * 1000);
@@ -440,6 +460,17 @@ impl WorkspaceView {
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, cx));
     }
 
+    /// The name of the Claude config dir `leaf` runs in, when two or more are configured.
+    fn leaf_dir_name(&self, leaf: NodeId, cx: &App) -> Option<String> {
+        let entry = self.workspace.leaves.get(&leaf)?;
+        if !entry.launch.is_claude() || entry.launch.container.is_some() {
+            return None;
+        }
+        let recorded = entry.session.as_deref().and_then(|id| self.sidebar.read(cx).sessions().get(id)).and_then(|info| info.claude_dir.clone());
+        let path = recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone());
+        dir_name(cx.global::<SettingsStore>().settings(), path.as_deref())
+    }
+
     /// Start `launch` in the finished `leaf`.
     fn start_leaf(&mut self, leaf: NodeId, launch: PaneLaunch, cx: &mut Context<Self>) {
         let Some(slot) = self.slots.get(&leaf) else { return };
@@ -503,7 +534,8 @@ impl WorkspaceView {
             TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
                 Some(TakeOverTarget::NewPane { cwd, split, container }) => {
                     let axis = split.then_some(Axis::Horizontal);
-                    self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
+                    let launch = self.resume_launch(&session, cwd, container, cx);
+                    self.open_launch(launch, axis, None, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
                     if let Some(launch) = self.workspace.leaves.get(&leaf).map(|entry| entry.rerun(true)) {
@@ -568,7 +600,7 @@ impl WorkspaceView {
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.pane);
-        self.open_new(claude, cwd, axis, cwd_from);
+        self.open_new(claude, cwd, axis, cwd_from, None);
     }
 
     /// The Settings tab is the active one (it has no pane to split).
@@ -577,17 +609,56 @@ impl WorkspaceView {
     }
 
     /// Start a new Claude or shell pane in `cwd` — after asking where, when a dev container mounts `cwd`.
-    fn open_new(&mut self, claude: bool, cwd: PathBuf, axis: Option<Axis>, cwd_from: Option<PaneId>) {
+    fn open_new(&mut self, claude: bool, cwd: PathBuf, axis: Option<Axis>, cwd_from: Option<PaneId>, pick: Option<String>) {
         self.next_request += 1;
         self.client.find_container(self.next_request, &cwd);
-        self.pending_opens.insert(self.next_request, PendingOpen { claude, cwd, axis, cwd_from });
+        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from });
+    }
+
+    /// Start a new Claude session (or shell) in `cwd`: Claude with the config dir `pick` names, else the one remembered
+    /// for exactly this folder, else the default.
+    fn new_launch(&self, claude: bool, cwd: PathBuf, pick: Option<&str>, container: Option<PathBuf>, cx: &App) -> PaneLaunch {
+        let settings = cx.global::<SettingsStore>().settings();
+        if !claude {
+            return PaneLaunch::shell(cwd, &settings.shell).in_container(container);
+        }
+        let dir = self.dirs.for_folder(&cwd, pick, &settings.folder_claude_dirs);
+        PaneLaunch::claude_with(cwd, dir, self.daemon_dir.as_deref(), container)
+    }
+
+    /// Resume `session` where it ran: with the command and config dir recorded for it.
+    fn resume_launch(&self, session: &str, cwd: PathBuf, container: Option<PathBuf>, cx: &App) -> PaneLaunch {
+        let session_dir = self.sidebar.read(cx).sessions().get(session).and_then(|info| info.claude_dir.clone());
+        PaneLaunch::resume_with(session, cwd, container, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
+    }
+
+    /// A new session from the launcher; an explicit config dir pick is remembered for the folder.
+    fn open_launcher_pick(&mut self, claude: bool, dir: PathBuf, dir_pick: Option<String>, cx: &mut Context<Self>) {
+        if let Some(name) = &dir_pick {
+            self.remember_pick(&dir, name, cx);
+        }
+        self.open_new(claude, dir, None, None, dir_pick);
+    }
+
+    /// An explicit pick of a config dir for `folder` is remembered for it; picking the default forgets it.
+    fn remember_pick(&self, folder: &Path, name: &str, cx: &mut App) {
+        let is_default = self.dirs.dirs.get(self.dirs.default).is_some_and(|dir| dir.name == name);
+        let (folder, name) = (folder.to_path_buf(), name.to_string());
+        SettingsStore::update(cx, move |settings| {
+            if is_default {
+                settings.folder_claude_dirs.remove(&folder);
+            } else {
+                settings.folder_claude_dirs.insert(folder, name);
+            }
+        });
     }
 
     /// The daemon said which dev container (if any) mounts a waiting session's directory: open it locally, or ask.
     fn on_container_found(&mut self, request: u64, container: Option<ContainerChoice>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(PendingOpen { claude, cwd, axis, cwd_from }) = self.pending_opens.remove(&request) else { return };
+        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from }) = self.pending_opens.remove(&request) else { return };
         let Some(container) = container else {
-            self.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx);
+            let launch = self.new_launch(claude, cwd, pick.as_deref(), None, cx);
+            self.open_launch(launch, axis, cwd_from, window, cx);
             return;
         };
         let folder = &container.host_folder;
@@ -604,9 +675,15 @@ impl WorkspaceView {
         cx.spawn_in(window, async move |this, cx| {
             let answer = answer.await;
             let _ = this.update_in(cx, |this, window, cx| match answer {
-                // Splits of a container pane start in the session's directory, not the docker client's.
-                Ok(0) => this.open_launch(new_launch(claude, cwd).in_container(Some(container.host_folder)), axis, None, window, cx),
-                Ok(1) => this.open_launch(new_launch(claude, cwd), axis, cwd_from, window, cx),
+                Ok(0) => {
+                    // Splits of a container pane start in the session's directory, not the docker client's.
+                    let launch = this.new_launch(claude, cwd, pick.as_deref(), Some(container.host_folder), cx);
+                    this.open_launch(launch, axis, None, window, cx)
+                }
+                Ok(1) => {
+                    let launch = this.new_launch(claude, cwd, pick.as_deref(), None, cx);
+                    this.open_launch(launch, axis, cwd_from, window, cx)
+                }
                 _ => this.focus_current(window, cx),
             });
         })
@@ -772,8 +849,17 @@ impl WorkspaceView {
                     None => {}
                 }
             }
-            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
-            MenuAction::NewClaudeWith { .. } | MenuAction::PinFavorite(_) | MenuAction::UnpinFavorite(_) => {}
+            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, None),
+            MenuAction::NewClaudeWith { dir, dir_name } => {
+                self.remember_pick(&dir, &dir_name, cx);
+                self.open_new(true, dir, None, None, Some(dir_name));
+            }
+            MenuAction::PinFavorite(dir) => SettingsStore::update(cx, |settings| {
+                if !settings.favorites.contains(&dir) {
+                    settings.favorites.push(dir);
+                }
+            }),
+            MenuAction::UnpinFavorite(dir) => SettingsStore::update(cx, |settings| settings.favorites.retain(|favorite| *favorite != dir)),
             MenuAction::RecentsFor(project) => self.show_recents(Some(project), window, cx),
             MenuAction::Continue(leaf) => {
                 self.focus_leaf(leaf, window, cx);
@@ -823,11 +909,16 @@ impl WorkspaceView {
             let sessions = self.sidebar.read(cx).sessions();
             let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
             let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
-            menus::tab_menu(index, &leaf.launch.cwd, vscode, &MenuContext::default())
+            let context = if leaf.launch.container.is_some() {
+                MenuContext::default()
+            } else {
+                MenuContext::for_folder(cx.global::<SettingsStore>().settings(), &leaf.launch.cwd)
+            };
+            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context)
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        self.tab_menu = Some(OpenMenu { items, position, focus });
+        self.tab_menu = Some(OpenMenu::new(items, position, focus));
         cx.notify();
     }
 
@@ -881,7 +972,8 @@ impl WorkspaceView {
                     Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
                     place => {
                         let container = place.and_then(|place| place.host_folder);
-                        self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
+                        let launch = self.resume_launch(&session, cwd, container, cx);
+                    self.open_launch(launch, axis, None, window, cx);
                     }
                 }
             }
@@ -962,8 +1054,8 @@ impl WorkspaceView {
     fn on_launcher_event(&mut self, event: LauncherEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.launcher = None;
         match event {
-            LauncherEvent::Open { dir, claude } => self.open_new(claude, dir, None, None),
-            LauncherEvent::Browse { claude } => {
+            LauncherEvent::Open { dir, claude, dir_pick } => self.open_launcher_pick(claude, dir, dir_pick, cx),
+            LauncherEvent::Browse { claude, dir_pick } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
                 cx.spawn_in(window, async move |this, cx| {
                     let dir = match picked.await {
@@ -971,7 +1063,7 @@ impl WorkspaceView {
                         _ => None,
                     };
                     let _ = this.update_in(cx, |this, window, cx| match dir {
-                        Some(dir) => this.open_new(claude, dir, None, None),
+                        Some(dir) => this.open_launcher_pick(claude, dir, dir_pick, cx),
                         None => this.focus_current(window, cx),
                     });
                 })
@@ -1101,7 +1193,7 @@ impl WorkspaceView {
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace.open_settings();
         if self.settings.is_none() {
-            self.settings = Some(cx.new(|cx| SettingsView::new(window, cx)));
+            self.settings = Some(cx.new(|cx| SettingsView::new(self.daemon_dir.clone(), window, cx)));
         }
         self.focus_current(window, cx);
         self.save(cx);
@@ -1179,7 +1271,7 @@ impl WorkspaceView {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let theme = theme(cx).clone();
         let sessions = self.sidebar.read(cx).sessions();
-        let tabs: Vec<(String, Option<SessionStatus>, bool, bool, bool)> = self
+        let tabs: Vec<TabView> = self
             .workspace
             .tabs
             .iter()
@@ -1189,7 +1281,8 @@ impl WorkspaceView {
                 let status = self.workspace.tab_status(index, sessions).cloned();
                 let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
                 let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
-                (title, status, unseen, container, tab.settings)
+                let dir = self.leaf_dir_name(tab.focused, cx);
+                (title, status, unseen, container, dir, tab.settings)
             })
             .collect();
         let sidebar = &self.workspace.sidebar;
@@ -1224,7 +1317,7 @@ impl WorkspaceView {
                     bar.pl_2()
                 }
             })
-            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, settings))| {
+            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings))| {
                 let dragged = DraggedTab { index, title: title.clone() };
                 let line = theme.tokens.line;
                 let active = index == self.workspace.active;
@@ -1256,6 +1349,7 @@ impl WorkspaceView {
                     .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
                     .child(div().min_w_0().truncate().child(title))
                     .when(container, |tab| tab.child(container_chip(ink)))
+                    .children(dir.map(|name| dir_chip(ink, name)))
                     .when(unseen, |tab| tab.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(ink))))
                     .child(
                         div()
@@ -1390,6 +1484,7 @@ impl WorkspaceView {
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen.contains_key(&leaf);
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
+                let dir = self.leaf_dir_name(leaf, cx);
                 Some(
                     div()
                         .absolute()
@@ -1409,7 +1504,7 @@ impl WorkspaceView {
                                 .bg(rgb(theme.tokens.terminal))
                                 .border_2()
                                 .border_color(rgb(if focused && multiple { theme.tokens.accent } else { theme.tokens.line }))
-                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, &theme)))
+                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, dir, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1448,7 +1543,7 @@ impl WorkspaceView {
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
-fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, theme: &Theme) -> impl IntoElement {
+fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, dir: Option<String>, theme: &Theme) -> impl IntoElement {
     let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
     let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
         Tone::NeedsInput => "Needs input",
@@ -1472,6 +1567,7 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
         .when_some(colors, |header, colors| header.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| header.child(container_chip(colors.map_or(theme.tokens.text, |colors| colors.ink))))
+        .children(dir.map(|name| dir_chip(colors.map_or(theme.tokens.text, |colors| colors.ink), name)))
         .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
 }
 
@@ -1508,11 +1604,6 @@ pub(crate) fn round_button(
         .cursor_pointer()
         .child(label)
         .on_click(on_click)
-}
-
-/// A new Claude session (or the user's shell) in `cwd`.
-pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
-    if claude { PaneLaunch::claude(cwd) } else { PaneLaunch { program: default_shell(), args: Vec::new(), cwd, container: None, claude: false, claude_dir: None, env: Vec::new() } }
 }
 
 impl Render for WorkspaceView {

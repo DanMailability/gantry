@@ -5,7 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use app_core::session_tree::{Tone, display_path};
@@ -24,6 +24,7 @@ use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, theme};
 
 mod alerts;
 mod appearance;
+mod sessions;
 mod shortcuts;
 
 use alerts::Event;
@@ -177,11 +178,20 @@ pub(crate) struct SettingsView {
     shortcut_filter: TextField,
     filter_focus: FocusHandle,
     _keystrokes: Subscription,
+    /// The daemon's own Claude config dir, shown as the implicit Default.
+    daemon_dir: Option<PathBuf>,
+    /// The Sessions page's text field being edited, and its text.
+    editing: Option<sessions::FieldKey>,
+    edit: TextField,
+    /// Each text field's focus subscriptions, by field.
+    field_subs: HashMap<sessions::FieldKey, Vec<Subscription>>,
+    /// Why the last edit on the Sessions page was refused.
+    sessions_message: Option<String>,
 }
 
 impl SettingsView {
     /// A page on the Appearance section.
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(daemon_dir: Option<PathBuf>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Recording a shortcut must see keys before the key bindings do, or the chord would run its action.
         let view = cx.weak_entity();
         let keystrokes = cx.intercept_keystrokes(move |event, window, cx| {
@@ -210,6 +220,11 @@ impl SettingsView {
             shortcut_filter: TextField::default(),
             filter_focus: cx.focus_handle(),
             _keystrokes: keystrokes,
+            daemon_dir,
+            editing: None,
+            edit: TextField::default(),
+            field_subs: HashMap::new(),
+            sessions_message: None,
         }
     }
 
@@ -573,7 +588,8 @@ impl Render for SettingsView {
             Section::Appearance => self.appearance(&theme, &settings, window, cx),
             Section::Alerts => self.alerts(&theme, &settings, window, cx),
             Section::Shortcuts => self.shortcuts(&theme, &settings, window, cx),
-            Section::Sessions | Section::Window => div(),
+            Section::Sessions => self.sessions(&theme, &settings, window, cx),
+            Section::Window => div(),
         };
 
         let backdrop = self.popover.is_some().then(|| {

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use app_core::settings::{self, Loaded, Problem, Settings};
 use app_core::shortcuts::{self, Check, Platform};
+use app_core::workspace::ClaudeDirs;
 use app_core::theme_colors::{readable_fill, resolve, tokens};
 use gpui::{App, Global, Task, WindowAppearance};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -203,6 +204,15 @@ pub(crate) fn shortcut_label(settings: &Settings, action: &str) -> String {
     shortcuts::label(shortcuts::current(action, &settings.shortcuts, platform).as_deref(), platform)
 }
 
+/// The name of the config dir at `claude_dir`, when two or more are configured (a lone dir needs no tag).
+pub(crate) fn dir_name(settings: &Settings, claude_dir: Option<&Path>) -> Option<String> {
+    if settings.claude_dirs.len() < 2 {
+        return None;
+    }
+    let dirs = ClaudeDirs::from_settings(settings, None, std::env::home_dir().as_deref());
+    dirs.by_path(claude_dir?).map(|dir| dir.name.clone())
+}
+
 /// Watch the settings file's directory; a foreground task reloads after the events settle.
 fn watch(path: &Path, cx: &mut App) -> Option<(RecommendedWatcher, Task<()>)> {
     let dir = path.parent()?;
@@ -318,6 +328,18 @@ mod tests {
         .collect();
         let keys: Vec<String> = shortcut_problems(&overrides).into_iter().map(|problem| problem.key).collect();
         assert_eq!(keys, ["shortcuts.closePane", "shortcuts.copy"]);
+    }
+
+    #[test]
+    fn the_dir_name_is_shown_only_with_two_or_more_dirs() {
+        use app_core::settings::ClaudeDir;
+        let dir = |name: &str, path: &str| ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![] };
+        let mut settings = Settings { claude_dirs: vec![dir("Personal", "/c/one")], ..Settings::default() };
+        assert_eq!(dir_name(&settings, Some(Path::new("/c/one"))), None);
+        settings.claude_dirs.push(dir("Work", "/c/two"));
+        assert_eq!(dir_name(&settings, Some(Path::new("/c/two"))).as_deref(), Some("Work"));
+        assert_eq!(dir_name(&settings, Some(Path::new("/c/else"))), None);
+        assert_eq!(dir_name(&settings, None), None);
     }
 
     #[test]

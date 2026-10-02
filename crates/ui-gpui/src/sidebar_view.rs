@@ -23,8 +23,8 @@ use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
-use crate::settings_store::{SettingsStore, shortcut_label};
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
+use crate::settings_store::{SettingsStore, dir_name, shortcut_label};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, theme};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -283,6 +283,14 @@ impl SidebarView {
             cx.notify();
             return;
         }
+        let settings = cx.global::<SettingsStore>().settings();
+        let folder = match &row.kind {
+            RowKind::Project { path, .. } => Some(path.as_path()),
+            RowKind::Session { session, .. } => Some(session.cwd.as_path()),
+            RowKind::Pane { entry, .. } => Some(entry.cwd.as_path()),
+            _ => None,
+        };
+        let context = folder.map(|folder| MenuContext::for_folder(settings, folder)).unwrap_or_default();
         let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
         let items = match &row.kind {
             RowKind::Project { path, .. } => {
@@ -296,14 +304,14 @@ impl SidebarView {
                         RowKind::Session { session, .. } => session.container.as_ref().filter(|place| place.host_folder.is_some()),
                         _ => None,
                     });
-                Some(menus::project_menu(path, container, &MenuContext::default()))
+                Some(menus::project_menu(path, container, &context))
             }
-            _ => menus::row_menu(row, &alone, &MenuContext::default()),
+            _ => menus::row_menu(row, &alone, &context),
         };
         let Some(items) = items else { return };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        self.menu = Some(OpenMenu { items, position, focus });
+        self.menu = Some(OpenMenu::new(items, position, focus));
         cx.notify();
     }
 
@@ -395,6 +403,7 @@ impl SidebarView {
                         }))
                         .when(unseen, |pill| pill.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.ink))))
                         .when(session.container.is_some(), |pill| pill.child(container_chip(colors.ink)))
+                        .children(dir_name(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|name| dir_chip(colors.ink, name)))
                         .children(project())
                         .child(aside(note.clone(), colors.ink)),
                 )
