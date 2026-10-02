@@ -39,6 +39,8 @@ pub enum MenuAction {
     OpenFolder(PathBuf),
     /// Run `code` with these arguments.
     OpenInVsCode(Vec<String>),
+    /// Mark a pane's session as having a result the user has not seen (its tab and row turn Done).
+    MarkUnread(NodeId),
     /// Close one pane.
     ClosePane(NodeId),
     /// Close every pane of a tab.
@@ -227,12 +229,15 @@ pub fn vscode_args(folder: &Path, container: Option<&ContainerPlace>, pane_conta
 
 /// A tab's menu; `dir` is its focused pane's directory.
 /// `context.dirs` is empty for a dev container tab.
-pub fn tab_menu(tab: usize, dir: &Path, vscode: Vec<String>, context: &MenuContext) -> Vec<MenuItem> {
+pub fn tab_menu(tab: usize, dir: &Path, vscode: Vec<String>, context: &MenuContext, unread: Option<NodeId>) -> Vec<MenuItem> {
     let mut items = vec![
         with_shortcut("Split right", Shortcut::SplitRight, MenuAction::Split { tab, axis: Axis::Horizontal }),
         with_shortcut("Split down", Shortcut::SplitDown, MenuAction::Split { tab, axis: Axis::Vertical }),
     ];
     items.extend(claude_with(dir, context));
+    if let Some(leaf) = unread {
+        items.push(entry("Mark as unread", MenuAction::MarkUnread(leaf)));
+    }
     items.push(MenuItem::Separator);
     items.extend(folder_items(dir, vscode));
     items.push(MenuItem::Separator);
@@ -270,6 +275,9 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     }
                     items.push(MenuItem::Separator);
                 }
+            }
+            if let (Tone::Idle, Some(leaf)) = (tone, leaf) {
+                items.push(entry("Mark as unread", MenuAction::MarkUnread(*leaf)));
             }
             items.push(entry("Copy session id", MenuAction::Copy(session.id.clone())));
             items.extend(folder_items(&session.cwd, vscode));
@@ -376,7 +384,7 @@ mod tests {
 
     #[test]
     fn a_tab_offers_splits_folder_items_and_close() {
-        let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default());
+        let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default(), None);
         assert_eq!(labels(&items), ["Split right", "Split down", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
         let MenuItem::Entry(first) = &items[0] else { panic!() };
         assert_eq!((first.action.clone(), first.shortcut), (MenuAction::Split { tab: 2, axis: Axis::Horizontal }, Some(Shortcut::SplitRight)));
@@ -385,11 +393,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_with_an_idle_claude_offers_mark_as_unread() {
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some(7));
+        assert_eq!(labels(&items), ["Split right", "Split down", "Mark as unread", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
+        let MenuItem::Entry(unread) = &items[2] else { panic!() };
+        assert_eq!(unread.action, MenuAction::MarkUnread(7));
+    }
+
+    #[test]
+    fn only_an_idle_session_row_offers_mark_as_unread() {
+        for (tone, offered) in [(Tone::Idle, true), (Tone::Done, false), (Tone::Working, false), (Tone::NeedsInput, false)] {
+            let row = session_row(SessionState::Managed { pane: 1 }, tone, Some(4));
+            let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
+            assert_eq!(labels(&items).contains(&"Mark as unread".to_string()), offered, "{tone:?}");
+        }
+    }
+
+    #[test]
     fn a_live_claude_row_offers_new_here_copy_and_close() {
         let row = session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
         let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
-        assert_eq!(labels(&items), ["New Claude here", "│", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
-        let MenuItem::Entry(copy) = &items[2] else { panic!() };
+        assert_eq!(labels(&items), ["New Claude here", "│", "Mark as unread", "Copy session id", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]);
+        let MenuItem::Entry(copy) = &items[3] else { panic!() };
         assert_eq!(copy.action, MenuAction::Copy("s1".into()));
     }
 
@@ -538,7 +563,7 @@ mod tests {
 
     #[test]
     fn a_tab_menu_offers_the_choice_after_the_splits() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &two_dirs(None));
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &two_dirs(None), None);
         assert_eq!(labels(&items)[..4], ["Split right", "Split down", "New Claude here with ▸", "│"]);
     }
 
