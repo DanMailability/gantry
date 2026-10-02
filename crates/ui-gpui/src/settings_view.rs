@@ -3,7 +3,7 @@
 //! Every control is focusable (Tab / Shift+Tab, Space or Enter to press); changes go through
 //! [`SettingsStore::update`], which saves and applies them at once.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -224,6 +224,15 @@ const FINISHED_AFTER: Stepped = Stepped {
     max: 600.0,
 };
 
+/// A drop-down list shows this many rows (each this tall, before scaling) before it scrolls.
+const DROPDOWN_ROWS: f32 = 8.;
+const DROPDOWN_ROW: f32 = 30.;
+
+/// Widths (before scaling) of the alerts grid's fixed columns; the Event column takes the rest.
+const BADGE_COLUMN: f32 = 90.;
+const NOTIFICATION_COLUMN: f32 = 110.;
+const SOUND_COLUMN: f32 = 300.;
+
 const SUGGESTED_FILLS: [u32; 12] =
     [0xc1e5cd, 0xb7e4dd, 0xcfe8b4, 0xe6efb0, 0xa8dcc0, 0xd5ecd9, 0xf7c9a3, 0xf6b8b8, 0xe9c6ef, 0xc9cdf6, 0xb9d5f6, 0xf1e1a6];
 
@@ -317,6 +326,8 @@ fn open_settings_file(path: &Path, cx: &App) {
     cx.open_with_system(path);
 }
 
+type DropdownBounds = Rc<RefCell<HashMap<(&'static str, usize), Bounds<Pixels>>>>;
+
 type Handler = Rc<dyn Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>)>;
 
 fn handler(f: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static) -> Handler {
@@ -343,6 +354,10 @@ pub(crate) struct SettingsView {
     /// The volume being dragged, written when the button is released.
     volume_drag: Option<f32>,
     slider_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Where each drop-down's button was last drawn, to open its list upward near the window's bottom.
+    dropdown_bounds: DropdownBounds,
+    /// The hex field's text counts as selected: the next typed character or Backspace replaces it all.
+    hex_selected: bool,
 }
 
 impl SettingsView {
@@ -358,6 +373,8 @@ impl SettingsView {
             hex_focus: cx.focus_handle(),
             volume_drag: None,
             slider_bounds: Rc::new(Cell::new(Bounds::default())),
+            dropdown_bounds: Rc::new(RefCell::new(HashMap::new())),
+            hex_selected: false,
         }
     }
 
@@ -378,6 +395,7 @@ impl SettingsView {
         let current = chosen.unwrap_or(status.default_fill(theme.preset));
         self.hex.clear();
         self.hex.insert(&hex(current));
+        self.hex_selected = true;
         self.popover = Some(Popover::Fill(status));
         self.hex_focus.focus(window, cx);
         cx.notify();
@@ -396,8 +414,18 @@ impl SettingsView {
                 self.apply_fill(status, fill, cx);
                 self.close_popover(window, cx);
             }
-        } else if !field::edit(&mut self.hex, keystroke) {
-            return;
+        } else if keystroke.key == "a" && (keystroke.modifiers.control || keystroke.modifiers.platform) {
+            self.hex_selected = true;
+        } else {
+            let replaces = matches!(keystroke.key.as_str(), "backspace" | "delete")
+                || keystroke.key_char.as_ref().is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control));
+            if self.hex_selected && replaces && !keystroke.modifiers.control && !keystroke.modifiers.platform {
+                self.hex.clear();
+            }
+            if !field::edit(&mut self.hex, keystroke) {
+                return;
+            }
+            self.hex_selected = false;
         }
         cx.stop_propagation();
         cx.notify();
@@ -569,6 +597,11 @@ impl SettingsView {
             .child(div().min_w_0().truncate().child(label))
             .child(div().flex_none().text_color(rgb(theme.tokens.muted)).child("▾"));
         let menu = (self.popover == Some(popover)).then(|| {
+            let max_height = theme.ui(DROPDOWN_ROWS * DROPDOWN_ROW);
+            let needed = theme.ui(options.len() as f32 * DROPDOWN_ROW + 8.).min(max_height);
+            let button_bounds = self.dropdown_bounds.borrow().get(&(name, index)).copied().unwrap_or_default();
+            let below = f32::from(window.viewport_size().height - button_bounds.bottom());
+            let upward = below < f32::from(needed) + 8. && f32::from(button_bounds.top()) > below;
             let items: Vec<_> = options
                 .into_iter()
                 .enumerate()
@@ -593,10 +626,11 @@ impl SettingsView {
                     .id(ElementId::from((name, 99 + index * 1000)))
                     .occlude()
                     .absolute()
-                    .top(theme.ui(38.))
+                    .when(upward, |menu| menu.bottom(theme.ui(38.)))
+                    .when(!upward, |menu| menu.top(theme.ui(38.)))
                     .left_0()
                     .w(width)
-                    .max_h(theme.ui(260.))
+                    .max_h(max_height)
                     .overflow_y_scroll()
                     .p_1()
                     .flex()
@@ -611,7 +645,16 @@ impl SettingsView {
             )
             .with_priority(1)
         });
-        div().relative().child(button).children(menu)
+        let bounds = self.dropdown_bounds.clone();
+        let measure = canvas(
+            move |area, _, _| {
+                bounds.borrow_mut().insert((name, index), area);
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        div().relative().child(button).child(measure).children(menu)
     }
 
     fn open_settings_button(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -619,7 +662,7 @@ impl SettingsView {
             let path = cx.global::<SettingsStore>().path().to_path_buf();
             open_settings_file(&path, cx);
         });
-        self.button("open-settings-json", index, "Open settings.json", window, cx, open)
+        self.button("open-settings-json", index, "Open settings.json", window, cx, open).flex_none()
     }
 }
 
@@ -629,8 +672,8 @@ impl Focusable for SettingsView {
     }
 }
 
-fn heading(text: &'static str) -> Div {
-    div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(text)
+fn heading(theme: &Theme, text: &'static str) -> Div {
+    div().text_size(theme.ui(15.)).font_weight(FontWeight::SEMIBOLD).child(text)
 }
 
 fn muted(theme: &Theme, text: impl Into<SharedString>) -> Div {
@@ -674,11 +717,11 @@ impl Render for SettingsView {
             .gap(theme.ui(16.))
             .child(
                 div()
-                    .flex_1()
+                    .flex_none()
                     .child(div().text_xl().font_weight(FontWeight::BOLD).child(section.label()))
                     .child(div().mt(theme.ui(4.)).text_sm().text_color(rgb(theme.tokens.muted)).child(section.subtitle())),
             )
-            .child(muted(&theme, path))
+            .child(muted(&theme, path).flex_1().min_w_0().truncate().text_right())
             .child(self.open_settings_button(0, window, cx));
 
         let banner = (!problems.is_empty()).then(|| {
@@ -695,6 +738,7 @@ impl Render for SettingsView {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .text_sm()
                         .flex()
                         .flex_col()
@@ -837,7 +881,7 @@ impl SettingsView {
                 )
                 .child(div().mt(theme.ui(-6.)).child(muted(theme, *hint)))
         });
-        div().flex().flex_col().gap(theme.ui(12.)).child(heading("Theme")).child(div().flex().gap(theme.ui(14.)).children(cards))
+        div().flex().flex_col().gap(theme.ui(12.)).child(heading(theme, "Theme")).child(div().flex().flex_wrap().gap(theme.ui(14.)).children(cards))
     }
 
     fn status_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -849,6 +893,9 @@ impl SettingsView {
             let open = self.popover == Some(Popover::Fill(status));
             let sample = div()
                 .w(theme.ui(300.))
+                .min_w(theme.ui(180.))
+                .max_w(theme.ui(300.))
+                .flex_shrink_1()
                 .h(theme.ui(34.))
                 .px_3()
                 .flex()
@@ -858,8 +905,15 @@ impl SettingsView {
                 .bg(rgb(colors.fill.unwrap_or(theme.tokens.surface)))
                 .text_color(rgb(colors.ink))
                 .child(div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)))
-                .child(div().flex_1().when(status == Status::NeedsInput, |el| el.font_weight(FontWeight::SEMIBOLD)).child(status.sample()))
-                .child(div().text_xs().text_color(rgba((colors.ink << 8) | 0xcc)).child(status.label()));
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .when(status == Status::NeedsInput, |el| el.font_weight(FontWeight::SEMIBOLD))
+                        .child(status.sample()),
+                )
+                .child(div().flex_none().text_xs().text_color(rgba((colors.ink << 8) | 0xcc)).child(status.label()));
             let open_picker = handler(move |this, window, cx| this.open_fill_picker(status, window, cx));
             let picker_button = self
                 .pressable("status-colour", index, Some(if open { theme.tokens.accent } else { theme.tokens.line }), window, cx, open_picker)
@@ -892,12 +946,12 @@ impl SettingsView {
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(theme.ui(150.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(status.label()))
                         .child(muted(theme, status.description())),
                 )
-                .child(div().relative().child(picker_button).children(picker))
-                .child(reset)
+                .child(div().relative().flex_none().child(picker_button).children(picker))
+                .child(reset.flex_none())
         });
         div()
             .flex()
@@ -908,7 +962,7 @@ impl SettingsView {
                     .flex()
                     .items_baseline()
                     .gap(theme.ui(12.))
-                    .child(heading("Status colours"))
+                    .child(heading(theme, "Status colours"))
                     .child(div().text_color(rgb(theme.tokens.muted)).child("Pick a fill; text and dot colours follow it.")),
             )
             .children(rows)
@@ -925,6 +979,7 @@ impl SettingsView {
                 this.apply_fill(status, fill, cx);
                 this.hex.clear();
                 this.hex.insert(&hex(fill));
+                this.hex_selected = true;
                 cx.notify();
             });
             self.pressable("swatch", index, None, window, cx, pick)
@@ -950,7 +1005,9 @@ impl SettingsView {
             .border_color(rgb(if hex_focused { theme.tokens.accent } else { theme.tokens.line }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| this.hex_key_down(status, event, window, cx)))
             .on_click(cx.listener(|this, _, window, cx| this.hex_focus.focus(window, cx)))
-            .child(field::render(&self.hex, "#rrggbb", hex_focused, theme));
+            .child(field::render(&self.hex, "#rrggbb", hex_focused, theme).when(self.hex_selected, |text| {
+                text.bg(rgba((theme.tokens.accent << 8) | 0x55))
+            }));
         deferred(
             div()
                 .occlude()
@@ -980,12 +1037,12 @@ impl SettingsView {
                 .child(match verdict {
                     Some((text, _)) => div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap(theme.ui(8.))
                         .text_xs()
                         .text_color(rgb(theme.tokens.muted))
-                        .child(div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(tone.dot)))
-                        .child(text),
+                        .child(div().flex_none().mt(theme.ui(4.)).size(theme.ui(8.)).rounded_full().bg(rgb(tone.dot)))
+                        .child(div().flex_1().min_w_0().child(text)),
                     None => muted(theme, "Type a colour as #rrggbb"),
                 }),
         )
@@ -1043,7 +1100,7 @@ impl SettingsView {
         let family = font.family.clone().unwrap_or_else(|| FONT_FAMILY.to_string());
         let sample = div()
             .flex_1()
-            .min_w_0()
+            .min_w(theme.ui(300.))
             .px(theme.ui(16.))
             .py(theme.ui(14.))
             .rounded(px(RADIUS))
@@ -1068,8 +1125,8 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(theme.ui(12.))
-            .child(heading("Fonts"))
-            .child(div().flex().items_start().gap(theme.ui(32.)).child(controls).child(sample))
+            .child(heading(theme, "Fonts"))
+            .child(div().flex().flex_wrap().items_start().gap(theme.ui(20.)).child(controls).child(sample))
     }
 
     fn alerts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -1081,10 +1138,10 @@ impl SettingsView {
             .text_xs()
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(theme.tokens.muted))
-            .child(div().flex_1().child("Event"))
-            .child(div().w(theme.ui(110.)).child("Badge"))
-            .child(div().w(theme.ui(120.)).child("Notification"))
-            .child(div().w(theme.ui(300.)).child("Sound"));
+            .child(div().flex_1().min_w(theme.ui(120.)).child("Event"))
+            .child(div().flex_none().w(theme.ui(BADGE_COLUMN)).child("Badge"))
+            .child(div().flex_none().w(theme.ui(NOTIFICATION_COLUMN)).child("Notification"))
+            .child(div().flex_none().w(theme.ui(SOUND_COLUMN)).child("Sound"));
         let rows: Vec<Div> = Event::ALL
             .into_iter()
             .map(|event| {
@@ -1124,22 +1181,26 @@ impl SettingsView {
                     .child(
                         div()
                             .flex_1()
+                            .min_w(theme.ui(120.))
                             .flex()
                             .items_center()
                             .gap(theme.ui(10.))
                             .child(div().flex_none().size(theme.ui(10.)).rounded_full().bg(rgb(theme.tone(event.tone()).dot)))
                             .child(
                                 div()
-                                    .child(div().font_weight(FontWeight::SEMIBOLD).child(event.label()))
-                                    .child(muted(theme, event.description())),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(event.label()))
+                                    .child(muted(theme, event.description()).truncate()),
                             ),
                     )
-                    .child(div().w(theme.ui(110.)).child(badge))
-                    .child(div().w(theme.ui(120.)).child(notification))
-                    .child(div().w(theme.ui(300.)).flex().items_center().gap(theme.ui(10.)).child(sound).child(picker).child(play))
+                    .child(div().flex_none().w(theme.ui(BADGE_COLUMN)).child(badge))
+                    .child(div().flex_none().w(theme.ui(NOTIFICATION_COLUMN)).child(notification))
+                    .child(div().flex_none().w(theme.ui(SOUND_COLUMN)).flex().items_center().gap(theme.ui(10.)).child(sound).child(picker).child(play))
             })
             .collect();
         let grid = div()
+            .overflow_hidden()
             .border_1()
             .border_color(rgb(theme.tokens.line))
             .rounded(px(RADIUS))
@@ -1189,7 +1250,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(theme.ui(12.))
-            .child(heading("Sound"))
+            .child(heading(theme, "Sound"))
             .child(
                 div()
                     .flex()
@@ -1212,8 +1273,8 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(theme.ui(26.))
-            .child(div().flex().flex_col().gap(theme.ui(10.)).child(heading("How each event alerts you")).child(grid).child(threshold))
-            .child(div().flex().flex_col().gap(theme.ui(8.)).child(heading("When")).children(when_rows))
+            .child(div().flex().flex_col().gap(theme.ui(10.)).child(heading(theme, "How each event alerts you")).child(grid).child(threshold))
+            .child(div().flex().flex_col().gap(theme.ui(8.)).child(heading(theme, "When")).children(when_rows))
             .child(sound_section)
     }
 
