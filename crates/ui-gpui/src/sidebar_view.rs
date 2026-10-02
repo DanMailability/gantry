@@ -31,9 +31,9 @@ const ROW_HEIGHT: f32 = 38.0;
 /// Ages ("5m") and project roots are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
-const FIND_SHORTCUT: &str = "⌘F";
+const RECENTS_SHORTCUT: &str = "⌘⇧R";
 #[cfg(not(target_os = "macos"))]
-const FIND_SHORTCUT: &str = "Ctrl+Shift+F";
+const RECENTS_SHORTCUT: &str = "Ctrl+Shift+R";
 
 /// What the sidebar asks the workspace to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,6 +57,8 @@ pub enum SidebarEvent {
         /// Claude (true) or a shell.
         claude: bool,
     },
+    /// Open the recent sessions pop-up.
+    OpenRecents,
     /// Give keyboard focus back to the pane.
     Dismiss,
 }
@@ -417,8 +419,6 @@ fn count_chips(counts: &ToneCounts) -> Vec<gpui::Div> {
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        let filtering = !self.filter.text().is_empty();
-        let total = self.sessions.all().count();
         div()
             .key_context("Sidebar")
             .track_focus(&self.focus_handle)
@@ -460,33 +460,28 @@ impl Render for SidebarView {
                 .track_scroll(&self.scroll)
                 .flex_1(),
             )
-            .when(!filtering, |el| {
-                el.child(
-                    div()
-                        .id("search-all")
-                        .flex_none()
-                        .h(px(34.))
-                        .mx_3()
-                        .mt_2()
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(px(RADIUS))
-                        .border_1()
-                        .border_color(rgb(LINE))
-                        .text_xs()
-                        .text_color(rgb(MUTED))
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(rgb(TEXT)))
-                        .child(div().flex_1().child(format!("Search all {total} sessions")))
-                        .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(RAISED)).child(FIND_SHORTCUT))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.focus_handle.focus(window, cx);
-                            cx.notify();
-                        })),
-                )
-            })
+            .child(
+                div()
+                    .id("recent-sessions")
+                    .flex_none()
+                    .h(px(34.))
+                    .mx_3()
+                    .mt_2()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(RADIUS))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgb(TEXT)))
+                    .child(div().flex_1().child("Recent sessions"))
+                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(RAISED)).child(RECENTS_SHORTCUT))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenRecents))),
+            )
             .child(
                 div()
                     .flex_none()

@@ -3,6 +3,7 @@
 mod alerts;
 mod field;
 pub mod launcher_view;
+pub mod recents_view;
 pub mod sidebar_view;
 pub mod terminal_view;
 mod theme;

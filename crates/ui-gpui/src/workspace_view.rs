@@ -23,6 +23,7 @@ use app_core::session_tree::{Activation, PaneEntry, Tone, display_path, session_
 
 use crate::alerts::{self, Notice};
 use crate::launcher_view::{LauncherEvent, LauncherView};
+use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
 use crate::theme::{
@@ -49,7 +50,8 @@ mod workspace_actions {
             NewClaudeTab, NewShellTab, SplitRightClaude, SplitRightShell, SplitDownClaude, SplitDownShell, ClosePane,
             FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
             ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
-            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher
+            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher,
+            OpenRecents
         ]
     );
 }
@@ -95,6 +97,7 @@ fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new(&format!("{m}-b"), ToggleSidebar, context),
         KeyBinding::new(&format!("{m}-f"), FindSession, context),
         KeyBinding::new(&format!("{m}-o"), OpenLauncher, context),
+        KeyBinding::new(&format!("{m}-r"), OpenRecents, context),
     ]
 }
 
@@ -150,6 +153,8 @@ pub struct WorkspaceView {
     _sidebar_events: Subscription,
     /// The open launcher overlay.
     launcher: Option<(Entity<LauncherView>, Subscription)>,
+    /// The open recent sessions overlay.
+    recents: Option<(Entity<RecentsView>, Subscription)>,
     /// Take-over requests waiting for the daemon, by session.
     take_overs: HashMap<String, TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
@@ -219,6 +224,7 @@ impl WorkspaceView {
             resizing_sidebar: false,
             _sidebar_events: sidebar_events,
             launcher: None,
+            recents: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -652,28 +658,7 @@ impl WorkspaceView {
                     }
                 }
                 Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
-                // A session already in the layout is shown there (and started again if it finished),
-                // so one session never runs in two panes.
-                Activation::Resume { session, cwd } => match self.workspace.leaf_for_session(&session) {
-                    Some(leaf) => {
-                        self.focus_leaf(leaf, window, cx);
-                        let starting = self.pending.values().any(|waiting| *waiting == leaf);
-                        if self.workspace.leaves[&leaf].pane.is_none() && !starting {
-                            self.rerun_leaf(leaf, window, cx);
-                        }
-                    }
-                    None => {
-                        let axis = split.then_some(Axis::Horizontal);
-                        let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
-                        match place {
-                            Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
-                            place => {
-                                let container = place.and_then(|place| place.host_folder);
-                                self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
-                            }
-                        }
-                    }
-                },
+                Activation::Resume { session, cwd } => self.resume_session(session, cwd, split, window, cx),
                 Activation::TakeOver { session, cwd } => {
                     let target = match self.workspace.leaf_for_session(&session) {
                         Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
@@ -689,7 +674,34 @@ impl WorkspaceView {
             },
             SidebarEvent::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
             SidebarEvent::New { claude } => self.open(claude, None),
+            SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
+        }
+    }
+
+    /// Resume `session`: show the leaf that already has it (starting it again if it finished), else open it in a
+    /// new tab (or a split) where it ran — its dev container included.
+    fn resume_session(&mut self, session: String, cwd: PathBuf, split: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // A session already in the layout is shown there, so one session never runs in two panes.
+        match self.workspace.leaf_for_session(&session) {
+            Some(leaf) => {
+                self.focus_leaf(leaf, window, cx);
+                let starting = self.pending.values().any(|waiting| *waiting == leaf);
+                if self.workspace.leaves[&leaf].pane.is_none() && !starting {
+                    self.rerun_leaf(leaf, window, cx);
+                }
+            }
+            None => {
+                let axis = split.then_some(Axis::Horizontal);
+                let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
+                match place {
+                    Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
+                    place => {
+                        let container = place.and_then(|place| place.host_folder);
+                        self.open_launch(PaneLaunch::resume(&session, cwd, container), axis, None, window, cx);
+                    }
+                }
+            }
         }
     }
 
@@ -725,6 +737,7 @@ impl WorkspaceView {
     }
 
     fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
+        self.recents = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
         let view = cx.new(|cx| LauncherView::new(sessions, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &LauncherEvent, window, cx| {
@@ -732,6 +745,28 @@ impl WorkspaceView {
         });
         view.focus_handle(cx).focus(window, cx);
         self.launcher = Some((view, subscription));
+        cx.notify();
+    }
+
+    fn open_recents(&mut self, _: &OpenRecents, window: &mut Window, cx: &mut Context<Self>) {
+        self.launcher = None;
+        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
+        let open: HashSet<String> = self.workspace.leaves.values().filter_map(|leaf| leaf.session.clone()).collect();
+        let view = cx.new(|cx| RecentsView::new(sessions, open, cx));
+        let subscription = cx.subscribe_in(&view, window, |this, _, event: &RecentsEvent, window, cx| {
+            this.on_recents_event(event.clone(), window, cx)
+        });
+        view.focus_handle(cx).focus(window, cx);
+        self.recents = Some((view, subscription));
+        cx.notify();
+    }
+
+    fn on_recents_event(&mut self, event: RecentsEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.recents = None;
+        match event {
+            RecentsEvent::Resume { session, cwd, split } => self.resume_session(session, cwd, split, window, cx),
+            RecentsEvent::Dismiss => self.focus_current(window, cx),
+        }
         cx.notify();
     }
 
@@ -1303,6 +1338,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::find_session))
             .on_action(cx.listener(Self::open_launcher))
+            .on_action(cx.listener(Self::open_recents))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if std::mem::take(&mut this.resizing_sidebar) {
@@ -1321,6 +1357,11 @@ impl Render for WorkspaceView {
             .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
                     div().id("launcher-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
+                )
+            })
+            .when_some(self.recents.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div().id("recents-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
                 )
             });
         window_frame::frame(window, root)
@@ -1361,6 +1402,7 @@ mod tests {
             ("ctrl-shift-b", "workspace::ToggleSidebar"),
             ("ctrl-shift-f", "workspace::FindSession"),
             ("ctrl-shift-o", "workspace::OpenLauncher"),
+            ("ctrl-shift-r", "workspace::OpenRecents"),
         ] {
             assert_eq!(action_for(keys), Some(action), "{keys}");
         }
