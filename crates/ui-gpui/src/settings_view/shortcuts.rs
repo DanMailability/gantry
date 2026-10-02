@@ -2,7 +2,7 @@
 
 use app_core::settings::Settings;
 use app_core::shortcuts::{self, ACTIONS, Action, Check, GO_TO_TAB, Group, Platform};
-use gpui::{Context, Div, FontWeight, Keystroke, Window, canvas, div, px, rgb, rgba};
+use gpui::{Context, Div, FontWeight, Keystroke, Window, div, px, rgb, rgba};
 
 use super::*;
 use crate::settings_store::SettingsStore;
@@ -186,19 +186,6 @@ impl SettingsView {
             div().flex().flex_col().child(column(groups))
         };
 
-        let grid_bounds = self.grid_bounds.clone();
-        let measure = canvas(
-            move |area, window, _| {
-                let was = has_room(grid_bounds.get().size.width, two_columns_at);
-                grid_bounds.set(area);
-                if was != has_room(area.size.width, two_columns_at) {
-                    window.refresh();
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
 
         let focused = self.filter_focus.is_focused(window);
         let filter_box = div()
@@ -224,7 +211,7 @@ impl SettingsView {
             .on_click(cx.listener(|this, _, window, cx| this.filter_focus.focus(window, cx)))
             .child(field::render(&self.shortcut_filter, "Filter shortcuts", focused, theme));
 
-        div().relative().flex().flex_col().gap(theme.ui(20.)).child(measure).child(filter_box).child(body)
+        div().relative().flex().flex_col().gap(theme.ui(20.)).child(filter_box).child(body)
     }
 
     #[allow(clippy::too_many_arguments)]

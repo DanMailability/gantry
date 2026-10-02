@@ -1320,7 +1320,9 @@ impl WorkspaceView {
                     bar.pl_2()
                 }
             })
-            .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings))| {
+            // The tabs scroll sideways when even their narrowest widths don't fit, so the buttons and window
+            // controls after them stay visible.
+            .child(div().id("tabs").min_w_0().flex_shrink(1.).h_full().flex().flex_row().items_center().gap(theme.ui(6.)).overflow_x_scroll().children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings))| {
                 let dragged = DraggedTab { index, title: title.clone() };
                 let line = theme.tokens.line;
                 let active = index == self.workspace.active;
@@ -1334,9 +1336,10 @@ impl WorkspaceView {
                     .pl_3()
                     .pr_1()
                     .max_w(theme.ui(220.))
-                    // Tabs shrink (titles truncate) so the buttons and window controls stay visible.
-                    .min_w(theme.ui(56.))
+                    // Tabs shrink (titles truncate, tags clip away) down to what the dot, a short title and × need.
+                    .min_w(theme.ui(if colors.is_some() || settings { 96. } else { 80. }))
                     .flex_shrink(1.)
+                    .overflow_hidden()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1393,7 +1396,7 @@ impl WorkspaceView {
                             cx.stop_propagation();
                         }),
                     )
-            }))
+            })))
             .child(round_button("new-claude", "+", &theme, cx.listener(|this, _, _, _| this.open(true, None))))
             .child(round_button("open-settings", "⚙", &theme, cx.listener(|this, _, window, cx| this.open_settings(&OpenSettings, window, cx))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))

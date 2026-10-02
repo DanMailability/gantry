@@ -68,19 +68,19 @@ pub(crate) fn dir_chip(ink: u32, name: String) -> Div {
 }
 
 fn tag_chip(ink: u32, text: impl Into<SharedString>) -> Div {
-    // Shrinks with an ellipsis (to nothing but its border) when the row is too narrow for it.
-    div()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .px(px(5.))
-        .rounded(px(RADIUS_SMALL - 3.))
-        .border_1()
-        .border_color(rgba((ink << 8) | 0x66))
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .child(text.into())
+    // Clipped away, border and all, before the row's title gives way when the row is too narrow for it.
+    div().min_w_0().flex_shrink(4.).overflow_hidden().child(
+        div()
+            .flex_none()
+            .whitespace_nowrap()
+            .px(px(5.))
+            .rounded(px(RADIUS_SMALL - 3.))
+            .border_1()
+            .border_color(rgba((ink << 8) | 0x66))
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .child(text.into()),
+    )
 }
 
 /// Make the embedded interface font available.

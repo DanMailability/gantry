@@ -606,6 +606,20 @@ impl Render for SettingsView {
                 .child(self.open_settings_button(1, window, cx))
         });
 
+        // Every page records its width, so a page that switches layout by width (Alerts, Shortcuts) knows it on
+        // its first frame; a new width redraws once.
+        let grid_bounds = self.grid_bounds.clone();
+        let page_width = canvas(
+            move |area, window, _| {
+                if grid_bounds.replace(area).size.width != area.size.width {
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+
         let body = match section {
             Section::Appearance => self.appearance(&theme, &settings, window, cx),
             Section::Alerts => self.alerts(&theme, &settings, window, cx),
@@ -653,7 +667,7 @@ impl Render for SettingsView {
                     .gap(theme.ui(26.))
                     .child(header)
                     .children(banner)
-                    .child(body),
+                    .child(div().relative().child(body).child(page_width)),
             )
             .children(backdrop)
     }

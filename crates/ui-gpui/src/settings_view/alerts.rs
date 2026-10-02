@@ -148,25 +148,12 @@ impl SettingsView {
                     .children(below.map(|group| div().flex().justify_end().px(theme.ui(18.)).pt(theme.ui(10.)).child(group)))
             })
             .collect();
-        let grid_bounds = self.grid_bounds.clone();
-        let wide_at = theme.ui(GRID_WIDE);
-        let measure = canvas(
-            move |area, window, _| {
-                let was_wide = has_room(grid_bounds.get().size.width, wide_at);
-                grid_bounds.set(area);
-                if was_wide != has_room(area.size.width, wide_at) {
-                    window.refresh();
-                }
-            },
-            |_, _, _, _| {},
-        ).absolute().size_full();
         let grid = div()
             .relative()
             .overflow_hidden()
             .border_1()
             .border_color(rgb(theme.tokens.line))
             .rounded(px(RADIUS))
-            .child(measure)
             .child(head)
             .children(rows);
 
