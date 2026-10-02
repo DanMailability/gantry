@@ -6219,9 +6219,11 @@ dependencies = [
  "daemon",
  "gpui",
  "gpui_platform",
+ "notify",
  "notify-rust",
  "protocol",
  "rodio",
+ "serde_json",
  "tracing",
 ]
 

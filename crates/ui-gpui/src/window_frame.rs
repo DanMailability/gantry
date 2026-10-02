@@ -7,7 +7,7 @@ use gpui::{
     Window, canvas, div, point, prelude::*, px, rgb,
 };
 
-use crate::theme::{LINE, MUTED, RAISED, TEXT};
+use crate::theme::Theme;
 
 /// Width of the invisible resize border (and shadow) around an untiled window.
 pub const INSET: Pixels = px(8.0);
@@ -41,7 +41,7 @@ fn cursor_for(edge: ResizeEdge) -> CursorStyle {
 }
 
 /// Wrap the window content in a resize frame when the window uses client-side decorations.
-pub fn frame(window: &mut Window, content: impl IntoElement) -> impl IntoElement {
+pub fn frame(window: &mut Window, line: u32, content: impl IntoElement) -> impl IntoElement {
     let decorations = window.window_decorations();
     if let Decorations::Client { .. } = decorations {
         window.set_client_inset(INSET);
@@ -89,7 +89,7 @@ pub fn frame(window: &mut Window, content: impl IntoElement) -> impl IntoElement
                 .map(|inner| match decorations {
                     Decorations::Server => inner,
                     Decorations::Client { tiling } => inner
-                        .border_color(rgb(LINE))
+                        .border_color(rgb(line))
                         .when(!tiling.top, |inner| inner.border_t_1())
                         .when(!tiling.bottom, |inner| inner.border_b_1())
                         .when(!tiling.left, |inner| inner.border_l_1())
@@ -104,20 +104,20 @@ pub fn frame(window: &mut Window, content: impl IntoElement) -> impl IntoElement
 }
 
 /// Minimize / maximize / close buttons, as the platform supports them.
-pub fn window_controls(window: &Window, on_close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+pub fn window_controls(window: &Window, theme: &Theme, on_close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
     let controls = window.window_controls();
     let button = |id: &'static str, glyph: &'static str| {
         div()
             .id(id)
-            .size(px(30.))
+            .size(theme.ui(30.))
             .flex()
             .items_center()
             .justify_center()
             .rounded_full()
-            .bg(rgb(RAISED))
+            .bg(rgb(theme.tokens.raised))
             .text_sm()
-            .text_color(rgb(MUTED))
-            .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(LINE)))
+            .text_color(rgb(theme.tokens.muted))
+            .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.line)))
             .child(glyph)
     };
     div()

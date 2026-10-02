@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use app_core::attention::{Alert, AlertKind, AttentionTracker, describe, without_claude_glyph};
 use app_core::layout_store;
+use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
+use app_core::theme_colors::{Preset, terminal_palette};
 use app_core::workspace::{PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
@@ -17,7 +19,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     PathPromptOptions, Point, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
-use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
+use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
 use app_core::menus::{self, MenuAction};
 use app_core::session_tree::{Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone};
@@ -28,10 +30,8 @@ use crate::launcher_view::{LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView};
-use crate::theme::{
-    ACCENT, GROUND, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_LARGE, RADIUS_SMALL, RAISED, SURFACE, TERMINAL, TEXT, UI_FONT,
-    container_chip, tone_colors,
-};
+use crate::settings_store::SettingsStore;
+use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_chip, theme};
 use crate::window_frame;
 
 pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
@@ -171,6 +171,10 @@ pub struct WorkspaceView {
     /// Leaves with an alert the user has not seen yet.
     unseen: HashMap<NodeId, AlertKind>,
     _activation: Subscription,
+    /// The theme whose terminal colours the daemon was last told.
+    sent_palette: Option<Preset>,
+    _theme: Subscription,
+    _appearance: Subscription,
     /// Leaves whose notification was clicked.
     clicked: async_channel::Sender<NodeId>,
     _clicks: Task<()>,
@@ -205,6 +209,13 @@ impl WorkspaceView {
         });
         // Coming back to the window counts as seeing its visible tab.
         let activation = cx.observe_window_activation(window, |this, window, cx| this.clear_seen(window, cx));
+        let theme_changed = cx.observe_global_in::<Theme>(window, |this, _, cx| this.apply_settings(cx));
+        // Following the system: a light/dark switch resolves the theme again.
+        let appearance = cx.observe_window_appearance(window, |_, _, cx| {
+            if cx.global::<SettingsStore>().settings().theme == ThemeChoice::System {
+                SettingsStore::reapply(cx);
+            }
+        });
         let (clicked, clicks) = async_channel::unbounded::<NodeId>();
         let clicks_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(leaf) = clicks.recv().await {
@@ -238,6 +249,9 @@ impl WorkspaceView {
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
             _activation: activation,
+            sent_palette: None,
+            _theme: theme_changed,
+            _appearance: appearance,
             clicked,
             _clicks: clicks_task,
             _events: events_task,
@@ -260,8 +274,26 @@ impl WorkspaceView {
             this.spawn_leaf(leaf, None, cx);
         }
         this.focus_current(window, cx);
+        // Every connection starts with the GUI's colours: the daemon outlives the GUI.
+        this.apply_settings(cx);
         this.save(cx);
         this
+    }
+
+    /// Take over what the settings say that is not drawn by `render`: pane colours, the daemon's palette, and the
+    /// alert threshold.
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let preset = theme(cx).preset;
+        for slot in self.slots.values() {
+            slot.view.update(cx, |view, cx| view.apply_theme(cx));
+        }
+        if self.sent_palette != Some(preset) {
+            self.client.set_palette(PaletteColors::from(terminal_palette(preset)));
+            self.sent_palette = Some(preset);
+        }
+        let seconds = cx.global::<SettingsStore>().settings().alerts.finished_after_seconds;
+        self.attention.set_finished_after_ms(u64::from(seconds) * 1000);
+        cx.notify();
     }
 
     fn add_slot(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
@@ -827,6 +859,7 @@ impl WorkspaceView {
     }
 
     fn drag_sidebar(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let ui_scale = theme(cx).ui_scale;
         if !self.resizing_sidebar {
             return;
         }
@@ -835,7 +868,7 @@ impl WorkspaceView {
             self.save(cx);
             return;
         }
-        let width = f32::from(event.position.x - self.sidebar_bounds.origin.x);
+        let width = f32::from(event.position.x - self.sidebar_bounds.origin.x) / ui_scale;
         self.workspace.sidebar.width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         cx.notify();
     }
@@ -1076,6 +1109,7 @@ impl WorkspaceView {
 
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
+        let theme = theme(cx).clone();
         let sessions = self.sidebar.read(cx).sessions();
         let tabs: Vec<(String, Option<SessionStatus>, bool, bool)> = self
             .workspace
@@ -1093,16 +1127,16 @@ impl WorkspaceView {
         let sidebar = &self.workspace.sidebar;
         div()
             .id("tab-bar")
-            .h(px(TAB_BAR_HEIGHT))
+            .h(theme.ui(TAB_BAR_HEIGHT))
             .w_full()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.))
-            .bg(rgb(SURFACE))
+            .gap(theme.ui(6.))
+            .bg(rgb(theme.tokens.surface))
             .border_b_1()
-            .border_color(rgb(LINE))
+            .border_color(rgb(theme.tokens.line))
             .text_sm()
             .map(|bar| {
                 if sidebar.visible {
@@ -1111,8 +1145,8 @@ impl WorkspaceView {
                         .id("brand")
                         .flex_none()
                         .h_full()
-                        .w(px(sidebar.width + SIDEBAR_EDGE))
-                        .pl(px(18.))
+                        .w(theme.ui(sidebar.width) + px(SIDEBAR_EDGE))
+                        .pl(theme.ui(18.))
                         .flex()
                         .items_center()
                         .font_weight(FontWeight::BOLD)
@@ -1124,40 +1158,41 @@ impl WorkspaceView {
             })
             .children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container))| {
                 let dragged = DraggedTab { index, title: title.clone() };
+                let line = theme.tokens.line;
                 let active = index == self.workspace.active;
                 // Claude tabs are filled with what their most urgent session needs; shells stay plain.
-                let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
-                let ink = colors.map_or(if active { TEXT } else { MUTED }, |colors| colors.ink);
-                let fill = colors.and_then(|colors| colors.fill).or(active.then_some(RAISED));
+                let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
+                let ink = colors.map_or(if active { theme.tokens.text } else { theme.tokens.muted }, |colors| colors.ink);
+                let fill = colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised));
                 div()
                     .id(("tab", index))
-                    .h(px(32.))
+                    .h(theme.ui(32.))
                     .pl_3()
                     .pr_1()
-                    .max_w(px(220.))
+                    .max_w(theme.ui(220.))
                     // Tabs shrink (titles truncate) so the buttons and window controls stay visible.
-                    .min_w(px(56.))
+                    .min_w(theme.ui(56.))
                     .flex_shrink(1.)
                     .flex()
                     .items_center()
                     .gap_2()
                     .rounded(px(RADIUS - 2.))
                     .border_2()
-                    .border_color(if active { rgb(ACCENT) } else { rgba(0) })
+                    .border_color(if active { rgb(theme.tokens.accent) } else { rgba(0) })
                     .text_color(rgb(ink))
                     .when(active, |tab| tab.font_weight(FontWeight::SEMIBOLD))
                     .when_some(fill, |tab, fill| tab.bg(rgb(fill)))
-                    .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(RAISED))))
+                    .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(theme.tokens.raised))))
                     .cursor_pointer()
-                    .when_some(colors, |tab, colors| tab.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.dot))))
+                    .when_some(colors, |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
                     .child(div().min_w_0().truncate().child(title))
                     .when(container, |tab| tab.child(container_chip(ink)))
-                    .when(unseen, |tab| tab.child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(ink))))
+                    .when(unseen, |tab| tab.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(ink))))
                     .child(
                         div()
                             .id(("close-tab", index))
                             .flex_none()
-                            .size(px(20.))
+                            .size(theme.ui(20.))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1175,7 +1210,7 @@ impl WorkspaceView {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
                     .on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone()))
-                    .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgb(LINE)))
+                    .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(line)))
                     .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -1187,14 +1222,15 @@ impl WorkspaceView {
                         }),
                     )
             }))
-            .child(round_button("new-claude", "+", cx.listener(|this, _, _, _| this.open(true, None))))
+            .child(round_button("new-claude", "+", &theme, cx.listener(|this, _, _, _| this.open(true, None))))
             .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
             .when(client_decorations, |bar| {
                 bar.child(
-                    moves_window(div().id("drag-area").flex_1().min_w(px(40.)).h_full()),
+                    moves_window(div().id("drag-area").flex_1().min_w(theme.ui(40.)).h_full()),
                 )
                 .child(window_frame::window_controls(
                     window,
+                    &theme,
                     cx.listener(|this, _, window, cx| {
                         if this.request_quit(window, cx) {
                             cx.quit();
@@ -1205,6 +1241,7 @@ impl WorkspaceView {
     }
 
     fn render_active_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx).clone();
         let Some(tab) = self.workspace.active_tab() else {
             return div()
                 .flex_1()
@@ -1218,14 +1255,14 @@ impl WorkspaceView {
                 .child(
                     div()
                         .id("empty-claude")
-                        .w(px(220.))
-                        .h(px(40.))
+                        .w(theme.ui(220.))
+                        .h(theme.ui(40.))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded(px(RADIUS))
-                        .bg(rgb(ACCENT))
-                        .text_color(rgb(ON_ACCENT))
+                        .bg(rgb(theme.tokens.accent))
+                        .text_color(rgb(theme.tokens.on_accent))
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .child("New Claude session")
@@ -1234,17 +1271,17 @@ impl WorkspaceView {
                 .child(
                     div()
                         .id("empty-shell")
-                        .w(px(220.))
-                        .h(px(40.))
+                        .w(theme.ui(220.))
+                        .h(theme.ui(40.))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded(px(RADIUS))
                         .border_1()
-                        .border_color(rgb(LINE))
-                        .text_color(rgb(MUTED))
+                        .border_color(rgb(theme.tokens.line))
+                        .text_color(rgb(theme.tokens.muted))
                         .cursor_pointer()
-                        .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(RAISED)))
+                        .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                         .child("New shell")
                         .on_click(cx.listener(|this, _, _, _| this.open(false, None))),
                 )
@@ -1287,10 +1324,10 @@ impl WorkspaceView {
                                 .flex_col()
                                 .p(px(6.))
                                 .rounded(px(RADIUS_LARGE))
-                                .bg(rgb(TERMINAL))
+                                .bg(rgb(theme.tokens.terminal))
                                 .border_2()
-                                .border_color(rgb(if focused && multiple { ACCENT } else { LINE }))
-                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container)))
+                                .border_color(rgb(if focused && multiple { theme.tokens.accent } else { theme.tokens.line }))
+                                .when(multiple, |pane| pane.child(pane_header(title, status, unseen, container, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1329,8 +1366,8 @@ impl WorkspaceView {
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
-fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool) -> impl IntoElement {
-    let colors = status.as_ref().map(|status| tone_colors(status_tone(Some(status), unseen)));
+fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, container: bool, theme: &Theme) -> impl IntoElement {
+    let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
     let word = status.as_ref().map(|status| match status_tone(Some(status), unseen) {
         Tone::NeedsInput => "Needs input",
         Tone::Working => "Working",
@@ -1339,8 +1376,8 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
     });
     div()
         .flex_none()
-        .h(px(28.))
-        .mb(px(4.))
+        .h(theme.ui(28.))
+        .mb(theme.ui(4.))
         .px_3()
         .flex()
         .items_center()
@@ -1348,11 +1385,11 @@ fn pane_header(title: String, status: Option<SessionStatus>, unseen: bool, conta
         .rounded(px(RADIUS_SMALL))
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
-        .bg(rgb(colors.and_then(|colors| colors.fill).unwrap_or(RAISED)))
-        .text_color(rgb(colors.map_or(TEXT, |colors| colors.ink)))
-        .when_some(colors, |header, colors| header.child(div().flex_none().size(px(7.)).rounded_full().bg(rgb(colors.dot))))
+        .bg(rgb(colors.and_then(|colors| colors.fill).unwrap_or(theme.tokens.raised)))
+        .text_color(rgb(colors.map_or(theme.tokens.text, |colors| colors.ink)))
+        .when_some(colors, |header, colors| header.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
         .child(div().flex_1().min_w_0().truncate().child(title))
-        .when(container, |header| header.child(container_chip(colors.map_or(TEXT, |colors| colors.ink))))
+        .when(container, |header| header.child(container_chip(colors.map_or(theme.tokens.text, |colors| colors.ink))))
         .when_some(word, |header, word| header.child(div().flex_none().font_weight(FontWeight::NORMAL).child(word)))
 }
 
@@ -1373,18 +1410,19 @@ fn moves_window(area: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
 pub(crate) fn round_button(
     id: &'static str,
     label: &'static str,
+    theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
         .flex_none()
-        .size(px(30.))
+        .size(theme.ui(30.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
-        .text_color(rgb(MUTED))
-        .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(RAISED)))
+        .text_color(rgb(theme.tokens.muted))
+        .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
         .cursor_pointer()
         .child(label)
         .on_click(on_click)
@@ -1397,6 +1435,9 @@ pub(crate) fn new_launch(claude: bool, cwd: PathBuf) -> PaneLaunch {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx).clone();
+        // The interface scales with `uiFontSize`; GPUI's rem is 16 px at the default of 14.
+        window.set_rem_size(px(16.0 * theme.ui_scale));
         let sidebar = self.workspace.sidebar.clone();
         let body = div()
             .flex_1()
@@ -1410,7 +1451,7 @@ impl Render for WorkspaceView {
                         .relative()
                         .flex_none()
                         .h_full()
-                        .w(px(sidebar.width))
+                        .w(theme.ui(sidebar.width))
                         .child({
                             let view = cx.entity();
                             canvas(move |bounds, _, cx| view.update(cx, |this, _| this.sidebar_bounds = bounds), |_, _, _, _| {})
@@ -1421,7 +1462,7 @@ impl Render for WorkspaceView {
                 )
                 .child(
                     // A hairline, grabbed through a wider invisible handle that overlaps the sidebar.
-                    div().relative().flex_none().w(px(SIDEBAR_EDGE)).h_full().bg(rgb(LINE)).child(
+                    div().relative().flex_none().w(px(SIDEBAR_EDGE)).h_full().bg(rgb(theme.tokens.line)).child(
                         div()
                             .id("sidebar-edge")
                             .absolute()
@@ -1479,19 +1520,19 @@ impl Render for WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(GROUND))
-            .text_color(rgb(TEXT))
+            .bg(rgb(theme.tokens.ground))
+            .text_color(rgb(theme.tokens.text))
             .font_family(UI_FONT)
             .child(self.render_tab_bar(window, cx))
             .child(body)
             .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
-                    div().id("launcher-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
+                    div().id("launcher-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(theme.ui(72.)).child(view),
                 )
             })
             .when_some(self.recents.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
-                    div().id("recents-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(px(72.)).child(view),
+                    div().id("recents-overlay").occlude().absolute().top_0().left_0().size_full().flex().flex_col().items_center().pt(theme.ui(72.)).child(view),
                 )
             })
             .when_some(self.tab_menu.as_ref(), |root, menu| {
@@ -1509,11 +1550,12 @@ impl Render for WorkspaceView {
                 root.child(context_menu::render(
                     "tab-menu",
                     menu,
+                    &theme,
                     move |action, window, cx| pick(action, window, cx),
                     move |window, cx| dismiss(&(), window, cx),
                 ))
             });
-        window_frame::frame(window, root)
+        window_frame::frame(window, theme.tokens.line, root)
     }
 }
 
@@ -1525,19 +1567,20 @@ struct DraggedTab {
 }
 
 impl Render for DraggedTab {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx).clone();
         div()
-            .h(px(32.))
+            .h(theme.ui(32.))
             .px_3()
             .flex()
             .items_center()
             .rounded(px(RADIUS - 2.))
             .border_2()
-            .border_color(rgb(ACCENT))
-            .bg(rgb(RAISED))
+            .border_color(rgb(theme.tokens.accent))
+            .bg(rgb(theme.tokens.raised))
             .text_sm()
             .font_family(UI_FONT)
-            .text_color(rgb(TEXT))
+            .text_color(rgb(theme.tokens.text))
             .child(self.title.clone())
     }
 }

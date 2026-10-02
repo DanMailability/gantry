@@ -3,7 +3,7 @@
 use app_core::text_field::TextField;
 use gpui::{Div, Keystroke, div, prelude::*, px, rgb};
 
-use crate::theme::{ACCENT, MUTED};
+use crate::theme::Theme;
 
 /// Apply an editing key (typing, Backspace, Delete, arrows, Home/End) to `field`. False for anything
 /// else — chords with Ctrl/Alt/Cmd are never text.
@@ -28,11 +28,11 @@ pub(crate) fn edit(field: &mut TextField, keystroke: &Keystroke) -> bool {
 }
 
 /// The field's text with a caret at the cursor when `focused`; `placeholder` while empty.
-pub(crate) fn render(field: &TextField, placeholder: &'static str, focused: bool) -> Div {
-    let caret = || div().flex_none().w(px(1.)).h(px(14.)).bg(rgb(ACCENT));
+pub(crate) fn render(field: &TextField, placeholder: &'static str, focused: bool, theme: &Theme) -> Div {
+    let caret = || div().flex_none().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.accent));
     let row = div().flex().flex_row().items_center().min_w_0().overflow_hidden().whitespace_nowrap();
     if field.text().is_empty() {
-        return row.when(focused, |row| row.child(caret())).child(div().text_color(rgb(MUTED)).child(placeholder));
+        return row.when(focused, |row| row.child(caret())).child(div().text_color(rgb(theme.tokens.muted)).child(placeholder));
     }
     let (before, after) = field.text().split_at(field.cursor());
     row.child(before.to_string()).when(focused, |row| row.child(caret())).child(after.to_string())

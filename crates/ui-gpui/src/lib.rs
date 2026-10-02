@@ -7,6 +7,7 @@ pub mod launcher_view;
 pub mod recents_view;
 pub mod sidebar_view;
 pub mod terminal_view;
+mod settings_store;
 mod theme;
 pub mod workspace_view;
 mod window_frame;
@@ -23,14 +24,15 @@ use gpui::{
     WindowHandle, WindowOptions, div, px, rgb, size,
 };
 
+use crate::settings_store::SettingsStore;
 use crate::workspace_view::WorkspaceView;
 
 /// Placeholder shown while asking whether to restart a mismatched daemon.
 struct Notice;
 
 impl Render for Notice {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().bg(rgb(theme::GROUND))
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().bg(rgb(theme::theme(cx).tokens.ground))
     }
 }
 
@@ -44,6 +46,7 @@ pub fn run(launch: Launch) {
         terminal_view::bind_keys(cx);
         workspace_view::bind_keys(cx);
         let paths = Paths::for_profile(&current_profile());
+        SettingsStore::init(paths.settings_file.clone(), cx);
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

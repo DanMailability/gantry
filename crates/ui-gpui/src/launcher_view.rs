@@ -13,7 +13,7 @@ use gpui::{
 use protocol::message::SessionInfo;
 
 use crate::field;
-use crate::theme::{LINE, MUTED, RADIUS_LARGE, RADIUS_SMALL, RAISED, SURFACE, TEXT};
+use crate::theme::{RADIUS_LARGE, RADIUS_SMALL, theme};
 
 /// What the launcher asks the workspace to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,10 +108,11 @@ impl LauncherView {
             LauncherItem::Browse => "Browse…".into(),
         };
         let selected = index == self.selected;
+        let theme = theme(cx).clone();
         div()
             .id(index)
             .w_full()
-            .h(px(34.))
+            .h(theme.ui(34.))
             .px_2()
             .py(px(2.))
             .child(
@@ -124,8 +125,8 @@ impl LauncherView {
                     .cursor_pointer()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .when(selected, |el| el.bg(rgb(RAISED)))
-                    .when(!selected, |el| el.text_color(rgb(MUTED)).hover(|style| style.text_color(rgb(TEXT))))
+                    .when(selected, |el| el.bg(rgb(theme.tokens.raised)))
+                    .when(!selected, |el| el.text_color(rgb(theme.tokens.muted)).hover(|style| style.text_color(rgb(theme.tokens.text))))
                     .child(label),
             )
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, !event.modifiers().alt, cx)))
@@ -134,31 +135,32 @@ impl LauncherView {
 
 impl Render for LauncherView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx).clone();
         div()
             .key_context("Launcher")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(LauncherEvent::Dismiss)))
-            .w(px(560.))
+            .w(theme.ui(560.))
             .flex()
             .flex_col()
-            .bg(rgb(SURFACE))
+            .bg(rgb(theme.tokens.surface))
             .border_1()
-            .border_color(rgb(LINE))
+            .border_color(rgb(theme.tokens.line))
             .rounded(px(RADIUS_LARGE))
             .overflow_hidden()
             .shadow_lg()
             .text_sm()
-            .text_color(rgb(TEXT))
+            .text_color(rgb(theme.tokens.text))
             .child(
                 div()
-                    .h(px(46.))
+                    .h(theme.ui(46.))
                     .px_4()
                     .flex()
                     .items_center()
                     .border_b_1()
-                    .border_color(rgb(LINE))
-                    .child(field::render(&self.query, "Open a directory…", true)),
+                    .border_color(rgb(theme.tokens.line))
+                    .child(field::render(&self.query, "Open a directory…", true, &theme)),
             )
             .child(
                 uniform_list(
@@ -167,18 +169,18 @@ impl Render for LauncherView {
                     cx.processor(|this, range: Range<usize>, _window, cx| range.map(|index| this.render_item(index, cx)).collect::<Vec<_>>()),
                 )
                 .track_scroll(&self.scroll)
-                .h(px(320.)),
+                .h(theme.ui(320.)),
             )
             .child(
                 div()
-                    .h(px(32.))
+                    .h(theme.ui(32.))
                     .px_4()
                     .flex()
                     .items_center()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme.tokens.muted))
                     .border_t_1()
-                    .border_color(rgb(LINE))
+                    .border_color(rgb(theme.tokens.line))
                     .child("Enter: Claude · Alt+Enter: shell · Esc: close"),
             )
     }
