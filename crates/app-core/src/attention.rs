@@ -294,7 +294,7 @@ mod tests {
     }
 
     fn all_on() -> EventAlerts {
-        EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::Beep }
+        EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip }
     }
 
     fn settings() -> AlertSettings {
@@ -323,13 +323,13 @@ mod tests {
     #[test]
     fn when_visible_alerts_a_visible_pane() {
         let alerts = AlertSettings { when_visible: true, ..settings() };
-        assert_eq!(alert_channels(&alerts, &finished(), true, true), Channels { badge: true, notification: true, sound: Some(AlertTone::Beep) });
+        assert_eq!(alert_channels(&alerts, &finished(), true, true), Channels { badge: true, notification: true, sound: Some(AlertTone::FallingBlip) });
     }
 
     #[test]
     fn only_when_unfocused_drops_notification_but_keeps_badge_and_sound() {
         let alerts = AlertSettings { only_when_unfocused: true, ..settings() };
-        assert_eq!(alert_channels(&alerts, &finished(), false, true), Channels { badge: true, notification: false, sound: Some(AlertTone::Beep) });
+        assert_eq!(alert_channels(&alerts, &finished(), false, true), Channels { badge: true, notification: false, sound: Some(AlertTone::FallingBlip) });
         assert!(alert_channels(&alerts, &finished(), false, false).notification);
     }
 
@@ -343,13 +343,13 @@ mod tests {
     #[test]
     fn grid_cells_are_independent() {
         let alerts = AlertSettings {
-            needs_input: EventAlerts { badge: false, notification: false, sound: true, tone: AlertTone::Beep },
-            finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::Blip },
+            needs_input: EventAlerts { badge: false, notification: false, sound: true, tone: AlertTone::FallingBlip },
+            finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::ClassicBlip },
             ..settings()
         };
         assert_eq!(
             alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false),
-            Channels { badge: false, notification: false, sound: Some(AlertTone::Beep) }
+            Channels { badge: false, notification: false, sound: Some(AlertTone::FallingBlip) }
         );
         assert_eq!(alert_channels(&alerts, &finished(), false, false), Channels { badge: false, notification: true, sound: None });
     }

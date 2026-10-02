@@ -39,39 +39,56 @@ impl ThemeChoice {
     }
 }
 
-/// Built-in alert sound. Blips and chimes are high and short, beeps are low and long.
+/// Built-in alert sound (a recording embedded in the app).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlertTone {
-    /// A short, high blip.
-    Blip,
-    /// The blip with a longer tail.
-    BlipLong,
-    /// Two quiet notes, rising.
-    Chime,
-    /// A fast glide up, like a water drop.
-    Droplet,
-    /// A low, soft beep.
-    Beep,
-    /// The beep with a slower attack and a longer tail.
-    BeepSlow,
-    /// Three notes, rising.
-    Rise,
+    /// Finished: a short, classic blip.
+    ClassicBlip,
+    /// Finished: a gentle rise.
+    GentleRise,
+    /// Finished: a soft bloop.
+    SoftBloop,
+    /// Finished: a soft drop.
+    SoftDrop,
+    /// Needs input: a falling blip.
+    FallingBlip,
+    /// Needs input: a soft fall.
+    SoftFall,
+    /// Needs input: a soft flutter.
+    SoftFlutter,
+    /// Needs input: a warm hum.
+    WarmHum,
 }
 
 impl AlertTone {
-    /// Every tone, in the order the Settings list shows them.
-    pub const ALL: [AlertTone; 7] =
-        [AlertTone::Blip, AlertTone::BlipLong, AlertTone::Chime, AlertTone::Droplet, AlertTone::Beep, AlertTone::BeepSlow, AlertTone::Rise];
+    /// Every tone.
+    pub const ALL: [AlertTone; 8] = [
+        AlertTone::ClassicBlip,
+        AlertTone::GentleRise,
+        AlertTone::SoftBloop,
+        AlertTone::SoftDrop,
+        AlertTone::FallingBlip,
+        AlertTone::SoftFall,
+        AlertTone::SoftFlutter,
+        AlertTone::WarmHum,
+    ];
+
+    /// The tones offered for a finished session, in the order the Settings list shows them.
+    pub const FINISHED: [AlertTone; 4] = [AlertTone::ClassicBlip, AlertTone::GentleRise, AlertTone::SoftBloop, AlertTone::SoftDrop];
+
+    /// The tones offered for a session that needs input, in the order the Settings list shows them.
+    pub const NEEDS_INPUT: [AlertTone; 4] = [AlertTone::FallingBlip, AlertTone::SoftFall, AlertTone::SoftFlutter, AlertTone::WarmHum];
 
     fn name(self) -> &'static str {
         match self {
-            AlertTone::Blip => "blip",
-            AlertTone::BlipLong => "blip-long",
-            AlertTone::Chime => "chime",
-            AlertTone::Droplet => "droplet",
-            AlertTone::Beep => "beep",
-            AlertTone::BeepSlow => "beep-slow",
-            AlertTone::Rise => "rise",
+            AlertTone::ClassicBlip => "classic-blip",
+            AlertTone::GentleRise => "gentle-rise",
+            AlertTone::SoftBloop => "soft-bloop",
+            AlertTone::SoftDrop => "soft-drop",
+            AlertTone::FallingBlip => "falling-blip",
+            AlertTone::SoftFall => "soft-fall",
+            AlertTone::SoftFlutter => "soft-flutter",
+            AlertTone::WarmHum => "warm-hum",
         }
     }
 
@@ -300,8 +317,8 @@ impl Default for Settings {
             terminal_font: TerminalFont { family: None, size: 14.0, line_height: 1.3 },
             ui_font_size: 14.0,
             alerts: AlertSettings {
-                needs_input: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::Beep },
-                finished: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::Blip },
+                needs_input: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::FallingBlip },
+                finished: EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::ClassicBlip },
                 finished_after_seconds: 3,
                 when_visible: false,
                 only_when_unfocused: false,
@@ -927,7 +944,7 @@ mod tests {
         assert_eq!(s.ui_font_size, 14.0);
         assert_eq!(s.alerts.finished_after_seconds, 3);
         assert_eq!(s.alerts.volume, 0.4);
-        assert_eq!((s.alerts.needs_input.tone, s.alerts.finished.tone), (AlertTone::Beep, AlertTone::Blip));
+        assert_eq!((s.alerts.needs_input.tone, s.alerts.finished.tone), (AlertTone::FallingBlip, AlertTone::ClassicBlip));
         assert_eq!(s.status_fills, StatusFills::default());
         assert!(!s.alerts.when_visible && !s.alerts.only_when_unfocused && s.alerts.play_sounds);
     }
@@ -1002,8 +1019,8 @@ mod tests {
             terminal_font: TerminalFont { family: Some("Fira Code".into()), size: 17.5, line_height: 1.45 },
             ui_font_size: 16.0,
             alerts: AlertSettings {
-                needs_input: EventAlerts { badge: false, notification: false, sound: false, tone: AlertTone::Blip },
-                finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::Beep },
+                needs_input: EventAlerts { badge: false, notification: false, sound: false, tone: AlertTone::SoftFall },
+                finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::SoftDrop },
                 finished_after_seconds: 30,
                 when_visible: true,
                 only_when_unfocused: true,
