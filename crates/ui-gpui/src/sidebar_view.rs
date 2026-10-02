@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use app_core::menus::{self, MenuAction};
 use app_core::session_tree::{
     self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, Tone, ToneCounts,
     session_title,
@@ -15,15 +16,16 @@ use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
 use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, anchored,
-    deferred, div, prelude::*, px, rgb, rgba, uniform_list,
+    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window,
+    div, prelude::*, px, rgb, rgba, uniform_list,
 };
 use protocol::message::SessionInfo;
 
+use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::theme;
 use crate::theme::{
-    ACCENT, LINE, MUTED, ON_ACCENT, RADIUS, RADIUS_SMALL, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
+    ACCENT, LINE, MUTED, ON_ACCENT, RADIUS, RAISED, SURFACE, TEXT, UI_FONT, tone_colors,
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
@@ -45,13 +47,8 @@ pub enum SidebarEvent {
         /// Open as a split instead of a new tab.
         split: bool,
     },
-    /// Open a new Claude (or shell) tab in `dir`.
-    NewHere {
-        /// Directory.
-        dir: PathBuf,
-        /// Claude (true) or a shell.
-        claude: bool,
-    },
+    /// A right-click menu entry was picked.
+    Menu(MenuAction),
     /// Open a new Claude (or shell) tab where the focused pane is.
     New {
         /// Claude (true) or a shell.
@@ -78,8 +75,8 @@ pub struct SidebarView {
     selected: Option<RowKey>,
     /// The workspace's focused leaf; its row is selected unless the user moved the ring.
     focused_leaf: Option<NodeId>,
-    /// Project context menu: its directory and where it opened.
-    menu: Option<(PathBuf, Point<Pixels>)>,
+    /// The open right-click menu of a row or heading.
+    menu: Option<OpenMenu>,
     scroll: UniformListScrollHandle,
     home: Option<PathBuf>,
     /// Project of each directory seen (it stats parent directories; cleared on every refresh).
@@ -271,10 +268,28 @@ impl SidebarView {
         cx.notify();
     }
 
-    fn menu_choice(&mut self, claude: bool, cx: &mut Context<Self>) {
-        if let Some((dir, _)) = self.menu.take() {
-            cx.emit(SidebarEvent::NewHere { dir, claude });
-        }
+    /// Open the right-click menu of row `index` at `position`.
+    fn open_menu(&mut self, index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(index) else { return };
+        let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
+        let items = match &row.kind {
+            RowKind::Project { path, .. } => {
+                // The dev container one of its listed sessions runs in.
+                let container = self.rows[index + 1..]
+                    .iter()
+                    .take_while(|row| !matches!(row.kind, RowKind::Project { .. }))
+                    .find_map(|row| match &row.kind {
+                        RowKind::Session { session, .. } => session.container.as_ref().filter(|place| place.host_folder.is_some()),
+                        _ => None,
+                    });
+                Some(menus::project_menu(path, container))
+            }
+            _ => menus::row_menu(row, &alone),
+        };
+        let Some(items) = items else { return };
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        self.menu = Some(OpenMenu { items, position, focus });
         cx.notify();
     }
 
@@ -301,7 +316,11 @@ impl SidebarView {
                 if let Some(index) = session_tree::find(&this.rows, &key) {
                     this.activate(index, event.modifiers().secondary(), cx);
                 }
-            }));
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| this.open_menu(index, event.position, window, cx)),
+            );
         // The visible part of a row: a rounded pill, ringed when selected.
         let pill = |fill: Option<u32>| {
             div()
@@ -323,20 +342,12 @@ impl SidebarView {
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
         let aside = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
         match &row.kind {
-            RowKind::Project { path, label, expanded, counts } => {
-                let path = path.clone();
+            RowKind::Project { label, expanded, counts, .. } => {
                 base.child(
                     pill(None)
                         .child(div().flex_none().text_color(rgb(MUTED)).child(if *expanded { "▾" } else { "▸" }))
                         .child(title(label.clone()).font_weight(FontWeight::SEMIBOLD))
                         .children(count_chips(counts)),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        this.menu = Some((path.clone(), event.position));
-                        cx.notify();
-                    }),
                 )
             }
             RowKind::Session { session, tone, note, .. } => {
@@ -529,46 +540,24 @@ impl Render for SidebarView {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: false }))),
                     ),
             )
-            .when_some(self.menu.clone(), |el, (_, position)| {
-                el.child(deferred(
-                    anchored().position(position).child(
-                        div()
-                            .id("project-menu")
-                            // A floating layer: clicks must not reach the rows beneath it.
-                            .occlude()
-                            .p_1()
-                            .text_sm()
-                            .font_family(UI_FONT)
-                            .text_color(rgb(TEXT))
-                            .bg(rgb(RAISED))
-                            .border_1()
-                            .border_color(rgb(LINE))
-                            .rounded(px(RADIUS))
-                            .shadow_lg()
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                this.menu = None;
-                                cx.notify();
-                            }))
-                            .child(menu_item("menu-claude", "New Claude here", cx.listener(|this, _, _, cx| this.menu_choice(true, cx))))
-                            .child(menu_item("menu-shell", "New shell here", cx.listener(|this, _, _, cx| this.menu_choice(false, cx)))),
-                    ),
+            .when_some(self.menu.as_ref(), |el, menu| {
+                let pick = cx.listener(|this, action: &MenuAction, window, cx| {
+                    this.menu = None;
+                    this.focus_handle.focus(window, cx);
+                    cx.emit(SidebarEvent::Menu(action.clone()));
+                    cx.notify();
+                });
+                let dismiss = cx.listener(|this, _: &(), window, cx| {
+                    this.menu = None;
+                    this.focus_handle.focus(window, cx);
+                    cx.notify();
+                });
+                el.child(context_menu::render(
+                    "sidebar-menu",
+                    menu,
+                    move |action, window, cx| pick(action, window, cx),
+                    move |window, cx| dismiss(&(), window, cx),
                 ))
             })
     }
-}
-
-fn menu_item(
-    id: &'static str,
-    label: &'static str,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded(px(RADIUS_SMALL))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(LINE)))
-        .child(label)
-        .on_click(on_click)
 }

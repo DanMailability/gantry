@@ -19,6 +19,7 @@ use gpui::{
 };
 use protocol::message::{ContainerChoice, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
+use app_core::menus::MenuAction;
 use app_core::session_tree::{Activation, PaneEntry, Tone, display_path, session_title, status_tone};
 
 use crate::alerts::{self, Notice};
@@ -651,6 +652,13 @@ impl WorkspaceView {
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, cx));
     }
 
+    /// Do what a right-click menu entry says.
+    fn run_menu_action(&mut self, action: MenuAction, _window: &mut Window, _cx: &mut Context<Self>) {
+        if let MenuAction::NewHere { dir, claude } = action {
+            self.open_new(claude, dir, None, None);
+        }
+    }
+
     fn on_sidebar_event(&mut self, event: SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             SidebarEvent::Activate { activation, split } => match activation {
@@ -674,7 +682,7 @@ impl WorkspaceView {
                 }
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
-            SidebarEvent::NewHere { dir, claude } => self.open_new(claude, dir, None, None),
+            SidebarEvent::Menu(action) => self.run_menu_action(action, window, cx),
             SidebarEvent::New { claude } => self.open(claude, None),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
