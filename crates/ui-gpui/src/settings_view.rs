@@ -15,7 +15,7 @@ use app_core::text_field::TextField;
 use app_core::theme_colors::{Preset, Tokens, contrast, derive, readable_fill, terminal_palette, tokens as preset_tokens, tone_colors};
 use gpui::{
     App, Bounds, Context, DispatchPhase, Div, ElementId, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Stateful, Window, canvas, deferred, div, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString, Stateful, Window, canvas, deferred, div, point, prelude::*, px,
     relative, rgb, rgba,
 };
 
@@ -228,10 +228,11 @@ const FINISHED_AFTER: Stepped = Stepped {
 const DROPDOWN_ROWS: f32 = 8.;
 const DROPDOWN_ROW: f32 = 30.;
 
-/// Widths (before scaling) of the alerts grid's fixed columns; the Event column takes the rest.
-const BADGE_COLUMN: f32 = 90.;
-const NOTIFICATION_COLUMN: f32 = 110.;
-const SOUND_COLUMN: f32 = 300.;
+/// Widths (before scaling) of the alerts grid's fixed columns; the Event column takes the rest. The tone drop-down and Play button
+/// follow the Sound switch, or wrap under the row when there is no room.
+const BADGE_COLUMN: f32 = 64.;
+const NOTIFICATION_COLUMN: f32 = 84.;
+const SOUND_COLUMN: f32 = 64.;
 
 const SUGGESTED_FILLS: [u32; 12] =
     [0xc1e5cd, 0xb7e4dd, 0xcfe8b4, 0xe6efb0, 0xa8dcc0, 0xd5ecd9, 0xf7c9a3, 0xf6b8b8, 0xe9c6ef, 0xc9cdf6, 0xb9d5f6, 0xf1e1a6];
@@ -354,6 +355,7 @@ pub(crate) struct SettingsView {
     /// The volume being dragged, written when the button is released.
     volume_drag: Option<f32>,
     slider_bounds: Rc<Cell<Bounds<Pixels>>>,
+    body_scroll: ScrollHandle,
     /// Where each drop-down's button was last drawn, to open its list upward near the window's bottom.
     dropdown_bounds: DropdownBounds,
     /// The hex field's text counts as selected: the next typed character or Backspace replaces it all.
@@ -373,6 +375,7 @@ impl SettingsView {
             hex_focus: cx.focus_handle(),
             volume_drag: None,
             slider_bounds: Rc::new(Cell::new(Bounds::default())),
+            body_scroll: ScrollHandle::new(),
             dropdown_bounds: Rc::new(RefCell::new(HashMap::new())),
             hex_selected: false,
         }
@@ -695,6 +698,7 @@ impl Render for SettingsView {
                 let choose = handler(move |this, _, cx| {
                     this.section = item;
                     this.popover = None;
+                    this.body_scroll.set_offset(point(px(0.), px(0.)));
                     cx.notify();
                 });
                 self.pressable("section", item as usize, None, window, cx, choose)
@@ -780,6 +784,7 @@ impl Render for SettingsView {
             .child(
                 div()
                     .id("settings-body")
+                    .track_scroll(&self.body_scroll)
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -893,9 +898,8 @@ impl SettingsView {
             let open = self.popover == Some(Popover::Fill(status));
             let sample = div()
                 .w(theme.ui(300.))
-                .min_w(theme.ui(180.))
-                .max_w(theme.ui(300.))
-                .flex_shrink_1()
+                .max_w_full()
+                .flex_none()
                 .h(theme.ui(34.))
                 .px_3()
                 .flex()
@@ -937,21 +941,23 @@ impl SettingsView {
                 .rounded(px(RADIUS_SMALL))
                 .text_color(rgb(if chosen.is_some() { theme.tokens.text } else { theme.tokens.muted }))
                 .child("Reset");
-            div()
-                .flex()
-                .items_center()
-                .gap(theme.ui(18.))
-                .py(theme.ui(6.))
-                .child(sample)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(theme.ui(150.))
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(status.label()))
-                        .child(muted(theme, status.description())),
-                )
-                .child(div().relative().flex_none().child(picker_button).children(picker))
-                .child(reset.flex_none())
+            div().flex().flex_wrap().items_center().gap_x(theme.ui(18.)).gap_y(theme.ui(6.)).py(theme.ui(6.)).child(sample).child(
+                div()
+                    .flex_1()
+                    .min_w(theme.ui(300.))
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(18.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(theme.ui(90.))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(status.label()))
+                            .child(muted(theme, status.description())),
+                    )
+                    .child(div().relative().flex_none().child(picker_button).children(picker))
+                    .child(reset.flex_none()),
+            )
         });
         div()
             .flex()
@@ -1075,13 +1081,13 @@ impl SettingsView {
                 .flex()
                 .items_center()
                 .gap(theme.ui(12.))
-                .child(div().w(theme.ui(150.)).child(label))
+                .child(div().flex_none().w(theme.ui(150.)).child(label))
                 .child(this.stepper(stepped, settings, window, cx))
-                .child(muted(theme, hint))
+                .child(muted(theme, hint).flex_1().min_w_0())
         };
         let controls = div()
             .w(theme.ui(520.))
-            .flex_none()
+            .max_w_full()
             .flex()
             .flex_col()
             .gap(theme.ui(12.))
@@ -1175,6 +1181,8 @@ impl SettingsView {
                 });
                 let play = self.button("play", index, "▶ Play", window, cx, play);
                 columns(div())
+                    .flex_wrap()
+                    .gap_y(theme.ui(10.))
                     .py(theme.ui(14.))
                     .border_t_1()
                     .border_color(rgb(theme.tokens.line))
@@ -1196,7 +1204,8 @@ impl SettingsView {
                     )
                     .child(div().flex_none().w(theme.ui(BADGE_COLUMN)).child(badge))
                     .child(div().flex_none().w(theme.ui(NOTIFICATION_COLUMN)).child(notification))
-                    .child(div().flex_none().w(theme.ui(SOUND_COLUMN)).flex().items_center().gap(theme.ui(10.)).child(sound).child(picker).child(play))
+                    .child(div().flex_none().w(theme.ui(SOUND_COLUMN)).child(sound))
+                    .child(div().flex_none().flex().items_center().gap(theme.ui(10.)).child(picker).child(play))
             })
             .collect();
         let grid = div()
@@ -1209,6 +1218,7 @@ impl SettingsView {
 
         let threshold = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(theme.ui(10.))
             .text_color(rgb(theme.tokens.muted))
@@ -1256,7 +1266,7 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap(theme.ui(28.))
-                    .child(div().flex().items_center().gap(theme.ui(12.)).child(sounds).child(div().font_weight(FontWeight::SEMIBOLD).child("Play sounds")))
+                    .child(div().flex_none().flex().items_center().gap(theme.ui(12.)).child(sounds).child(div().font_weight(FontWeight::SEMIBOLD).child("Play sounds")))
                     .child(slider),
             )
             .child(
@@ -1342,7 +1352,8 @@ impl SettingsView {
             .id("volume")
             .track_focus(&handle)
             .tab_stop(true)
-            .w(theme.ui(260.))
+            .flex_1()
+            .min_w(theme.ui(120.))
             .h(theme.ui(28.))
             .flex()
             .items_center()
@@ -1373,12 +1384,14 @@ impl SettingsView {
             }))
             .child(rail);
         div()
+            .flex_1()
+            .min_w_0()
             .flex()
             .items_center()
             .gap(theme.ui(12.))
-            .child("Volume")
+            .child(div().flex_none().child("Volume"))
             .child(slider)
-            .child(div().w(theme.ui(44.)).text_color(rgb(theme.tokens.muted)).child(format!("{:.0}%", shown * 100.0)))
+            .child(div().flex_none().w(theme.ui(44.)).text_color(rgb(theme.tokens.muted)).child(format!("{:.0}%", shown * 100.0)))
     }
 }
 
