@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use crate::theme_colors::ProjectColor;
+
 /// Theme choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ThemeChoice {
@@ -240,6 +242,35 @@ pub struct Settings {
     pub favorites: Vec<PathBuf>,
     /// Window behaviour.
     pub window: WindowSettings,
+    /// Project colours.
+    pub project_colors: ProjectColors,
+}
+
+/// The `projectColors` setting: whether projects are coloured, and the colours picked per folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectColors {
+    /// Whether projects get a colour at all.
+    pub enabled: bool,
+    /// Project root to the colour picked for it; others get the automatic colour.
+    pub folders: BTreeMap<PathBuf, ProjectColor>,
+}
+
+impl Default for ProjectColors {
+    fn default() -> Self {
+        ProjectColors { enabled: true, folders: BTreeMap::new() }
+    }
+}
+
+/// The colour of the project at `root`: its pick, else the automatic one; `None` when project colours are off.
+pub fn project_color(settings: &Settings, root: &Path) -> Option<ProjectColor> {
+    settings.project_colors.color_of(root)
+}
+
+impl ProjectColors {
+    /// The colour of the project at `root`: its pick, else the automatic one; `None` when colours are off.
+    pub fn color_of(&self, root: &Path) -> Option<ProjectColor> {
+        self.enabled.then(|| self.folders.get(root).copied().unwrap_or_else(|| ProjectColor::auto(root)))
+    }
 }
 
 impl Default for Settings {
@@ -266,6 +297,7 @@ impl Default for Settings {
             recents: RecentsSettings { per_project: 5, chips: 6 },
             favorites: Vec::new(),
             window: WindowSettings { restore_layout: true, sidebar_at_start: SidebarAtStart::Remember, scrollback: 10_000, right_to_left: true },
+            project_colors: ProjectColors::default(),
         }
     }
 }
@@ -623,6 +655,23 @@ impl Reader {
             right_to_left: self.bool(&map, "window.", "rightToLeft", defaults.window.right_to_left),
         };
 
+        let map = self.object(raw, "", "projectColors");
+        let enabled = self.bool(&map, "projectColors.", "enabled", true);
+        let folders_map = self.object(&map, "projectColors.", "folders");
+        let mut folders = BTreeMap::new();
+        for (folder, value) in folders_map {
+            match value.as_str().and_then(ProjectColor::from_name) {
+                Some(color) => {
+                    folders.insert(PathBuf::from(folder), color);
+                }
+                None => self.problem(
+                    &format!("projectColors.folders.{folder}"),
+                    "expected a colour name (blue, amber, teal, violet, rose, lime, orange, pink); dropped".into(),
+                ),
+            }
+        }
+        let project_colors = ProjectColors { enabled, folders };
+
         Settings {
             theme,
             status_fills,
@@ -637,6 +686,7 @@ impl Reader {
             recents,
             favorites,
             window,
+            project_colors,
         }
     }
 }
@@ -707,6 +757,10 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     add(&["window", "sidebarAtStart"], window.sidebar_at_start.name().into(), window.sidebar_at_start != base.sidebar_at_start);
     add(&["window", "scrollback"], window.scrollback.into(), window.scrollback != base.scrollback);
     add(&["window", "rightToLeft"], window.right_to_left.into(), window.right_to_left != base.right_to_left);
+    add(&["projectColors", "enabled"], settings.project_colors.enabled.into(), settings.project_colors.enabled != default.project_colors.enabled);
+    let colors: Map<String, Value> =
+        settings.project_colors.folders.iter().map(|(folder, color)| (folder.to_string_lossy().into_owned(), color.name().into())).collect();
+    add(&["projectColors", "folders"], Value::Object(colors), !settings.project_colors.folders.is_empty());
     out
 }
 
@@ -737,21 +791,22 @@ fn put(map: &mut Map<String, Value>, path: &[&str], value: Option<Value>) {
 
 /// Write `settings` to `path` atomically: `raw` with every known key replaced by its value in `settings`, and
 /// known keys equal to their default removed (an object left empty is removed too). Unknown keys stay. The
-/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `shortcuts`) are only rewritten when `settings`
+/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `shortcuts`, `projectColors.folders`) are only rewritten when `settings`
 /// differs from what `raw` loads as, so hand-written entries that failed validation, and unknown fields in them,
 /// survive other changes.
 pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::Result<()> {
     let loaded = Reader { problems: Vec::new() }.settings(raw);
-    let untouched = |key: &str| match key {
-        "claudeDirs" => settings.claude_dirs == loaded.claude_dirs,
-        "favorites" => settings.favorites == loaded.favorites,
-        "folderClaudeDirs" => settings.folder_claude_dirs == loaded.folder_claude_dirs,
-        "shortcuts" => settings.shortcuts == loaded.shortcuts,
+    let untouched = |key: &[&str]| match key {
+        ["claudeDirs"] => settings.claude_dirs == loaded.claude_dirs,
+        ["favorites"] => settings.favorites == loaded.favorites,
+        ["folderClaudeDirs"] => settings.folder_claude_dirs == loaded.folder_claude_dirs,
+        ["shortcuts"] => settings.shortcuts == loaded.shortcuts,
+        ["projectColors", "folders"] => settings.project_colors.folders == loaded.project_colors.folders,
         _ => false,
     };
     let mut out = raw.clone();
     for (key, value, changed) in leaves(settings) {
-        if key.len() == 1 && untouched(key[0]) {
+        if untouched(&key) {
             continue;
         }
         put(&mut out, &key, changed.then_some(value));
@@ -1043,6 +1098,48 @@ mod tests {
         let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
         assert_eq!(keys, ["recents.perProject", "recents.chips", "window.sidebarAtStart", "window.scrollback"]);
         assert_eq!(parse(r#"{"window": {"scrollback": 1000000}}"#).settings.unwrap().window.scrollback, 100000);
+    }
+
+    #[test]
+    fn project_colors_load_tolerantly() {
+        let loaded = parse(r#"{"projectColors": {"enabled": false, "folders": {"/a": "amber", "/b": "mauve", "/c": 3}}}"#);
+        let s = loaded.settings.unwrap();
+        assert!(!s.project_colors.enabled);
+        assert_eq!(s.project_colors.folders.get(Path::new("/a")), Some(&ProjectColor::Amber));
+        assert_eq!(s.project_colors.folders.len(), 1);
+        assert_eq!(loaded.problems.len(), 2, "{:?}", loaded.problems);
+        let loaded = parse(r#"{"projectColors": {"folders": []}}"#);
+        let s = loaded.settings.unwrap();
+        assert!(s.project_colors.enabled && s.project_colors.folders.is_empty());
+        assert_eq!(loaded.problems.len(), 1);
+    }
+
+    #[test]
+    fn project_color_resolves_pick_then_auto_then_off() {
+        let mut s = Settings::default();
+        let root = Path::new("/r/app");
+        assert_eq!(project_color(&s, root), Some(ProjectColor::auto(root)));
+        s.project_colors.folders.insert(root.into(), ProjectColor::Lime);
+        assert_eq!(project_color(&s, root), Some(ProjectColor::Lime));
+        s.project_colors.enabled = false;
+        assert_eq!(project_color(&s, root), None);
+    }
+
+    #[test]
+    fn project_colors_save_only_changes_and_keep_bad_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let loaded = parse(r#"{"projectColors": {"folders": {"/x": "mauve"}}, "uiFontSize": 14}"#);
+        let mut s = loaded.settings.unwrap();
+        s.ui_font_size = 15.0;
+        save(&path, &s, &loaded.raw).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("mauve"), "a hand-written bad entry survives an unrelated save: {text}");
+        assert!(!text.contains("enabled"), "enabled is written only when changed");
+        s.project_colors.folders.insert("/y".into(), ProjectColor::Teal);
+        save(&path, &s, &loaded.raw).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"/y\": \"teal\""), "{text}");
     }
 
     #[test]

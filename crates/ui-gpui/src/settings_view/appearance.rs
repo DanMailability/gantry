@@ -2,7 +2,7 @@
 
 use app_core::session_tree::Tone;
 use app_core::settings::{Settings, StatusFills, ThemeChoice, parse_hex};
-use app_core::theme_colors::{Preset, Tokens, contrast, derive, readable_fill, terminal_palette, tokens as preset_tokens, tone_colors};
+use app_core::theme_colors::{Preset, ProjectColor, Tokens, contrast, derive, readable_fill, terminal_palette, tokens as preset_tokens, tone_colors};
 use gpui::{App, Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, div, px, rgb, rgba, deferred};
 
 use super::*;
@@ -116,6 +116,14 @@ const THEME_CARDS: [(ThemeChoice, &str, &str); 3] = [
     (ThemeChoice::System, "Follow system", "Dark or light from the desktop"),
 ];
 
+const PROJECT_COLOURS_HINT: &str =
+    "Each project gets a colour in the sidebar, on its tabs and in recent sessions. Change one from the project's right-click menu.";
+
+/// "Picked colours: 3 folders" ("1 folder" in the singular).
+fn picked_text(count: usize) -> String {
+    format!("Picked colours: {count} {}", if count == 1 { "folder" } else { "folders" })
+}
+
 /// The contrast line for a picked `fill`, and whether the fill may be used.
 fn contrast_label(fill: u32, tokens: &Tokens) -> (String, bool) {
     if !readable_fill(fill, tokens) {
@@ -208,6 +216,7 @@ impl SettingsView {
             .child(self.theme_cards(theme, settings, window, cx))
             .child(self.status_colours(theme, settings, window, cx))
             .child(self.fonts(theme, settings, window, cx))
+            .child(self.project_colours(theme, settings, window, cx))
     }
 
     fn theme_cards(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -369,6 +378,75 @@ impl SettingsView {
                     .child(div().text_color(rgb(theme.tokens.muted)).child("Pick a fill; text and dot colours follow it.")),
             )
             .children(rows)
+    }
+
+    fn project_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+        let enabled = settings.project_colors.enabled;
+        let switch = self.switch("project-colours", 0, enabled, window, cx, change(move |settings| settings.project_colors.enabled = !enabled));
+        let palette = |name: &'static str, preset: Preset| {
+            let ground = preset_tokens(preset);
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_x(theme.ui(12.))
+                .gap_y(theme.ui(6.))
+                .child(div().flex_none().w(theme.ui(80.)).child(name))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(theme.ui(8.))
+                        .p(theme.ui(8.))
+                        .rounded(px(RADIUS_SMALL))
+                        .bg(rgb(ground.ground))
+                        .border_1()
+                        .border_color(rgb(theme.tokens.line))
+                        .children(ProjectColor::ALL.map(|color| div().flex_none().size(theme.ui(26.)).rounded(px(RADIUS_SMALL - 2.)).bg(rgb(color.value(preset))))),
+                )
+        };
+        let picked = settings.project_colors.folders.len();
+        let forget = (picked > 0).then(|| {
+            let forget = self
+                .pressable("forget-colours", 0, None, window, cx, change(|settings| settings.project_colors.folders.clear()))
+                .px(theme.ui(10.))
+                .h(theme.ui(30.))
+                .flex()
+                .items_center()
+                .rounded(px(RADIUS_SMALL))
+                .text_color(rgb(theme.tokens.accent))
+                .child("Forget all");
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_x(theme.ui(12.))
+                .child(div().text_color(rgb(theme.tokens.muted)).child(picked_text(picked)))
+                .child(forget)
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.ui(12.))
+            .child(heading(theme, "Project colours"))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(theme.ui(16.))
+                    .py(theme.ui(4.))
+                    .child(switch)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Colour projects"))
+                            .child(muted(theme, PROJECT_COLOURS_HINT)),
+                    ),
+            )
+            .child(palette("Mist", Preset::Mist))
+            .child(palette("Mist light", Preset::MistLight))
+            .children(forget)
     }
 
     fn fill_picker(&mut self, status: Status, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -537,6 +615,13 @@ impl SettingsView {
 mod tests {
     use super::*;
     use app_core::theme_colors::tokens;
+
+    #[test]
+    fn picked_colours_text_is_singular_for_one_folder() {
+        assert_eq!(picked_text(1), "Picked colours: 1 folder");
+        assert_eq!(picked_text(3), "Picked colours: 3 folders");
+        assert!(PROJECT_COLOURS_HINT.starts_with("Each project gets a colour in the sidebar, on its tabs and in recent sessions."));
+    }
 
     #[test]
     fn contrast_line_has_one_decimal_below_ten() {

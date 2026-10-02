@@ -16,7 +16,7 @@ use protocol::message::SessionInfo;
 
 use crate::field;
 use crate::settings_store::SettingsStore;
-use crate::theme::{RADIUS, RADIUS_LARGE, container_chip, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, container_chip, side_line, theme};
 
 const ROW_HEIGHT: f32 = 36.0;
 
@@ -251,7 +251,8 @@ impl RecentsView {
         };
         let row = match &self.list {
             List::Sessions(items) => match &items[index] {
-                RecentItem::Heading { label, display, .. } => {
+                RecentItem::Heading { path, label, display } => {
+                    let color = theme.project(path);
                     return row.child(
                         div()
                             .size_full()
@@ -260,12 +261,20 @@ impl RecentsView {
                             .items_end()
                             .gap_2()
                             .pb(theme.ui(4.))
-                            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).child(label.clone()))
+                            .children(color.map(|color| div().flex_none().mb(theme.ui(5.)).size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .when_some(color, |label, color| label.text_color(rgb(color)))
+                                    .child(label.clone()),
+                            )
                             .child(div().min_w_0().truncate().text_xs().text_color(rgb(theme.tokens.muted)).child(display.clone())),
                     );
                 }
-                RecentItem::Session { session, age } => row.child(
+                RecentItem::Session { session, age, project } => row.child(
                     pill()
+                        .when_some(theme.project(project), |pill, color| pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme)))
                         .child(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(theme.tokens.muted)))
                         .child(div().flex_1().min_w_0().truncate().child(session_title(session).to_string()))
                         .when(session.container.is_some(), |pill| pill.child(container_chip(theme.tokens.text)))
@@ -294,6 +303,13 @@ impl RecentsView {
         let on = self.is_current(&chip.target);
         let theme = theme(cx).clone();
         let target = chip.target.clone();
+        // A project's chip is drawn in its colour (the other chips in the accent); without colours, as before.
+        let color = match &chip.target {
+            ChipTarget::Project(path) => theme.project(path),
+            _ => None,
+        }
+        .unwrap_or(theme.tokens.accent);
+        let coloured = matches!(&chip.target, ChipTarget::Project(path) if theme.project(path).is_some());
         div()
             .id(("chip", index))
             .h(theme.ui(28.))
@@ -303,9 +319,11 @@ impl RecentsView {
             .gap(px(6.))
             .rounded_full()
             .border_1()
-            .border_color(rgb(if on { theme.tokens.accent } else { theme.tokens.line }))
-            .when(on, |chip| chip.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)).font_weight(FontWeight::SEMIBOLD))
-            .when(!on, |chip| chip.text_color(rgb(theme.tokens.text)).hover(|style| style.bg(rgb(theme.tokens.raised))))
+            .border_color(if on { rgb(color) } else if coloured { gpui::rgba((color << 8) | 0x80) } else { rgb(theme.tokens.line) })
+            .when(on, |chip| chip.bg(rgb(color)).text_color(rgb(if coloured { theme.tokens.ground } else { theme.tokens.on_accent })).font_weight(FontWeight::SEMIBOLD))
+            .when(!on, |chip| {
+                chip.text_color(rgb(if coloured { color } else { theme.tokens.text })).hover(|style| style.bg(rgb(theme.tokens.raised)))
+            })
             .cursor_pointer()
             .child(chip.label.clone())
             .when(chip.target != ChipTarget::More, |el| el.child(div().text_xs().opacity(0.8).child(chip.count.to_string())))

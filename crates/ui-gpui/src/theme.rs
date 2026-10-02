@@ -4,9 +4,11 @@
 use std::borrow::Cow;
 
 use app_core::session_tree::Tone;
-use app_core::settings::StatusFills;
+use std::path::Path;
+
+use app_core::settings::{ProjectColors, StatusFills};
 use app_core::theme_colors::{Preset, ToneColors, Tokens, tone_colors};
-use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, SharedString, Styled, div, px, rgba};
+use gpui::{App, Div, FontWeight, Global, ParentElement, Pixels, SharedString, Styled, div, px, rgb, rgba};
 
 /// The colours and sizes views draw with, a GPUI global replaced whenever the settings change.
 #[derive(Clone)]
@@ -19,6 +21,8 @@ pub(crate) struct Theme {
     pub fills: StatusFills,
     /// `uiFontSize / 14`.
     pub ui_scale: f32,
+    /// The `projectColors` setting.
+    pub project_colors: ProjectColors,
 }
 
 impl Global for Theme {}
@@ -29,10 +33,21 @@ impl Theme {
         tone_colors(self.preset, &self.fills, tone)
     }
 
+    /// The colour of the project at `root` on this theme, if project colours are on.
+    pub fn project(&self, root: &Path) -> Option<u32> {
+        self.project_colors.color_of(root).map(|color| color.value(self.preset))
+    }
+
     /// `size` scaled with the interface font size.
     pub fn ui(&self, size: f32) -> Pixels {
         px(size * self.ui_scale)
     }
+}
+
+/// A project's side line: 4 px wide, rounded, inset 4 px from the left edge and 6 px from the top and bottom of
+/// the (relatively positioned) row, tab or header it is a child of.
+pub(crate) fn side_line(color: u32, theme: &Theme) -> Div {
+    div().absolute().left(theme.ui(4.)).top(theme.ui(6.)).bottom(theme.ui(6.)).w(theme.ui(4.)).rounded(px(2.)).bg(rgb(color))
 }
 
 /// The theme global.
@@ -103,7 +118,7 @@ mod tests {
     const TONES: [Tone; 6] = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
 
     fn theme(preset: Preset) -> Theme {
-        Theme { preset, tokens: tokens(preset), fills: StatusFills::default(), ui_scale: 1.0 }
+        Theme { preset, tokens: tokens(preset), fills: StatusFills::default(), ui_scale: 1.0, project_colors: ProjectColors::default() }
     }
 
     #[test]
@@ -136,6 +151,18 @@ mod tests {
         for preset in PRESETS {
             assert_eq!(app_core::snapshot::Rgb::hex(tokens(preset).terminal), terminal_palette(preset).background, "{preset:?}");
         }
+    }
+
+    #[test]
+    fn project_colours_follow_the_preset_and_the_switch() {
+        let root = Path::new("/r/app");
+        let mut dark = theme(Preset::Mist);
+        let light = Theme { preset: Preset::MistLight, ..dark.clone() };
+        let color = app_core::theme_colors::ProjectColor::auto(root);
+        assert_eq!(dark.project(root), Some(color.value(Preset::Mist)));
+        assert_eq!(light.project(root), Some(color.value(Preset::MistLight)));
+        dark.project_colors.enabled = false;
+        assert_eq!(dark.project(root), None);
     }
 
     #[test]

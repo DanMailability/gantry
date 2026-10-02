@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
-    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
+    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone, ToneCounts,
     session_title,
 };
 use app_core::sessions::SessionStore;
@@ -24,7 +24,7 @@ use protocol::message::SessionInfo;
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::settings_store::{SettingsStore, dir_name, shortcut_label};
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, theme};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_chip, dir_chip, side_line, theme};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -68,6 +68,7 @@ pub struct SidebarView {
     panes: Vec<PaneEntry>,
     tabs: Vec<TabEntry>,
     arrivals: Arrivals,
+    order: ProjectOrder,
     filter: TextField,
     toggled: HashSet<PathBuf>,
     details: Option<String>,
@@ -116,6 +117,7 @@ impl SidebarView {
             panes: Vec::new(),
             tabs: Vec::new(),
             arrivals: Arrivals::default(),
+            order: ProjectOrder::default(),
             filter: TextField::default(),
             toggled: HashSet::new(),
             details: None,
@@ -131,6 +133,11 @@ impl SidebarView {
         };
         sidebar.rebuild(cx);
         sidebar
+    }
+
+    /// The project a directory belongs to (its git repository, else the directory).
+    pub(crate) fn project_of(&self, cwd: &Path) -> PathBuf {
+        self.roots.of(cwd)
     }
 
     /// The daemon's sessions as last received.
@@ -194,9 +201,9 @@ impl SidebarView {
             };
             // Until the session list arrives, number nothing: panes and sessions must get their arrival
             // numbers together, so that at startup leaves land above outside sessions.
-            let mut unloaded = Arrivals::default();
-            let arrivals = if self.sessions.loaded() { &mut self.arrivals } else { &mut unloaded };
-            session_tree::active(&input, arrivals)
+            let mut unloaded = (Arrivals::default(), ProjectOrder::default());
+            let (arrivals, order) = if self.sessions.loaded() { (&mut self.arrivals, &mut self.order) } else { (&mut unloaded.0, &mut unloaded.1) };
+            session_tree::active(&input, arrivals, order)
         };
         self.rows = rows;
         // A selection whose row is gone falls back to the focused pane's row.
@@ -315,7 +322,66 @@ impl SidebarView {
         cx.notify();
     }
 
-    fn render_row(&self, index: usize, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
+    /// A dragged project heading was dropped: place it before `before` (`None` = at the end).
+    fn drop_project(&mut self, root: &Path, before: Option<&Path>, cx: &mut Context<Self>) {
+        if before != Some(root) {
+            self.order.move_project(root, before);
+            self.rebuild(cx);
+        }
+    }
+
+    /// One list row: the project's grey group border (drawn in segments, one per row) around the row itself, and
+    /// where a dragged project heading may land.
+    fn render_row(&self, index: usize, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = theme(cx).clone();
+        let edges = session_tree::group_edges(&self.rows, index);
+        // A dragged project goes before this row's project (at its heading), or after it (at its last row).
+        let target: Option<Option<PathBuf>> = match &self.rows[index].kind {
+            RowKind::Project { path, .. } => Some(Some(path.clone())),
+            _ if edges.last => Some(self.rows.get(index + 1).and_then(|next| match &next.kind {
+                RowKind::Project { path, .. } => Some(path.clone()),
+                _ => None,
+            })),
+            _ => None,
+        };
+        let content = self.render_row_content(index, cx);
+        let group_name = format!("row-{index}");
+        let marker = div().absolute().left(theme.ui(14.)).right(theme.ui(14.)).h(px(3.)).rounded(px(2.));
+        let marker = if edges.first { marker.top(px(0.)) } else { marker.bottom(px(0.)) };
+        let group = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_r_1()
+            .border_color(rgb(theme.tokens.line))
+            .when(edges.first, |group| group.border_t_1().rounded_t(px(RADIUS)))
+            .when(edges.last, |group| group.border_b_1().rounded_b(px(RADIUS)))
+            .child(content);
+        div()
+            .group(group_name.clone())
+            .relative()
+            .h(theme.ui(ROW_HEIGHT))
+            .w_full()
+            .px(theme.ui(6.))
+            .flex()
+            .flex_col()
+            // The whole gap between groups is in the heading row, which has no fill.
+            .when(edges.first, |row| row.pt(theme.ui(8.)))
+            .child(group)
+            .when(target.is_some(), |row| {
+                row.child(marker.group_drag_over::<DraggedProject>(group_name, |style| style.bg(rgb(theme.tokens.accent))))
+            })
+            // Every row takes the drop, so that one that is no landing place does not pass it on to the list.
+            .on_drop(cx.listener(move |this, dragged: &DraggedProject, _, cx| {
+                if let Some(before) = &target {
+                    this.drop_project(&dragged.root, before.as_deref(), cx);
+                }
+            }))
+    }
+
+    fn render_row_content(&self, index: usize, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
         let row = &self.rows[index];
         let key = row.key();
         let selected = self.selected.as_ref() == Some(&key);
@@ -323,7 +389,8 @@ impl SidebarView {
         let theme = theme(cx).clone();
         let base = div()
             .id(index)
-            .h(theme.ui(ROW_HEIGHT))
+            .flex_1()
+            .min_h_0()
             .w_full()
             .px(theme.ui(10.))
             .py(px(2.))
@@ -371,6 +438,12 @@ impl SidebarView {
                     None => pill.hover(|style| style.bg(rgb(theme.tokens.raised))),
                 })
         };
+        // The row's project colour, as a side line inside the pill's left edge.
+        let line = row.project.as_ref().and_then(|root| theme.project(root));
+        let lined = |pill: gpui::Div| match line {
+            Some(color) => pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme)),
+            None => pill,
+        };
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
         let aside = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
         let guide = row.in_tab.then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
@@ -378,11 +451,18 @@ impl SidebarView {
         // A row listed under another project's tab heading names its own project.
         let project = || row.project_label.clone().map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label));
         match &row.kind {
-            RowKind::Project { label, expanded, counts, .. } => {
-                base.child(
+            RowKind::Project { path, label, expanded, counts } => {
+                let color = theme.project(path);
+                let dragged = DraggedProject { root: path.clone(), label: label.clone() };
+                base.on_drag(dragged, |dragged: &DraggedProject, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone())).child(
                     pill(None)
                         .child(div().flex_none().text_color(rgb(theme.tokens.muted)).child(if *expanded { "▾" } else { "▸" }))
-                        .child(title(label.clone()).font_weight(FontWeight::SEMIBOLD))
+                        .children(color.map(|color| div().flex_none().size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))))
+                        .child(
+                            title(label.clone())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .when_some(color, |title, color| title.text_color(rgb(color))),
+                        )
                         .children(count_chips(counts, &theme)),
                 )
             }
@@ -395,7 +475,7 @@ impl SidebarView {
                     _ => div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)),
                 };
                 base.child(
-                    pill(colors.fill)
+                    lined(pill(colors.fill))
                         .text_color(rgb(colors.ink))
                         .child(lead)
                         .child(title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
@@ -409,7 +489,7 @@ impl SidebarView {
                 )
             }
             RowKind::Pane { entry, tone, note } if !entry.claude => base.child(
-                pill(None)
+                lined(pill(None))
                     .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
                     .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
                     .child(title(entry.title.clone()))
@@ -423,7 +503,7 @@ impl SidebarView {
                     _ => div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)),
                 };
                 base.child(
-                    pill(colors.fill)
+                    lined(pill(colors.fill))
                         .text_color(rgb(colors.ink))
                         .child(lead)
                         .child(title("New session".into()))
@@ -432,7 +512,7 @@ impl SidebarView {
                 )
             }
             RowKind::Tab { index, title: tab_title, panes, .. } => base.child(
-                pill(None)
+                lined(pill(None))
                     .h(theme.ui(28.))
                     .child(
                         div()
@@ -456,6 +536,32 @@ impl SidebarView {
             }
             RowKind::TakeOver { .. } => base.child(pill(None).pl(theme.ui(32.)).text_color(rgb(theme.tokens.accent)).child("Take over…")),
         }
+    }
+}
+
+/// A project heading being dragged to a new place in the list.
+#[derive(Clone)]
+struct DraggedProject {
+    root: PathBuf,
+    label: String,
+}
+
+impl Render for DraggedProject {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme(cx);
+        let color = theme.project(&self.root).unwrap_or(theme.tokens.accent);
+        div()
+            .px(theme.ui(12.))
+            .py(theme.ui(6.))
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(rgb(color))
+            .bg(rgb(theme.tokens.raised))
+            .text_color(rgb(color))
+            .text_sm()
+            .font_family(UI_FONT)
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(self.label.clone())
     }
 }
 
@@ -528,13 +634,22 @@ impl Render for SidebarView {
                     .child(field::render(&self.filter, "Filter active sessions", focused, &theme)),
             )
             .child(
-                uniform_list(
-                    "session-rows",
-                    self.rows.len(),
-                    cx.processor(|this, range: Range<usize>, _window, cx| range.map(|index| this.render_row(index, cx)).collect::<Vec<_>>()),
-                )
-                .track_scroll(&self.scroll)
-                .flex_1(),
+                // Dropping a project heading on the empty space below the rows puts it last.
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .on_drop(cx.listener(|this, dragged: &DraggedProject, _, cx| this.drop_project(&dragged.root, None, cx)))
+                    .child(
+                        uniform_list(
+                            "session-rows",
+                            self.rows.len(),
+                            cx.processor(|this, range: Range<usize>, _window, cx| range.map(|index| this.render_row(index, cx)).collect::<Vec<_>>()),
+                        )
+                        .track_scroll(&self.scroll)
+                        .flex_1(),
+                    ),
             )
             .child(
                 div()

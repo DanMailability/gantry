@@ -51,6 +51,8 @@ pub enum RecentItem {
         session: SessionInfo,
         /// Time since last activity.
         age: String,
+        /// The project it is listed under.
+        project: PathBuf,
     },
     /// "Show N more" under a project.
     More {
@@ -144,7 +146,7 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
         let display = display_path(&path, input.home);
         items.push(RecentItem::Heading { label: labels[&path].clone(), display, path: path.clone() });
         for session in matching.iter().take(cap) {
-            items.push(RecentItem::Session { session: (*session).clone(), age: age(input.now_ms, session.last_active_ms) });
+            items.push(RecentItem::Session { session: (*session).clone(), age: age(input.now_ms, session.last_active_ms), project: path.clone() });
         }
         if matching.len() > cap {
             items.push(RecentItem::More { project: path, hidden: matching.len() - cap });
@@ -301,6 +303,21 @@ mod tests {
         fixture.open.insert("tab".into());
         assert_eq!(fixture.outline(), vec!["# b", "b", "# a", "a-new", "a-old"]);
         assert_eq!(fixture.with(counts), (3, 3));
+    }
+
+    #[test]
+    fn a_session_item_names_its_project() {
+        let fixture = Fixture::of(vec![closed("a", "/r/a", 1), closed("b", "/r/b", 2)]);
+        let items = fixture.with(items);
+        let mut heading = None;
+        for item in &items {
+            match item {
+                RecentItem::Heading { path, .. } => heading = Some(path.clone()),
+                RecentItem::Session { project, .. } => assert_eq!(Some(project), heading.as_ref()),
+                RecentItem::More { .. } => {}
+            }
+        }
+        assert!(items.iter().any(|item| matches!(item, RecentItem::Session { project, .. } if project == Path::new("/r/a"))));
     }
 
     #[test]

@@ -110,6 +110,48 @@ impl Arrivals {
     }
 }
 
+/// The sidebar's project order for this run: activity order at first, then stable; new projects go on top; the
+/// user can drag one. Never saved.
+#[derive(Debug, Default)]
+pub struct ProjectOrder {
+    order: Vec<PathBuf>,
+    started: bool,
+}
+
+impl ProjectOrder {
+    /// Fold in the projects listed now, latest activity first. The first call without a filter takes that order. Later calls put
+    /// unknown projects on top (in the given order) and forget projects no longer listed. While `filtering`, only
+    /// add, never forget.
+    pub fn update(&mut self, by_activity: &[PathBuf], filtering: bool) {
+        if !self.started {
+            if filtering {
+                return;
+            }
+            self.order = by_activity.to_vec();
+            self.started = true;
+            return;
+        }
+        if !filtering {
+            self.order.retain(|known| by_activity.contains(known));
+        }
+        let new: Vec<PathBuf> = by_activity.iter().filter(|path| !self.order.contains(path)).cloned().collect();
+        self.order.splice(0..0, new);
+    }
+
+    /// Move `root` before `before` (`None` = to the end).
+    pub fn move_project(&mut self, root: &Path, before: Option<&Path>) {
+        let Some(from) = self.order.iter().position(|path| path == root) else { return };
+        let moved = self.order.remove(from);
+        let to = before.and_then(|before| self.order.iter().position(|path| path == before)).unwrap_or(self.order.len());
+        self.order.insert(to, moved);
+    }
+
+    /// Where `root` sits (unknown = after every known project).
+    pub fn position(&self, root: &Path) -> usize {
+        self.order.iter().position(|path| path == root).unwrap_or(usize::MAX)
+    }
+}
+
 /// One tab of the layout, for grouping split tabs in the Active list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabEntry {
@@ -185,6 +227,23 @@ pub struct Row {
     pub in_tab: bool,
     /// The row's own project, when it is listed under another project's tab heading.
     pub project_label: Option<String>,
+    /// The row's own project (a heading's path for project and tab headings); `None` for details and take-over.
+    pub project: Option<PathBuf>,
+}
+
+/// Whether a row opens or closes its project's group (for drawing the group border in segments).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupEdges {
+    /// The row is the project heading (the group's top).
+    pub first: bool,
+    /// The row is the group's last row.
+    pub last: bool,
+}
+
+/// The group edges of `rows[index]`.
+pub fn group_edges(rows: &[Row], index: usize) -> GroupEdges {
+    let heading = |row: &Row| matches!(row.kind, RowKind::Project { .. });
+    GroupEdges { first: heading(&rows[index]), last: rows.get(index + 1).is_none_or(heading) }
 }
 
 /// What a row shows.
@@ -299,7 +358,7 @@ pub enum Activation {
 impl Row {
     /// A row that is not under a tab heading.
     pub fn new(kind: RowKind) -> Row {
-        Row { kind, in_tab: false, project_label: None }
+        Row { kind, in_tab: false, project_label: None, project: None }
     }
 
     /// Identity of this row.
@@ -417,7 +476,7 @@ enum EntryKind<'a> {
 }
 
 /// The Active list.
-pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
+pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
     let by_id: HashMap<&str, &SessionInfo> = input.sessions.iter().map(|s| (s.id.as_str(), *s)).collect();
     let mut entries: Vec<Entry<'_>> = Vec::new();
     let mut in_leaves: HashSet<&str> = HashSet::new();
@@ -503,6 +562,8 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
         sessions.map(|entry| entry.activity).max().unwrap_or(u64::MAX)
     };
     projects.sort_by(|(a_path, a), (b_path, b)| latest(b).cmp(&latest(a)).then_with(|| a_path.cmp(b_path)));
+    order.update(&projects.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(), filtering);
+    projects.sort_by_key(|(path, _)| order.position(path));
     // Rows of a group that belong to another project are labelled with it, so name those projects too.
     let mut paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
     for (_, items) in &projects {
@@ -520,15 +581,22 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
         let mut rendered: Vec<Row> = Vec::new();
         for item in &items {
             match item {
-                Item::Single(entry) => rendered.push(entry_row(entry, input)),
+                Item::Single(entry) => {
+                    let mut row = entry_row(entry, input);
+                    row.project = Some((input.project_of)(entry.cwd));
+                    rendered.push(row);
+                }
                 Item::Group(group) => {
                     let tab = group.tab;
-                    rendered.push(Row::new(RowKind::Tab { index: tab.index, title: tab.title.clone(), panes: tab.leaves.len(), focused: tab.focused, first: tab.leaves[0] }));
+                    let mut heading = Row::new(RowKind::Tab { index: tab.index, title: tab.title.clone(), panes: tab.leaves.len(), focused: tab.focused, first: tab.leaves[0] });
+                    heading.project = Some(path.clone());
+                    rendered.push(heading);
                     for entry in &group.members {
                         let mut row = entry_row(entry, input);
                         row.in_tab = true;
                         let own = (input.project_of)(entry.cwd);
                         row.project_label = (own != path).then(|| labels[&own].clone());
+                        row.project = Some(own);
                         rendered.push(row);
                     }
                 }
@@ -543,7 +611,9 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals) -> Vec<Row> {
             }
         }
         let expanded = filtering || !input.toggled.contains(&path);
-        rows.push(Row::new(RowKind::Project { label: labels[&path].clone(), path, expanded, counts }));
+        let mut heading = Row::new(RowKind::Project { label: labels[&path].clone(), path: path.clone(), expanded, counts });
+        heading.project = Some(path);
+        rows.push(heading);
         if expanded {
             for row in rendered {
                 let details = match &row.kind {
@@ -752,6 +822,7 @@ mod tests {
         unseen: HashSet<String>,
         tabs: Vec<TabEntry>,
         arrivals: Arrivals,
+        order: ProjectOrder,
     }
 
     impl Fixture {
@@ -773,7 +844,7 @@ mod tests {
                 project_of: &project_of,
                 now_ms: NOW,
             };
-            active(&input, &mut self.arrivals)
+            active(&input, &mut self.arrivals, &mut self.order)
         }
 
         fn outline(&mut self) -> Vec<String> {
@@ -893,14 +964,14 @@ mod tests {
     }
 
     #[test]
-    fn projects_follow_their_latest_activity() {
+    fn projects_start_in_activity_order_then_stay() {
         let mut fixture = Fixture::of(
             vec![managed("old", "/r/a", NOW - 5 * HOUR_MS), managed("new", "/r/b", NOW - HOUR_MS)],
             vec![pane(1, "/r/a", Some("old")), pane(2, "/r/b", Some("new"))],
         );
         assert_eq!(fixture.outline(), vec!["▾ b", "  new (Idle · 1h)", "▾ a", "  old (Idle · 5h)"]);
         fixture.sessions[0].last_active_ms = NOW;
-        assert_eq!(fixture.outline()[0], "▾ a");
+        assert_eq!(fixture.outline()[0], "▾ b", "later activity does not move a project");
     }
 
     #[test]
@@ -1056,6 +1127,104 @@ mod tests {
 
     fn row_of<'a>(rows: &'a [Row], key: &RowKey) -> &'a Row {
         &rows[find(rows, key).unwrap()]
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn first_update_takes_activity_order_then_new_go_on_top() {
+        let mut order = ProjectOrder::default();
+        order.update(&paths(&["/b", "/a"]), false);
+        assert!(order.position(Path::new("/b")) < order.position(Path::new("/a")));
+        order.update(&paths(&["/a", "/c", "/b"]), false);
+        let mut sorted = paths(&["/a", "/b", "/c"]);
+        sorted.sort_by_key(|p| order.position(p));
+        assert_eq!(sorted, paths(&["/c", "/b", "/a"]), "known projects keep their place, the new one is on top");
+    }
+
+    #[test]
+    fn a_first_update_while_filtering_does_not_start_the_order() {
+        let mut order = ProjectOrder::default();
+        order.update(&paths(&["/b"]), true);
+        order.update(&paths(&["/a", "/b", "/c"]), false);
+        let mut sorted = paths(&["/c", "/b", "/a"]);
+        sorted.sort_by_key(|p| order.position(p));
+        assert_eq!(sorted, paths(&["/a", "/b", "/c"]));
+    }
+
+    #[test]
+    fn a_project_that_leaves_and_returns_goes_on_top() {
+        let mut order = ProjectOrder::default();
+        order.update(&paths(&["/a", "/b"]), false);
+        order.update(&paths(&["/b"]), false);
+        order.update(&paths(&["/b", "/a"]), false);
+        assert!(order.position(Path::new("/a")) < order.position(Path::new("/b")));
+    }
+
+    #[test]
+    fn filtering_does_not_forget_order() {
+        let mut order = ProjectOrder::default();
+        order.update(&paths(&["/a", "/b", "/c"]), false);
+        order.update(&paths(&["/c"]), true);
+        order.update(&paths(&["/a", "/b", "/c"]), false);
+        let mut sorted = paths(&["/c", "/b", "/a"]);
+        sorted.sort_by_key(|p| order.position(p));
+        assert_eq!(sorted, paths(&["/a", "/b", "/c"]));
+    }
+
+    #[test]
+    fn dragging_moves_a_project() {
+        let mut order = ProjectOrder::default();
+        order.update(&paths(&["/a", "/b", "/c"]), false);
+        order.move_project(Path::new("/c"), Some(Path::new("/a")));
+        order.move_project(Path::new("/a"), None);
+        let mut sorted = paths(&["/a", "/b", "/c"]);
+        sorted.sort_by_key(|p| order.position(p));
+        assert_eq!(sorted, paths(&["/c", "/b", "/a"]));
+    }
+
+    #[test]
+    fn active_keeps_project_places_while_activity_changes() {
+        let mut fixture = Fixture::of(vec![external("a", "/r/alpha", NOW - 5), external("b", "/r/beta", NOW - 10)], vec![]);
+        assert_eq!(fixture.outline()[0], "▾ alpha");
+        fixture.sessions[1].last_active_ms = NOW;
+        assert_eq!(fixture.outline()[0], "▾ alpha", "activity no longer moves projects");
+        fixture.sessions.push(external("c", "/r/gamma", NOW - 20));
+        assert_eq!(fixture.outline()[0], "▾ gamma", "a new project goes on top");
+    }
+
+    #[test]
+    fn filtering_does_not_reorder_rows() {
+        let mut fixture = Fixture::of(vec![external("a", "/r/alpha", NOW - 5), external("b", "/r/beta", NOW - 10)], vec![]);
+        fixture.sessions.push(external("c", "/r/gamma", NOW - 20));
+        let before = fixture.outline();
+        fixture.filter = "gamma".into();
+        fixture.rows();
+        fixture.filter.clear();
+        assert_eq!(fixture.outline(), before);
+    }
+
+    #[test]
+    fn rows_carry_their_own_project() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/beta")]);
+        fixture.tabs = vec![tab(0, 1, &[1, 2])];
+        let rows = fixture.rows();
+        assert_eq!(rows[0].project.as_deref(), Some(Path::new("/r/alpha")));
+        assert_eq!(rows[1].project.as_deref(), Some(Path::new("/r/alpha")), "the tab heading takes the group's project");
+        assert_eq!(rows[2].project.as_deref(), Some(Path::new("/r/alpha")));
+        assert_eq!(rows[3].project.as_deref(), Some(Path::new("/r/beta")));
+    }
+
+    #[test]
+    fn group_edges_mark_first_and_last_rows() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/p"), shell_pane(2, "/r/p"), shell_pane(3, "/r/q")]);
+        fixture.toggled.insert("/r/q".into());
+        let rows = fixture.rows();
+        let edges: Vec<(bool, bool)> = (0..rows.len()).map(|i| group_edges(&rows, i)).map(|e| (e.first, e.last)).collect();
+        assert_eq!(keys(&rows).len(), 4);
+        assert_eq!(edges, vec![(true, false), (false, false), (false, true), (true, true)]);
     }
 
     #[test]

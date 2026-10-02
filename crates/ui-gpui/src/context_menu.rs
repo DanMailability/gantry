@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use app_core::menus::{MenuAction, MenuEntry, MenuItem, Shortcut};
 use app_core::settings::Settings;
-use gpui::{App, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, deferred, div, prelude::*, px, relative, rgb};
+use gpui::{App, Bounds, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, canvas, deferred, div, prelude::*, px, relative, rgb, rgba};
 
 use crate::settings_store::shortcut_label;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
@@ -20,12 +20,15 @@ pub(crate) struct OpenMenu {
     pub focus: FocusHandle,
     /// The index of the submenu that is open, if any.
     pub sub: Rc<Cell<Option<usize>>>,
+    /// Where the open submenu was drawn: it hangs outside the menu's own bounds, so a press inside it must not
+    /// count as a click outside the menu.
+    sub_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 impl OpenMenu {
     /// A closed-submenu menu at `position`.
     pub fn new(items: Vec<MenuItem>, position: Point<Pixels>, focus: FocusHandle) -> OpenMenu {
-        OpenMenu { items, position, focus, sub: Rc::new(Cell::new(None)) }
+        OpenMenu { items, position, focus, sub: Rc::new(Cell::new(None)), sub_bounds: Rc::new(Cell::new(None)) }
     }
 }
 
@@ -69,6 +72,7 @@ pub(crate) fn render(
             .hover(|style| style.bg(rgb(theme.tokens.line)))
             .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
             .child(div().flex_1().whitespace_nowrap().child(entry.label.clone()))
+            .when(entry.checked, |item| item.child(div().flex_none().text_color(rgb(theme.tokens.accent)).child("✓")))
             .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings))))
             .when_some(closes_sub, |item, sub| {
                 item.on_hover(move |hovered, window, _| {
@@ -87,9 +91,43 @@ pub(crate) fn render(
         MenuItem::Submenu { label, items } => {
             let (hover, click) = (menu.sub.clone(), menu.sub.clone());
             let open = open_sub == Some(index);
+            let bounds = menu.sub_bounds.clone();
             let children = open.then(|| {
+                // Colour swatches are drawn together as a 4-column grid, the other entries below it.
+                let swatches: Vec<_> = items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, item)| match item {
+                        MenuItem::Entry(MenuEntry { swatch: Some(color), checked, action, .. }) => {
+                            let (action, on_pick) = (action.clone(), on_pick.clone());
+                            Some(
+                                div()
+                                    .id(("menu-swatch", index * 100 + position))
+                                    .flex_none()
+                                    .size(theme.ui(36.))
+                                    .rounded(px(RADIUS_SMALL))
+                                    .bg(rgb(color.value(theme.preset)))
+                                    .border_2()
+                                    .border_color(if *checked { rgb(theme.tokens.text) } else { rgba(0) })
+                                    .cursor_pointer()
+                                    .on_click(move |_, window, cx| on_pick(&action, window, cx)),
+                            )
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut swatches = swatches.into_iter();
+                let mut grid = div().flex().flex_col().gap(theme.ui(6.)).p(theme.ui(6.));
+                loop {
+                    let row: Vec<_> = swatches.by_ref().take(4).collect();
+                    if row.is_empty() {
+                        break;
+                    }
+                    grid = grid.child(div().flex().flex_row().gap(theme.ui(6.)).children(row));
+                }
+                let has_swatches = items.iter().any(|item| matches!(item, MenuItem::Entry(MenuEntry { swatch: Some(_), .. })));
                 let entries = items.iter().enumerate().filter_map(|(position, item)| match item {
-                    MenuItem::Entry(entry) => Some(entry_row(("menu-sub-item", index * 100 + position), entry, None)),
+                    MenuItem::Entry(entry) if entry.swatch.is_none() => Some(entry_row(("menu-sub-item", index * 100 + position), entry, None)),
                     _ => None,
                 });
                 div()
@@ -105,7 +143,9 @@ pub(crate) fn render(
                     .border_color(rgb(theme.tokens.line))
                     .rounded(px(RADIUS))
                     .shadow_lg()
+                    .when(has_swatches, |sub| sub.child(grid))
                     .children(entries)
+                    .child(canvas(move |area, _, _| bounds.set(Some(area)), |_, _, _, _| {}).absolute().size_full())
             });
             div()
                 .id(("menu-item", index))
@@ -136,6 +176,7 @@ pub(crate) fn render(
         }
     });
     let sub = menu.sub.clone();
+    let (sub_open, sub_bounds) = (menu.sub.clone(), menu.sub_bounds.clone());
     let first_submenu = menu.items.iter().position(|item| matches!(item, MenuItem::Submenu { .. }));
     deferred(
         anchored().position(menu.position).snap_to_window().child(
@@ -160,7 +201,12 @@ pub(crate) fn render(
                     // Keys must not reach what is beneath the menu (the sidebar filter).
                     cx.stop_propagation();
                 })
-                .on_mouse_down_out(move |_, window, cx| on_dismiss(window, cx))
+                .on_mouse_down_out(move |_, window, cx| {
+                    let in_sub = sub_open.get().is_some() && sub_bounds.get().is_some_and(|bounds| bounds.contains(&window.mouse_position()));
+                    if !in_sub {
+                        on_dismiss(window, cx);
+                    }
+                })
                 .min_w(theme.ui(220.))
                 .p_1()
                 .flex()

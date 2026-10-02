@@ -1,5 +1,7 @@
 //! Colour presets (Mist, Mist light) and status colours, including those derived from a user-chosen fill.
 
+use std::path::Path;
+
 use crate::palette::{self, Palette};
 use crate::session_tree::Tone;
 use crate::settings::{StatusFills, ThemeChoice};
@@ -94,6 +96,80 @@ pub fn resolve(choice: ThemeChoice, system_dark: bool) -> Preset {
         ThemeChoice::MistLight => Preset::MistLight,
         ThemeChoice::System if system_dark => Preset::Mist,
         ThemeChoice::System => Preset::MistLight,
+    }
+}
+
+/// A project's colour: one of eight, each with a value per theme preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProjectColor {
+    /// Blue.
+    Blue,
+    /// Amber.
+    Amber,
+    /// Teal.
+    Teal,
+    /// Violet.
+    Violet,
+    /// Rose.
+    Rose,
+    /// Lime.
+    Lime,
+    /// Orange.
+    Orange,
+    /// Pink.
+    Pink,
+}
+
+impl ProjectColor {
+    /// Every colour, in palette order.
+    pub const ALL: [ProjectColor; 8] =
+        [Self::Blue, Self::Amber, Self::Teal, Self::Violet, Self::Rose, Self::Lime, Self::Orange, Self::Pink];
+
+    /// Its name in settings.json.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Amber => "amber",
+            Self::Teal => "teal",
+            Self::Violet => "violet",
+            Self::Rose => "rose",
+            Self::Lime => "lime",
+            Self::Orange => "orange",
+            Self::Pink => "pink",
+        }
+    }
+
+    /// The colour called `name` (lower case).
+    pub fn from_name(name: &str) -> Option<ProjectColor> {
+        Self::ALL.into_iter().find(|color| color.name() == name)
+    }
+
+    /// Its value on `preset`'s surfaces.
+    pub fn value(self, preset: Preset) -> u32 {
+        let (mist, light) = match self {
+            Self::Blue => (0x5b9cf0, 0x2f6fc4),
+            Self::Amber => (0xe5b65c, 0xa8740f),
+            Self::Teal => (0x4fc4b4, 0x16857a),
+            Self::Violet => (0xb49cf5, 0x6f52c9),
+            Self::Rose => (0xec8a96, 0xc24156),
+            Self::Lime => (0xa9cc5c, 0x5f7f17),
+            Self::Orange => (0xef9a5a, 0xb85a1b),
+            Self::Pink => (0xe48ad0, 0xa8378f),
+        };
+        match preset {
+            Preset::Mist => mist,
+            Preset::MistLight => light,
+        }
+    }
+
+    /// The automatic colour of the project at `root`: FNV-1a 64 of the path's bytes, mod 8 (stable across runs).
+    pub fn auto(root: &Path) -> ProjectColor {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in root.as_os_str().as_encoded_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Self::ALL[(hash % 8) as usize]
     }
 }
 
@@ -207,6 +283,46 @@ mod tests {
 
     const PRESETS: [Preset; 2] = [Preset::Mist, Preset::MistLight];
     const TONES: [Tone; 6] = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
+
+    #[test]
+    fn palette_names_round_trip_and_values_are_verbatim() {
+        for color in ProjectColor::ALL {
+            assert_eq!(ProjectColor::from_name(color.name()), Some(color));
+        }
+        assert_eq!(ProjectColor::Blue.value(Preset::Mist), 0x5b9cf0);
+        assert_eq!(ProjectColor::Pink.value(Preset::MistLight), 0xa8378f);
+        assert_eq!(ProjectColor::from_name("Teal"), None, "names are lower case");
+    }
+
+    #[test]
+    fn light_palette_reads_on_the_light_ground() {
+        for color in ProjectColor::ALL {
+            let ground = tokens(Preset::MistLight).ground;
+            assert!(contrast(color.value(Preset::MistLight), ground) >= 3.0, "{color:?}");
+        }
+    }
+
+    #[test]
+    fn auto_is_stable_and_spread() {
+        let ops = Path::new("/home/u/work/ops-agent");
+        assert_eq!(ProjectColor::auto(ops), ProjectColor::Rose);
+        let distinct: std::collections::HashSet<ProjectColor> =
+            ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i", "/j"].iter().map(|p| ProjectColor::auto(Path::new(p))).collect();
+        assert!(distinct.len() >= 4, "ten paths should spread over several colours");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_uses_raw_path_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe"));
+        assert_eq!(ProjectColor::auto(odd), ProjectColor::auto(odd));
+        assert_ne!(
+            (0..=255u8).map(|b| ProjectColor::auto(Path::new(std::ffi::OsStr::from_bytes(&[b'/', b])))).collect::<std::collections::HashSet<_>>().len(),
+            1,
+            "distinct byte values (including non-UTF-8) hash differently"
+        );
+    }
 
     #[test]
     fn mist_defaults_match_todays_constants() {
