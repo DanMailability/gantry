@@ -24,7 +24,7 @@ pub(super) struct Replace {
 /// What a keystroke pressed while recording means.
 #[derive(Debug, PartialEq, Eq)]
 enum Recorded {
-    /// Not a candidate (no modifier): keep recording.
+    /// A bare modifier press: keep waiting for the full chord.
     Ignore,
     /// Esc.
     Cancel,
@@ -53,10 +53,15 @@ fn keystroke_text(keystroke: &Keystroke, modifier_set: bool) -> Option<String> {
 
 fn recorded(keystroke: &Keystroke, action: &str) -> Recorded {
     let modifiers = &keystroke.modifiers;
+    if matches!(keystroke.key.as_str(), "shift" | "control" | "alt" | "platform" | "function") {
+        return Recorded::Ignore;
+    }
     if !(modifiers.control || modifiers.alt || modifiers.shift || modifiers.platform) {
         return match keystroke.key.as_str() {
             "escape" => Recorded::Cancel,
             "backspace" => Recorded::Unset,
+            // A plain key is checked too, so the user is told why it cannot be used.
+            key if !key.is_empty() => Recorded::Choose(key.to_string()),
             _ => Recorded::Ignore,
         };
     }
@@ -143,7 +148,7 @@ impl SettingsView {
     pub(super) fn shortcuts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let platform = Platform::current();
         let two_columns_at = theme.ui(2. * COLUMN_WIDTH + COLUMN_GAP);
-        let two_columns = f32::from(self.grid_bounds.get().size.width) >= f32::from(two_columns_at);
+        let two_columns = has_room(self.grid_bounds.get().size.width, two_columns_at);
         let filter = self.shortcut_filter.text().trim().to_lowercase();
 
         let mut groups: Vec<Div> = Vec::new();
@@ -184,9 +189,9 @@ impl SettingsView {
         let grid_bounds = self.grid_bounds.clone();
         let measure = canvas(
             move |area, window, _| {
-                let was = f32::from(grid_bounds.get().size.width) >= f32::from(two_columns_at);
+                let was = has_room(grid_bounds.get().size.width, two_columns_at);
                 grid_bounds.set(area);
-                if was != (f32::from(area.size.width) >= f32::from(two_columns_at)) {
+                if was != has_room(area.size.width, two_columns_at) {
                     window.refresh();
                 }
             },
@@ -368,12 +373,14 @@ mod tests {
     }
 
     #[test]
-    fn plain_keys_are_ignored_except_escape_and_backspace() {
+    fn plain_keys_are_checked_except_escape_and_backspace() {
         let none = Modifiers::default();
         assert_eq!(recorded(&key("escape", none), "closePane"), Recorded::Cancel);
         assert_eq!(recorded(&key("backspace", none), "closePane"), Recorded::Unset);
-        assert_eq!(recorded(&key("a", none), "closePane"), Recorded::Ignore);
-        assert_eq!(recorded(&key("f5", none), "closePane"), Recorded::Ignore);
+        assert_eq!(recorded(&key("enter", none), "closePane"), Recorded::Choose("enter".into()));
+        assert_eq!(recorded(&key("a", none), "closePane"), Recorded::Choose("a".into()));
+        assert_eq!(recorded(&key("shift", Modifiers { shift: true, ..Default::default() }), "closePane"), Recorded::Ignore);
+        assert_eq!(recorded(&key("control", Modifiers { control: true, ..Default::default() }), "closePane"), Recorded::Ignore);
         assert_eq!(recorded(&key("d", ctrl_shift()), "closePane"), Recorded::Choose("ctrl-shift-d".into()));
         assert_eq!(recorded(&key("escape", ctrl_shift()), "closePane"), Recorded::Choose("ctrl-shift-escape".into()));
     }

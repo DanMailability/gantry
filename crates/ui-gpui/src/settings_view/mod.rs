@@ -100,6 +100,12 @@ const BADGE_COLUMN: f32 = 64.;
 const NOTIFICATION_COLUMN: f32 = 84.;
 const SOUND_COLUMN: f32 = 64.;
 
+/// Whether a grid measured `width` wide has room for `needed`; an unmeasured grid (width 0, before its first frame) counts as roomy, so the
+/// first frame matches the usual layout.
+fn has_room(width: Pixels, needed: Pixels) -> bool {
+    width <= px(0.) || width >= needed
+}
+
 /// `value` moved by `delta`, kept within `min..=max` and rounded to one decimal.
 fn step(value: f32, delta: f32, min: f32, max: f32) -> f32 {
     ((value + delta).clamp(min, max) * 10.0).round() / 10.0
@@ -483,7 +489,8 @@ impl SettingsView {
             let path = cx.global::<SettingsStore>().path().to_path_buf();
             open_settings_file(&path, cx);
         });
-        self.button("open-settings-json", index, "Open settings.json", window, cx, open).flex_none()
+        let ink = theme(cx).tokens.text;
+        self.button("open-settings-json", index, "Open settings.json", window, cx, open).flex_none().text_color(rgb(ink))
     }
 }
 
@@ -578,16 +585,18 @@ impl Render for SettingsView {
             div()
                 .flex_none()
                 .flex()
+                .flex_wrap()
                 .items_center()
-                .gap(theme.ui(16.))
+                .gap(theme.ui(12.))
                 .p(theme.ui(12.))
                 .rounded(px(RADIUS))
                 .bg(rgb(colors.fill.unwrap_or(theme.tokens.raised)))
                 .text_color(rgb(colors.ink))
                 .child(
+                    // The button wraps under the text when the text column would get narrower than this.
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(theme.ui(240.))
                         .text_sm()
                         .flex()
                         .flex_col()
@@ -653,6 +662,13 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unmeasured_grid_counts_as_roomy() {
+        assert!(has_room(px(0.), px(700.)));
+        assert!(has_room(px(700.), px(700.)));
+        assert!(!has_room(px(699.), px(700.)));
+    }
 
     #[test]
     fn steps_stay_in_range_and_free_of_float_noise() {

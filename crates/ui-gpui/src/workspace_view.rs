@@ -1350,7 +1350,7 @@ impl WorkspaceView {
                     .cursor_pointer()
                     .when_some(colors, |tab, colors| tab.child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(colors.dot))))
                     .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
-                    .child(div().min_w_0().truncate().child(title))
+                    .child(div().min_w(theme.ui(24.)).truncate().child(title))
                     .when(container, |tab| tab.child(container_chip(ink)))
                     .children(dir.map(|name| dir_chip(ink, name)))
                     .when(unseen, |tab| tab.child(div().flex_none().size(theme.ui(6.)).rounded_full().bg(rgb(ink))))

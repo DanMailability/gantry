@@ -79,7 +79,7 @@ fn volume_at(x: f32, left: f32, width: f32) -> f32 {
 impl SettingsView {
     pub(super) fn alerts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let alerts = settings.alerts;
-        let wide = f32::from(self.grid_bounds.get().size.width) >= f32::from(theme.ui(GRID_WIDE));
+        let wide = has_room(self.grid_bounds.get().size.width, theme.ui(GRID_WIDE));
         let trailing_space = || wide.then(|| div().flex_none().w(theme.ui(TRAILING_WIDTH)));
         let head = grid_line(
             theme,
@@ -152,9 +152,9 @@ impl SettingsView {
         let wide_at = theme.ui(GRID_WIDE);
         let measure = canvas(
             move |area, window, _| {
-                let was_wide = f32::from(grid_bounds.get().size.width) >= f32::from(wide_at);
+                let was_wide = has_room(grid_bounds.get().size.width, wide_at);
                 grid_bounds.set(area);
-                if was_wide != (f32::from(area.size.width) >= f32::from(wide_at)) {
+                if was_wide != has_room(area.size.width, wide_at) {
                     window.refresh();
                 }
             },

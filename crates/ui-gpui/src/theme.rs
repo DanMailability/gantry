@@ -68,8 +68,12 @@ pub(crate) fn dir_chip(ink: u32, name: String) -> Div {
 }
 
 fn tag_chip(ink: u32, text: impl Into<SharedString>) -> Div {
+    // Shrinks with an ellipsis (to nothing but its border) when the row is too narrow for it.
     div()
-        .flex_none()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
         .px(px(5.))
         .rounded(px(RADIUS_SMALL - 3.))
         .border_1()
