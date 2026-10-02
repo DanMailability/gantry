@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use app_core::menus::{MenuAction, MenuEntry, MenuItem, Shortcut};
 use app_core::settings::Settings;
-use gpui::{App, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, deferred, div, prelude::*, px, relative, rgb};
+use gpui::{App, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, deferred, div, prelude::*, px, relative, rgb, rgba};
 
 use crate::settings_store::shortcut_label;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
@@ -69,6 +69,7 @@ pub(crate) fn render(
             .hover(|style| style.bg(rgb(theme.tokens.line)))
             .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
             .child(div().flex_1().whitespace_nowrap().child(entry.label.clone()))
+            .when(entry.checked, |item| item.child(div().flex_none().text_color(rgb(theme.tokens.accent)).child("✓")))
             .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings))))
             .when_some(closes_sub, |item, sub| {
                 item.on_hover(move |hovered, window, _| {
@@ -88,8 +89,29 @@ pub(crate) fn render(
             let (hover, click) = (menu.sub.clone(), menu.sub.clone());
             let open = open_sub == Some(index);
             let children = open.then(|| {
+                // Colour swatches are drawn together as a 4-column grid, the other entries below it.
+                let swatches = items.iter().enumerate().filter_map(|(position, item)| match item {
+                    MenuItem::Entry(MenuEntry { swatch: Some(color), checked, action, .. }) => {
+                        let (action, on_pick) = (action.clone(), on_pick.clone());
+                        Some(
+                            div()
+                                .id(("menu-swatch", index * 100 + position))
+                                .flex_none()
+                                .size(theme.ui(36.))
+                                .rounded(px(RADIUS_SMALL))
+                                .bg(rgb(color.value(theme.preset)))
+                                .border_2()
+                                .border_color(if *checked { rgb(theme.tokens.text) } else { rgba(0) })
+                                .cursor_pointer()
+                                .on_click(move |_, window, cx| on_pick(&action, window, cx)),
+                        )
+                    }
+                    _ => None,
+                });
+                let grid = div().flex().flex_row().flex_wrap().gap(theme.ui(6.)).p(theme.ui(6.)).w(theme.ui(4. * 36. + 3. * 6. + 12.)).children(swatches);
+                let has_swatches = items.iter().any(|item| matches!(item, MenuItem::Entry(MenuEntry { swatch: Some(_), .. })));
                 let entries = items.iter().enumerate().filter_map(|(position, item)| match item {
-                    MenuItem::Entry(entry) => Some(entry_row(("menu-sub-item", index * 100 + position), entry, None)),
+                    MenuItem::Entry(entry) if entry.swatch.is_none() => Some(entry_row(("menu-sub-item", index * 100 + position), entry, None)),
                     _ => None,
                 });
                 div()
@@ -105,6 +127,7 @@ pub(crate) fn render(
                     .border_color(rgb(theme.tokens.line))
                     .rounded(px(RADIUS))
                     .shadow_lg()
+                    .when(has_swatches, |sub| sub.child(grid))
                     .children(entries)
             });
             div()
