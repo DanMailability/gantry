@@ -4,8 +4,10 @@ use std::collections::HashMap;
 
 use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
 
-/// A turn counts as finished only after this much busy time; quicker turns and Busy↔Idle flapping are ignored.
-pub const FINISHED_MIN_BUSY_MS: u64 = 3_000;
+use crate::settings::{AlertSettings, AlertTone};
+
+/// A turn counts as finished only after this much busy time unless the settings say otherwise.
+const DEFAULT_FINISHED_AFTER_MS: u64 = 3_000;
 
 /// Why a session wants attention.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,9 +33,15 @@ pub struct Alert {
 }
 
 /// The last status seen per session, to tell transitions from rewrites.
-#[derive(Default)]
 pub struct AttentionTracker {
     seen: HashMap<String, Seen>,
+    finished_after_ms: u64,
+}
+
+impl Default for AttentionTracker {
+    fn default() -> Self {
+        Self { seen: HashMap::new(), finished_after_ms: DEFAULT_FINISHED_AFTER_MS }
+    }
 }
 
 struct Seen {
@@ -43,6 +51,12 @@ struct Seen {
 }
 
 impl AttentionTracker {
+    /// Turns shorter than this are not "finished" (from `alerts.finishedAfterSeconds`); quicker turns and
+    /// Busy↔Idle flapping are ignored.
+    pub fn set_finished_after_ms(&mut self, ms: u64) {
+        self.finished_after_ms = ms;
+    }
+
     /// Start over from a full list. Nothing in it alerts: it is the baseline.
     pub fn reset(&mut self, sessions: &[SessionInfo]) {
         self.seen.clear();
@@ -58,7 +72,7 @@ impl AttentionTracker {
         }
         let mut alerts = Vec::new();
         for session in upserted {
-            if let Some(alert) = alert(self.seen.get(&session.id), session) {
+            if let Some(alert) = alert(self.seen.get(&session.id), session, self.finished_after_ms) {
                 alerts.push(alert);
             }
             self.observe(session);
@@ -76,14 +90,14 @@ impl AttentionTracker {
     }
 }
 
-fn alert(before: Option<&Seen>, now: &SessionInfo) -> Option<Alert> {
+fn alert(before: Option<&Seen>, now: &SessionInfo, finished_after_ms: u64) -> Option<Alert> {
     let SessionState::Managed { pane } = now.state else { return None };
     let kind = match (before.and_then(|seen| seen.status.as_ref()), &now.status) {
         (Some(SessionStatus::NeedsInput { .. }), Some(SessionStatus::NeedsInput { .. })) => return None,
         (_, Some(SessionStatus::NeedsInput { reason })) => AlertKind::NeedsInput { reason: reason.clone() },
         (Some(SessionStatus::Busy), Some(SessionStatus::Idle)) => {
             let started = before.and_then(|seen| seen.busy_since_ms)?;
-            if now.status_since_ms.saturating_sub(started) < FINISHED_MIN_BUSY_MS {
+            if now.status_since_ms.saturating_sub(started) < finished_after_ms {
                 return None;
             }
             AlertKind::Finished
@@ -91,6 +105,34 @@ fn alert(before: Option<&Seen>, now: &SessionInfo) -> Option<Alert> {
         _ => return None,
     };
     Some(Alert { session: now.id.clone(), pane, kind })
+}
+
+/// Which channels an alert uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Channels {
+    /// Show the unseen badge.
+    pub badge: bool,
+    /// Raise a native notification.
+    pub notification: bool,
+    /// Play this sound.
+    pub sound: Option<AlertTone>,
+}
+
+/// Decide the channels for `kind`. `visible`: the pane is in the visible tab of its window; `window_active`:
+/// that window is the active one.
+pub fn alert_channels(alerts: &AlertSettings, kind: &AlertKind, visible: bool, window_active: bool) -> Channels {
+    if !alerts.when_visible && visible && window_active {
+        return Channels::default();
+    }
+    let event = match kind {
+        AlertKind::NeedsInput { .. } => &alerts.needs_input,
+        AlertKind::Finished => &alerts.finished,
+    };
+    Channels {
+        badge: event.badge,
+        notification: event.notification && !(alerts.only_when_unfocused && window_active),
+        sound: (event.sound && alerts.play_sounds).then_some(event.tone),
+    }
 }
 
 fn rank(status: &SessionStatus) -> u8 {
@@ -124,6 +166,7 @@ pub fn describe(kind: &AlertKind, title: &str, dir: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::EventAlerts;
     use protocol::message::SessionState;
 
     fn at(id: &str, state: SessionState, status: Option<SessionStatus>, since: u64) -> SessionInfo {
@@ -237,5 +280,77 @@ mod tests {
         assert_eq!(describe(&needs, "Fix CI", "~/repo"), ("Needs input: Fix CI".into(), "dialog open · ~/repo".into()));
         assert_eq!(describe(&AlertKind::NeedsInput { reason: None }, "Fix CI", "~/repo").1, "~/repo");
         assert_eq!(describe(&AlertKind::Finished, "Fix CI", "~/repo"), ("Finished: Fix CI".into(), "~/repo".into()));
+    }
+
+    #[test]
+    fn threshold_comes_from_settings() {
+        let mut tracker = AttentionTracker::default();
+        tracker.set_finished_after_ms(10_000);
+        tracker.reset(&[mine(Some(SessionStatus::Idle), 0)]);
+        tracker.update(&[mine(Some(SessionStatus::Busy), 10_000)], &[]);
+        assert!(tracker.update(&[mine(Some(SessionStatus::Idle), 15_000)], &[]).is_empty());
+        tracker.update(&[mine(Some(SessionStatus::Busy), 20_000)], &[]);
+        assert_eq!(kinds(tracker.update(&[mine(Some(SessionStatus::Idle), 31_000)], &[])), vec![AlertKind::Finished]);
+    }
+
+    fn all_on() -> EventAlerts {
+        EventAlerts { badge: true, notification: true, sound: true, tone: AlertTone::Bell }
+    }
+
+    fn settings() -> AlertSettings {
+        AlertSettings {
+            needs_input: all_on(),
+            finished: all_on(),
+            finished_after_seconds: 3,
+            when_visible: false,
+            only_when_unfocused: false,
+            play_sounds: true,
+            volume: 1.0,
+        }
+    }
+
+    fn finished() -> AlertKind {
+        AlertKind::Finished
+    }
+
+    #[test]
+    fn visible_pane_is_quiet_by_default() {
+        assert_eq!(alert_channels(&settings(), &finished(), true, true), Channels::default());
+        // Visible tab of a window that is not active still alerts.
+        assert!(alert_channels(&settings(), &finished(), true, false).badge);
+    }
+
+    #[test]
+    fn when_visible_alerts_a_visible_pane() {
+        let alerts = AlertSettings { when_visible: true, ..settings() };
+        assert_eq!(alert_channels(&alerts, &finished(), true, true), Channels { badge: true, notification: true, sound: Some(AlertTone::Bell) });
+    }
+
+    #[test]
+    fn only_when_unfocused_drops_notification_but_keeps_badge_and_sound() {
+        let alerts = AlertSettings { only_when_unfocused: true, ..settings() };
+        assert_eq!(alert_channels(&alerts, &finished(), false, true), Channels { badge: true, notification: false, sound: Some(AlertTone::Bell) });
+        assert!(alert_channels(&alerts, &finished(), false, false).notification);
+    }
+
+    #[test]
+    fn play_sounds_off_mutes_every_event() {
+        let alerts = AlertSettings { play_sounds: false, ..settings() };
+        assert_eq!(alert_channels(&alerts, &finished(), false, false).sound, None);
+        assert_eq!(alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false).sound, None);
+    }
+
+    #[test]
+    fn grid_cells_are_independent() {
+        let alerts = AlertSettings {
+            needs_input: EventAlerts { badge: false, notification: false, sound: true, tone: AlertTone::Bell },
+            finished: EventAlerts { badge: false, notification: true, sound: false, tone: AlertTone::Tick },
+            ..settings()
+        };
+        assert_eq!(
+            alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false),
+            Channels { badge: false, notification: false, sound: Some(AlertTone::Bell) }
+        );
+        assert_eq!(alert_channels(&alerts, &finished(), false, false), Channels { badge: false, notification: true, sound: None });
     }
 }
