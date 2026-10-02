@@ -8,9 +8,6 @@ use super::*;
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
 
-/// Width (before scaling) one column of groups needs; two columns plus the gap are shown from twice this.
-const COLUMN_WIDTH: f32 = 330.;
-const COLUMN_GAP: f32 = 28.;
 const GROUPS: [Group; 5] = [Group::Tabs, Group::Panes, Group::Focus, Group::Overlays, Group::Terminal];
 
 /// A keystroke another action has, waiting for the user to say whether it may be taken over.
@@ -147,16 +144,14 @@ impl SettingsView {
 
     pub(super) fn shortcuts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let platform = Platform::current();
-        let two_columns_at = theme.ui(2. * COLUMN_WIDTH + COLUMN_GAP);
-        let two_columns = has_room(self.grid_bounds.get().size.width, two_columns_at);
         let filter = self.shortcut_filter.text().trim().to_lowercase();
 
         let mut groups: Vec<Div> = Vec::new();
-        for group in GROUPS {
+        for shortcut_group in GROUPS {
             let rows: Vec<Div> = ACTIONS
                 .iter()
                 .enumerate()
-                .filter(|(_, action)| action.group == group)
+                .filter(|(_, action)| action.group == shortcut_group)
                 .filter(|(_, action)| {
                     filter.is_empty()
                         || action.label.to_lowercase().contains(&filter)
@@ -164,28 +159,15 @@ impl SettingsView {
                 })
                 .map(|(index, action)| self.shortcut_row(index, action, theme, settings, platform, window, cx))
                 .collect();
-            if rows.is_empty() {
-                continue;
+            if !rows.is_empty() {
+                groups.push(group(theme, shortcut_group.title(), None, rows));
             }
-            groups.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(div().mb(theme.ui(6.)).text_size(theme.ui(13.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme.tokens.muted)).child(group.title()))
-                    .children(rows),
-            );
         }
-        let column = |groups: Vec<Div>| div().flex_1().min_w_0().flex().flex_col().gap(theme.ui(18.)).children(groups);
         let body = if groups.is_empty() {
             muted(theme, "No shortcut matches.")
-        } else if two_columns {
-            let split = groups.len().min(2).max(groups.len() / 2).min(groups.len());
-            let right = groups.split_off(split);
-            div().flex().items_start().gap(theme.ui(COLUMN_GAP)).child(column(groups)).child(column(right))
         } else {
-            div().flex().flex_col().child(column(groups))
+            div().flex().flex_col().gap(theme.ui(26.)).children(groups)
         };
-
 
         let focused = self.filter_focus.is_focused(window);
         let filter_box = div()
@@ -253,36 +235,17 @@ impl SettingsView {
             .text_color(rgb(key_ink))
             .whitespace_nowrap()
             .child(key_text);
-        let reset = self
-            .pressable("shortcut-reset", index, None, window, cx, change(move |settings| {
-                settings.shortcuts.remove(id);
-            }))
-            .w(theme.ui(52.))
-            .h(theme.ui(28.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(theme.ui(12.))
-            .text_color(rgb(if changed { theme.tokens.text } else { theme.tokens.line }))
-            .child("Reset");
+        let reset = self.reset_button("shortcut-reset", index, changed, change(move |settings| {
+            settings.shortcuts.remove(id);
+        }), window, cx);
 
-        let row = div()
-            .min_h(theme.ui(36.))
-            .py(theme.ui(4.))
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_x(theme.ui(10.))
-            .gap_y(theme.ui(4.))
-            .border_b_1()
-            .border_color(rgb(theme.tokens.line))
-            .child(div().flex_1().min_w(theme.ui(150.)).child(action.label))
-            .child(div().flex_none().flex().items_center().gap(theme.ui(10.)).child(key).child(reset));
+        let row = row_shell(theme, div().font_weight(FontWeight::MEDIUM).child(action.label), key, reset);
 
         let message = self.shortcut_message.as_ref().filter(|(message_id, _)| *message_id == id).map(|(_, text)| {
             let colors = theme.tone(Tone::NeedsInput);
             div()
-                .mt(theme.ui(4.))
+                .mx(theme.ui(16.))
+                .mb(theme.ui(12.))
                 .px(theme.ui(10.))
                 .py(theme.ui(6.))
                 .rounded(px(RADIUS_SMALL))
@@ -320,7 +283,8 @@ impl SettingsView {
                 .text_sm()
                 .child("Replace");
             div()
-                .my(theme.ui(6.))
+                .mx(theme.ui(16.))
+                .mb(theme.ui(12.))
                 .p(theme.ui(14.))
                 .flex()
                 .flex_col()

@@ -101,12 +101,6 @@ struct Stepped {
 const DROPDOWN_ROWS: f32 = 8.;
 const DROPDOWN_ROW: f32 = 30.;
 
-/// Whether a grid measured `width` wide has room for `needed`; an unmeasured grid (width 0, before its first frame) counts as roomy, so the
-/// first frame matches the usual layout.
-fn has_room(width: Pixels, needed: Pixels) -> bool {
-    width <= px(0.) || width >= needed
-}
-
 /// `value` moved by `delta`, kept within `min..=max` and rounded to one decimal.
 fn step(value: f32, delta: f32, min: f32, max: f32) -> f32 {
     ((value + delta).clamp(min, max) * 10.0).round() / 10.0
@@ -193,7 +187,6 @@ pub(crate) struct SettingsView {
     volume_drag: Option<f32>,
     slider_bounds: Rc<Cell<Bounds<Pixels>>>,
     body_scroll: ScrollHandle,
-    grid_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Where each drop-down's button was last drawn, to open its list upward near the window's bottom.
     dropdown_bounds: DropdownBounds,
     /// The hex field's text counts as selected: the next typed character or Backspace replaces it all.
@@ -241,7 +234,6 @@ impl SettingsView {
             volume_drag: None,
             slider_bounds: Rc::new(Cell::new(Bounds::default())),
             body_scroll: ScrollHandle::new(),
-            grid_bounds: Rc::new(Cell::new(Bounds::default())),
             dropdown_bounds: Rc::new(RefCell::new(HashMap::new())),
             hex_selected: false,
             recording: None,
@@ -759,20 +751,6 @@ impl Render for SettingsView {
                 .child(self.open_settings_button(1, window, cx))
         });
 
-        // Every page records its width, so a page that switches layout by width (Alerts, Shortcuts) knows it on
-        // its first frame; a new width redraws once.
-        let grid_bounds = self.grid_bounds.clone();
-        let page_width = canvas(
-            move |area, window, _| {
-                if grid_bounds.replace(area).size.width != area.size.width {
-                    window.refresh();
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
-
         let body = match section {
             Section::Appearance => self.appearance(&theme, &settings, window, cx),
             Section::Terminal => self.terminal(&theme, &settings, window, cx),
@@ -827,7 +805,7 @@ impl Render for SettingsView {
                             .gap(theme.ui(26.))
                             .child(header)
                             .children(banner)
-                            .child(div().relative().child(body).child(page_width)),
+                            .child(body),
                     ),
             )
             .children(backdrop)
@@ -837,13 +815,6 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_unmeasured_grid_counts_as_roomy() {
-        assert!(has_room(px(0.), px(700.)));
-        assert!(has_room(px(700.), px(700.)));
-        assert!(!has_room(px(699.), px(700.)));
-    }
 
     #[test]
     fn steps_stay_in_range_and_free_of_float_noise() {
