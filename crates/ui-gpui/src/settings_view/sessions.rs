@@ -378,7 +378,7 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(8.))
+                    .rounded(px(RADIUS_SMALL))
                     .bg(rgb(badge.color.value(theme.preset)))
                     .text_color(rgb(theme.tokens.ground))
                     .font_weight(FontWeight::BOLD)
@@ -404,6 +404,7 @@ impl SettingsView {
                             .absolute()
                             .top(theme.ui(36.))
                             .left_0()
+                            .w(theme.ui(4. * 30. + 3. * 6. + 2. * 14. + 2.))
                             .p(theme.ui(14.))
                             .flex()
                             .flex_col()
@@ -435,7 +436,7 @@ impl SettingsView {
                     actions_slot(theme).child(make_default).child(remove)
                 };
                 // One trailing width for every dir, so the command fields line up.
-                row_shell(theme, div().flex().items_start().gap(theme.ui(12.)).child(badge_button).child(div().child(name).child(path)), command, trailing.w(theme.ui(170.)).justify_end())
+                row_shell(theme, div().flex().items_start().gap(theme.ui(12.)).child(badge_button).child(div().flex_1().min_w_0().child(name).child(path)), command, trailing.w(theme.ui(170.)).justify_end())
             })
             .collect();
 
