@@ -1,5 +1,7 @@
 //! Default dark color theme and xterm 256-color resolution.
 
+use protocol::message::PaletteColors;
+
 use crate::snapshot::Rgb;
 
 /// Terminal colors used when the program does not override them.
@@ -68,6 +70,25 @@ pub const LIGHT: Palette = Palette {
         Rgb::hex(0xffffff),
     ],
 };
+
+impl Default for Palette {
+    fn default() -> Self {
+        DARK
+    }
+}
+
+impl From<Palette> for PaletteColors {
+    fn from(p: Palette) -> Self {
+        let pack = |c: Rgb| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
+        PaletteColors { foreground: pack(p.foreground), background: pack(p.background), cursor: pack(p.cursor), selection: pack(p.selection), ansi: p.ansi.map(pack) }
+    }
+}
+
+impl From<PaletteColors> for Palette {
+    fn from(c: PaletteColors) -> Self {
+        Palette { foreground: Rgb::hex(c.foreground), background: Rgb::hex(c.background), cursor: Rgb::hex(c.cursor), selection: Rgb::hex(c.selection), ansi: c.ansi.map(Rgb::hex) }
+    }
+}
 
 impl Palette {
     /// Resolve an xterm 256-color index: 0–15 ANSI, 16–231 color cube, 232–255 grayscale.

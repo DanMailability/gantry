@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use app_core::palette::Palette;
 use app_core::term_state::TermState;
 use claude_index::containers::{Docker, DockerCli, to_container};
 use claude_index::host::{Marked, in_container, processes_with_env};
@@ -79,6 +80,8 @@ struct Client {
 #[derive(Default)]
 struct State {
     panes: HashMap<PaneId, Pane>,
+    /// Colours the GUI draws with; panes answer colour queries from them.
+    palette: Palette,
     client: Option<Client>,
     next_pane: PaneId,
     next_client: u64,
@@ -136,6 +139,14 @@ impl Shared {
 }
 
 impl State {
+    /// Store `palette` and apply it to every pane.
+    fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+        for pane in self.panes.values_mut() {
+            pane.term.set_palette(palette);
+        }
+    }
+
     fn control(&self, message: &DaemonMessage) {
         if let Some(client) = &self.client {
             client.outbox.push_control(Frame::control(message));
@@ -621,6 +632,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
                 }
             }
         }
+        ClientMessage::SetPalette(colors) => shared.lock().set_palette(colors.into()),
         ClientMessage::Focus { pane } => {
             let mut state = shared.lock();
             state.focus_seq += 1;
@@ -774,9 +786,11 @@ fn start_pane(
     state.focus_seq += 1;
     let exit = pty.exit_signal();
     let start = pty.pid().and_then(claude_index::host::process_start);
+    let mut term = TermState::new(spec.cols, spec.rows);
+    term.set_palette(state.palette);
     let pane = Pane {
         pty,
-        term: TermState::new(spec.cols, spec.rows),
+        term,
         program: spec.program,
         args: spec.args,
         cwd: cwd.clone(),
@@ -885,6 +899,34 @@ mod tests {
             messages.push(frame.parse::<DaemonMessage>().unwrap().unwrap());
         }
         assert!(matches!(&messages[..], [DaemonMessage::Sessions { sessions }] if sessions.len() == 1), "{messages:?}");
+    }
+
+    #[tokio::test]
+    async fn set_palette_applies_to_existing_and_new_panes() {
+        use app_core::palette::LIGHT;
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State { next_pane: 1, ..State::default() }),
+            shutdown: Notify::new(),
+            base_env: std::env::vars().collect(),
+            owner_uid: None,
+            instance: String::new(),
+            docker: None,
+        });
+        let spec = || SpawnRequest { program: "sleep".into(), args: vec!["30".into()], cwd: "/".into(), cols: 80, rows: 24, cwd_from: None, container: None };
+        handle_message(&shared, 1, ClientMessage::Spawn { request: 1, spec: spec() });
+        handle_message(&shared, 1, ClientMessage::SetPalette(LIGHT.into()));
+        handle_message(&shared, 1, ClientMessage::Spawn { request: 2, spec: spec() });
+        let mut state = shared.lock();
+        assert_eq!(state.panes.len(), 2);
+        for pane in state.panes.values_mut() {
+            pane.term.feed(b"\x1b]11;?\x07");
+            assert_eq!(String::from_utf8(pane.term.take_pty_writes()).unwrap(), "\x1b]11;rgb:f8f8/f9f9/fcfc\x07");
+        }
+        let ids: Vec<PaneId> = state.panes.keys().copied().collect();
+        drop(state);
+        for pane in ids {
+            handle_message(&shared, 1, ClientMessage::Kill { pane });
+        }
     }
 
     #[test]

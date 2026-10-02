@@ -117,6 +117,11 @@ impl TermState {
         TermState { term: Term::new(config, &size, listener), parser: Processor::new(), replies, title, palette: DARK, cell_size: (0, 0) }
     }
 
+    /// Use `palette` from now on, including for colour query answers.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+    }
+
     /// Feed program output into the terminal.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
@@ -442,6 +447,14 @@ mod tests {
             replies,
             "\x1b[1;1R\x1b]11;rgb:1414/1818/2121\x07\x1b]10;rgb:d8d8/dddd/e8e8\x1b\\"
         );
+    }
+
+    #[test]
+    fn set_palette_changes_query_answers() {
+        let mut t = TermState::new(10, 3);
+        t.set_palette(crate::palette::LIGHT);
+        t.feed(b"\x1b]11;?\x07");
+        assert_eq!(String::from_utf8(t.take_pty_writes()).unwrap(), "\x1b]11;rgb:f8f8/f9f9/fcfc\x07");
     }
 
     #[test]

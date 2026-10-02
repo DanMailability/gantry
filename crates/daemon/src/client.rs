@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use protocol::message::{ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome};
+use protocol::message::{ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, PaletteColors, SessionInfo, SpawnRequest, TakeOverOutcome};
 use tokio::sync::mpsc;
 
 use crate::launch::{connect_or_spawn, connect_trusted};
@@ -193,6 +193,11 @@ impl DaemonClient {
     /// Report the pane's new grid and cell size.
     pub fn resize(&self, pane: PaneId, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
         self.send(&ClientMessage::Resize { pane, cols, rows, cell_width, cell_height });
+    }
+
+    /// Tell the daemon the terminal colours in use, so it answers colour queries with them.
+    pub fn set_palette(&self, colors: PaletteColors) {
+        self.send(&ClientMessage::SetPalette(colors));
     }
 
     /// Mark the pane as most recently focused.
