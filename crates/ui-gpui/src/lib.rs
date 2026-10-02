@@ -103,7 +103,9 @@ fn workspace(connection: Connection, launch: &Launch, paths: &Paths, window: &mu
         tracing::warn!("ignoring the saved layout: {err}");
         None
     });
-    let restored = restore(saved, &connection.instance, &connection.panes, launch, cx.global::<SettingsStore>().settings().window.restore_layout);
+    let window_settings = cx.global::<SettingsStore>().settings().window;
+    let mut restored = restore(saved, &connection.instance, &connection.panes, launch, window_settings.restore_layout);
+    restored.workspace.sidebar.visible = window_settings.sidebar_at_start.visible(restored.workspace.sidebar.visible);
     let default_cwd: PathBuf = launch.default.cwd.clone();
     WorkspaceView::new(connection, restored, paths.layout_file.clone(), default_cwd, window, cx)
 }

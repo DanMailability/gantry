@@ -145,6 +145,15 @@ pub enum SidebarAtStart {
 }
 
 impl SidebarAtStart {
+    /// Whether the sidebar is visible at start, given whether the saved layout had it visible.
+    pub fn visible(self, saved: bool) -> bool {
+        match self {
+            SidebarAtStart::Remember => saved,
+            SidebarAtStart::Shown => true,
+            SidebarAtStart::Hidden => false,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             SidebarAtStart::Remember => "remember",
@@ -871,6 +880,15 @@ mod tests {
         assert_eq!(s.shell, ShellSettings { program: String::new(), args: vec![] });
         assert_eq!(s.recents, RecentsSettings { per_project: 5, chips: 6 });
         assert_eq!(s.window, WindowSettings { restore_layout: true, sidebar_at_start: SidebarAtStart::Remember, scrollback: 10000, right_to_left: true });
+    }
+
+    #[test]
+    fn sidebar_at_start_overrides_the_saved_state_only_when_asked() {
+        for saved in [true, false] {
+            assert_eq!(SidebarAtStart::Remember.visible(saved), saved);
+            assert!(SidebarAtStart::Shown.visible(saved));
+            assert!(!SidebarAtStart::Hidden.visible(saved));
+        }
     }
 
     #[test]

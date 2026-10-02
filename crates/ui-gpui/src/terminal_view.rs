@@ -75,7 +75,8 @@ pub(crate) fn pane_font(family: Option<&str>) -> Font {
 
 /// An empty terminal of the given size, in the current theme's colours.
 fn new_term(cols: u16, rows: u16, cx: &App) -> TermState {
-    let mut term = TermState::new(cols, rows);
+    let lines = cx.global::<SettingsStore>().settings().window.scrollback as usize;
+    let mut term = TermState::with_scrollback(cols, rows, lines);
     term.set_palette(terminal_palette(theme(cx).preset));
     term
 }

@@ -26,6 +26,7 @@ mod alerts;
 mod appearance;
 mod sessions;
 mod shortcuts;
+mod window;
 
 use alerts::Event;
 use appearance::{Status, installed_monospace};
@@ -104,9 +105,21 @@ fn step(value: f32, delta: f32, min: f32, max: f32) -> f32 {
     ((value + delta).clamp(min, max) * 10.0).round() / 10.0
 }
 
-/// A number as the steppers show it: no decimals for whole numbers.
+/// A number as the steppers show it: no decimals for whole numbers, thousands separated (10,000).
 fn format_number(value: f32) -> String {
-    if value.fract() == 0.0 { format!("{value:.0}") } else { format!("{value:.1}") }
+    if value.fract() != 0.0 {
+        return format!("{value:.1}");
+    }
+    let digits = format!("{value:.0}");
+    let (sign, digits) = digits.strip_prefix('-').map_or(("", digits.as_str()), |rest| ("-", rest));
+    let mut grouped = String::new();
+    for (position, digit) in digits.chars().enumerate() {
+        if position > 0 && (digits.len() - position).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{sign}{grouped}")
 }
 
 /// A problem as the banner lists it: `key: message`, or just the message for the whole file.
@@ -369,7 +382,7 @@ impl SettingsView {
                 cx.stop_propagation();
             }))
             .child(square(self, 0, "−", less, cx))
-            .child(div().w(theme.ui(56.)).flex().justify_center().font_weight(FontWeight::SEMIBOLD).child(format_number(value)))
+            .child(div().min_w(theme.ui(56.)).px(theme.ui(4.)).flex().justify_center().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(format_number(value)))
             .child(square(self, 1, "+", more, cx))
     }
 
@@ -589,7 +602,7 @@ impl Render for SettingsView {
             Section::Alerts => self.alerts(&theme, &settings, window, cx),
             Section::Shortcuts => self.shortcuts(&theme, &settings, window, cx),
             Section::Sessions => self.sessions(&theme, &settings, window, cx),
-            Section::Window => div(),
+            Section::Window => self.window_page(&theme, &settings, window, cx),
         };
 
         let backdrop = self.popover.is_some().then(|| {
@@ -657,6 +670,14 @@ mod tests {
         assert_eq!(format_number(14.0), "14");
         assert_eq!(format_number(1.3), "1.3");
         assert_eq!(format_number(600.0), "600");
+    }
+
+    #[test]
+    fn thousands_are_separated() {
+        assert_eq!(format_number(1000.0), "1,000");
+        assert_eq!(format_number(10000.0), "10,000");
+        assert_eq!(format_number(100000.0), "100,000");
+        assert_eq!(format_number(999.0), "999");
     }
 
     #[test]
