@@ -322,14 +322,19 @@ impl SettingsView {
                         this.editing = None;
                         this.focus_handle.focus(window, cx);
                     }
-                    _ if field::edit(&mut this.edit, &event.keystroke) => {}
+                    _ if field::edit(&mut this.edit, &event.keystroke, cx) => {}
                     _ => return,
                 }
                 cx.stop_propagation();
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.stop(key.0, key.1, cx).focus(window, cx)))
-            .child(field::render(&shown, placeholder, focused, theme))
+            .child(field::render(&shown, placeholder, focused, theme, field::on_press(cx, move |this, offset, clicks, _, cx| {
+                if editing {
+                    this.edit.press(offset, clicks);
+                    cx.notify();
+                }
+            })))
     }
 
     pub(super) fn sessions(&mut self, theme: &Theme, settings: &Settings, window: &mut Window, cx: &mut Context<Self>) -> Div {

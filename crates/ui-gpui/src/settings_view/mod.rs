@@ -190,8 +190,6 @@ pub(crate) struct SettingsView {
     body_scroll: ScrollHandle,
     /// Where each drop-down's button was last drawn, to open its list upward near the window's bottom.
     dropdown_bounds: DropdownBounds,
-    /// The hex field's text counts as selected: the next typed character or Backspace replaces it all.
-    hex_selected: bool,
     /// The Shortcuts page: the action whose key is being recorded.
     recording: Option<&'static str>,
     /// Why the last recorded key was refused, under that action's row.
@@ -236,7 +234,6 @@ impl SettingsView {
             slider_bounds: Rc::new(Cell::new(Bounds::default())),
             body_scroll: ScrollHandle::new(),
             dropdown_bounds: Rc::new(RefCell::new(HashMap::new())),
-            hex_selected: false,
             recording: None,
             shortcut_message: None,
             pending_replace: None,

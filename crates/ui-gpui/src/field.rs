@@ -1,41 +1,128 @@
-//! Drawing a `TextField` and applying editing keys to it.
+//! Drawing a `TextField` and applying editing keys and mouse presses to it.
 
 use app_core::text_field::TextField;
-use gpui::{Div, Keystroke, div, prelude::*, px, rgb};
+use gpui::{
+    App, ClipboardItem, Context, Div, DispatchPhase, Keystroke, MouseButton, MouseDownEvent, Window, canvas, div, prelude::*, px, rgb, rgba,
+};
 
 use crate::theme::Theme;
 
-/// Apply an editing key (typing, Backspace, Delete, arrows, Home/End) to `field`. False for anything
-/// else — chords with Ctrl/Alt/Cmd are never text.
-pub(crate) fn edit(field: &mut TextField, keystroke: &Keystroke) -> bool {
-    let modifiers = &keystroke.modifiers;
-    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+/// What a field does with a left press: the byte offset under the pointer and the click count.
+pub(crate) type Press = Box<dyn Fn(usize, usize, &mut Window, &mut App)>;
+
+/// A `Press` that runs `handler` on the view `cx` belongs to.
+pub(crate) fn on_press<V: 'static>(cx: &mut Context<V>, handler: impl Fn(&mut V, usize, usize, &mut Window, &mut Context<V>) + 'static) -> Press {
+    let entity = cx.entity().downgrade();
+    let handler = std::rc::Rc::new(handler);
+    Box::new(move |offset, clicks, window, cx| {
+        let handler = handler.clone();
+        entity.update(cx, |this, cx| handler(this, offset, clicks, window, cx)).ok();
+    })
+}
+
+/// Apply an editing key to `field`: typing, Backspace, Delete, arrows, Home/End, word movement and deletion (Ctrl, Alt on
+/// macOS), Shift to select, and Ctrl+A/C/X/V (Cmd on macOS). False for anything else.
+pub(crate) fn edit(field: &mut TextField, keystroke: &Keystroke, cx: &mut App) -> bool {
+    if command(keystroke) && !keystroke.modifiers.shift {
+        match keystroke.key.as_str() {
+            "c" | "x" => {
+                if let Some(text) = field.selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                    if keystroke.key == "x" {
+                        field.backspace();
+                    }
+                }
+                return true;
+            }
+            "v" => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    field.insert(&text);
+                }
+                return true;
+            }
+            _ => {}
+        }
+    }
+    edit_keys(field, keystroke)
+}
+
+/// Ctrl (Cmd on macOS) held alone, or with Shift.
+fn command(keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    if cfg!(target_os = "macos") { m.platform && !m.control && !m.alt } else { m.control && !m.platform && !m.alt }
+}
+
+/// Ctrl (Alt on macOS) held alone, or with Shift: the word modifier.
+fn word(keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    if cfg!(target_os = "macos") { m.alt && !m.control && !m.platform } else { command(keystroke) }
+}
+
+fn edit_keys(field: &mut TextField, keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    if m.function {
         return false;
     }
+    let plain = !(m.control || m.alt || m.platform);
+    let (word, select) = (word(keystroke), m.shift);
     match keystroke.key.as_str() {
-        "backspace" => field.backspace(),
-        "delete" => field.delete(),
-        "left" => field.left(),
-        "right" => field.right(),
-        "home" => field.home(),
-        "end" => field.end(),
-        _ => match &keystroke.key_char {
+        "a" if command(keystroke) && !select => field.select_all(),
+        "backspace" if plain && !select => field.backspace(),
+        "backspace" if word && !select => field.delete_word_back(),
+        "delete" if plain && !select => field.delete(),
+        "delete" if word && !select => field.delete_word_forward(),
+        "left" if plain => field.left(select),
+        "left" if word => field.word_left(select),
+        "right" if plain => field.right(select),
+        "right" if word => field.word_right(select),
+        "home" if plain || word => field.home(select),
+        "end" if plain || word => field.end(select),
+        _ if plain => match &keystroke.key_char {
             Some(text) if !text.is_empty() && !text.chars().any(char::is_control) => field.insert(text),
             _ => return false,
         },
+        _ => return false,
     }
     true
 }
 
-/// The field's text with a caret at the cursor when `focused`; `placeholder` while empty.
-pub(crate) fn render(field: &TextField, placeholder: &'static str, focused: bool, theme: &Theme) -> Div {
+/// The field's text with a caret at the cursor when `focused` and the selection highlighted; `placeholder` while empty.
+/// `press` runs on a left press inside the field.
+pub(crate) fn render(field: &TextField, placeholder: &'static str, focused: bool, theme: &Theme, press: Press) -> Div {
     let caret = || div().flex_none().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.accent));
-    let row = div().flex().flex_row().items_center().min_w_0().overflow_hidden().whitespace_nowrap();
+    let row = div().relative().flex().flex_row().items_center().min_w_0().overflow_hidden().whitespace_nowrap().child(press_area(field.text(), press));
     if field.text().is_empty() {
         return row.when(focused, |row| row.child(caret())).child(div().text_color(rgb(theme.tokens.muted)).child(placeholder));
     }
-    let (before, after) = field.text().split_at(field.cursor());
-    row.child(before.to_string()).when(focused, |row| row.child(caret())).child(after.to_string())
+    let text = field.text();
+    let range = field.selection().unwrap_or(field.cursor()..field.cursor());
+    let (start, end) = (range.start, range.end);
+    row.child(text[..start].to_string())
+        .when(focused && field.cursor() == start, |row| row.child(caret()))
+        .when(start < end, |row| row.child(div().bg(rgba((theme.tokens.accent << 8) | 0x55)).child(text[start..end].to_string())))
+        .when(focused && start < end && field.cursor() == end, |row| row.child(caret()))
+        .child(text[end..].to_string())
+}
+
+/// An invisible layer over the text that turns a left press into a byte offset (measured with the inherited text style).
+fn press_area(text: &str, press: Press) -> impl IntoElement {
+    let text = text.to_string();
+    canvas(
+        |bounds, _, _| bounds,
+        move |bounds, _, window, _| {
+            let style = window.text_style();
+            let size = style.font_size.to_pixels(window.rem_size());
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                    return;
+                }
+                let line = window.text_system().shape_line(text.clone().into(), size, &[style.to_run(text.len())], None);
+                press(line.closest_index_for_x(event.position.x - bounds.left()), event.click_count, window, cx);
+            });
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 #[cfg(test)]
@@ -47,30 +134,64 @@ mod tests {
         Keystroke { modifiers, key: key.into(), key_char: key_char.map(Into::into) }
     }
 
+    fn ctrl() -> Modifiers {
+        if cfg!(target_os = "macos") { Modifiers { alt: true, ..Default::default() } } else { Modifiers { control: true, ..Default::default() } }
+    }
+
+    fn command() -> Modifiers {
+        if cfg!(target_os = "macos") { Modifiers { platform: true, ..Default::default() } } else { Modifiers { control: true, ..Default::default() } }
+    }
+
     #[test]
     fn typing_and_editing_keys_change_the_field() {
         let mut field = TextField::default();
         let plain = Modifiers::default();
         let shift = Modifiers { shift: true, ..Default::default() };
         for keystroke in [key("a", Some("a"), plain), key("b", Some("B"), shift), key("ש", Some("ש"), plain), key("space", Some(" "), plain)] {
-            assert!(edit(&mut field, &keystroke));
+            assert!(edit_keys(&mut field, &keystroke));
         }
         assert_eq!(field.text(), "aBש ");
         for name in ["backspace", "left", "left", "delete", "home", "end"] {
-            assert!(edit(&mut field, &key(name, None, plain)), "{name}");
+            assert!(edit_keys(&mut field, &key(name, None, plain)), "{name}");
         }
         assert_eq!(field.text(), "aש");
     }
 
     #[test]
+    fn word_keys_delete_and_move_by_word() {
+        let mut field = TextField::default();
+        field.insert("one two three");
+        assert!(edit_keys(&mut field, &key("backspace", None, ctrl())));
+        assert_eq!(field.text(), "one two ");
+        assert!(edit_keys(&mut field, &key("left", None, ctrl())));
+        assert!(edit_keys(&mut field, &key("delete", None, ctrl())));
+        assert_eq!(field.text(), "one  ");
+        let shift_word = Modifiers { shift: true, ..ctrl() };
+        assert!(edit_keys(&mut field, &key("left", None, shift_word)));
+        assert_eq!(field.selected_text(), Some("one "));
+        let shift = Modifiers { shift: true, ..Default::default() };
+        assert!(edit_keys(&mut field, &key("end", None, shift)));
+        assert_eq!(field.selected_text(), Some(" "));
+    }
+
+    #[test]
+    fn select_all_replaces_on_typing() {
+        let mut field = TextField::default();
+        field.insert("abc");
+        assert!(edit_keys(&mut field, &key("a", Some("a"), command())));
+        assert_eq!(field.selected_text(), Some("abc"));
+        assert!(edit_keys(&mut field, &key("z", Some("z"), Modifiers::default())));
+        assert_eq!(field.text(), "z");
+    }
+
+    #[test]
     fn chords_and_non_editing_keys_are_left_alone() {
         let mut field = TextField::default();
-        let ctrl = Modifiers { control: true, ..Default::default() };
         let alt = Modifiers { alt: true, ..Default::default() };
-        assert!(!edit(&mut field, &key("a", Some("a"), ctrl)));
-        assert!(!edit(&mut field, &key("1", Some("1"), alt)));
+        assert!(!edit_keys(&mut field, &key("o", Some("o"), command())));
+        assert!(!edit_keys(&mut field, &key("1", Some("1"), alt)));
         for name in ["enter", "escape", "up", "down", "tab"] {
-            assert!(!edit(&mut field, &key(name, None, Modifiers::default())), "{name}");
+            assert!(!edit_keys(&mut field, &key(name, None, Modifiers::default())), "{name}");
         }
         assert_eq!(field.text(), "");
     }

@@ -219,7 +219,7 @@ impl RecentsView {
             }
             "escape" => cx.emit(RecentsEvent::Dismiss),
             _ => {
-                if !field::edit(&mut self.query, keystroke) {
+                if !field::edit(&mut self.query, keystroke, cx) {
                     return;
                 }
                 self.refresh();
@@ -383,7 +383,7 @@ impl Render for RecentsView {
                             .bg(rgb(theme.tokens.raised))
                             .border_1()
                             .border_color(rgb(theme.tokens.accent))
-                            .child(field::render(&self.query, if self.choosing { "Search projects" } else { "Search recent sessions" }, true, &theme)),
+                            .child(field::render(&self.query, if self.choosing { "Search projects" } else { "Search recent sessions" }, true, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.query.press(offset, clicks); cx.notify(); }))),
                     )
                     .child(div().flex().flex_wrap().gap(px(6.)).children(chips)),
             )

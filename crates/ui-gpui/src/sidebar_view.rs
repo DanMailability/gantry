@@ -270,7 +270,7 @@ impl SidebarView {
                 self.rebuild(cx);
             }
             _ => {
-                if !field::edit(&mut self.filter, keystroke) {
+                if !field::edit(&mut self.filter, keystroke, cx) {
                     return;
                 }
                 self.rebuild(cx);
@@ -622,7 +622,7 @@ impl Render for SidebarView {
                         this.focus_handle.focus(window, cx);
                         cx.notify();
                     }))
-                    .child(field::render(&self.filter, "Filter active sessions", focused, &theme)),
+                    .child(field::render(&self.filter, "Filter active sessions", focused, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.filter.press(offset, clicks); cx.notify(); }))),
             )
             .child(
                 // Dropping a project heading on the empty space below the rows puts it last.
