@@ -85,6 +85,9 @@ fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new(&format!("{m}-down"), FocusDown, context),
         KeyBinding::new(prev_tab, PreviousTab, context),
         KeyBinding::new(next_tab, NextTab, context),
+        // Every platform, alongside the platform's own tab keys.
+        KeyBinding::new("ctrl-tab", NextTab, context),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, context),
         KeyBinding::new(&format!("{m}-pageup"), MoveTabLeft, context),
         KeyBinding::new(&format!("{m}-pagedown"), MoveTabRight, context),
         KeyBinding::new(&format!("{tab_n}-1"), ActivateTab1, context),
@@ -1541,6 +1544,8 @@ mod tests {
             ("ctrl-shift-down", "workspace::FocusDown"),
             ("ctrl-pageup", "workspace::PreviousTab"),
             ("ctrl-pagedown", "workspace::NextTab"),
+            ("ctrl-tab", "workspace::NextTab"),
+            ("ctrl-shift-tab", "workspace::PreviousTab"),
             ("ctrl-shift-pageup", "workspace::MoveTabLeft"),
             ("ctrl-shift-pagedown", "workspace::MoveTabRight"),
             ("alt-1", "workspace::ActivateTab1"),
@@ -1556,7 +1561,7 @@ mod tests {
 
     #[test]
     fn plain_control_keys_stay_with_the_pane() {
-        for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab"] {
+        for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab", "tab"] {
             assert_eq!(action_for(keys), None, "{keys}");
         }
     }
