@@ -103,6 +103,8 @@ pub(crate) fn dir_badge(badge: &DirBadge, theme: &Theme) -> Div {
 pub(crate) const SWEEP_BAND: f32 = 0.45;
 /// One pass of the Working glow.
 const SWEEP_PERIOD: Duration = Duration::from_millis(2200);
+/// Redraws per second while a glow runs: each one redraws the whole window, so this sets its CPU cost.
+const SWEEP_FPS: f32 = 15.;
 
 /// Whether a row of `tone` shows the Working glow: the setting is on and the window is active (an inactive window
 /// requests no animation frames at all).
@@ -127,7 +129,7 @@ pub(crate) fn working_sweep(id: impl Into<ElementId>, inset: Pixels, theme: &The
     div().absolute().top_0().bottom_0().left(inset).right(inset).overflow_hidden().child(
         div().absolute().top_0().bottom_0().w(relative(SWEEP_BAND)).flex().with_animation(
             id,
-            Animation::new(SWEEP_PERIOD).repeat_synced().with_max_fps(30.),
+            Animation::new(SWEEP_PERIOD).repeat_synced().with_max_fps(SWEEP_FPS),
             move |band, progress| {
                 let (left, strength) = sweep_band(progress);
                 let alpha = peak * strength;
