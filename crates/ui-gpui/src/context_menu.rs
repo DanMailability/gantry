@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use app_core::menus::{MenuAction, MenuEntry, MenuItem, Shortcut};
 use app_core::settings::Settings;
-use gpui::{App, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, deferred, div, prelude::*, px, relative, rgb, rgba};
+use gpui::{App, Bounds, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, canvas, deferred, div, prelude::*, px, relative, rgb, rgba};
 
 use crate::settings_store::shortcut_label;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
@@ -20,12 +20,15 @@ pub(crate) struct OpenMenu {
     pub focus: FocusHandle,
     /// The index of the submenu that is open, if any.
     pub sub: Rc<Cell<Option<usize>>>,
+    /// Where the open submenu was drawn: it hangs outside the menu's own bounds, so a press inside it must not
+    /// count as a click outside the menu.
+    sub_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 impl OpenMenu {
     /// A closed-submenu menu at `position`.
     pub fn new(items: Vec<MenuItem>, position: Point<Pixels>, focus: FocusHandle) -> OpenMenu {
-        OpenMenu { items, position, focus, sub: Rc::new(Cell::new(None)) }
+        OpenMenu { items, position, focus, sub: Rc::new(Cell::new(None)), sub_bounds: Rc::new(Cell::new(None)) }
     }
 }
 
@@ -88,6 +91,7 @@ pub(crate) fn render(
         MenuItem::Submenu { label, items } => {
             let (hover, click) = (menu.sub.clone(), menu.sub.clone());
             let open = open_sub == Some(index);
+            let bounds = menu.sub_bounds.clone();
             let children = open.then(|| {
                 // Colour swatches are drawn together as a 4-column grid, the other entries below it.
                 let swatches: Vec<_> = items
@@ -141,6 +145,7 @@ pub(crate) fn render(
                     .shadow_lg()
                     .when(has_swatches, |sub| sub.child(grid))
                     .children(entries)
+                    .child(canvas(move |area, _, _| bounds.set(Some(area)), |_, _, _, _| {}).absolute().size_full())
             });
             div()
                 .id(("menu-item", index))
@@ -171,6 +176,7 @@ pub(crate) fn render(
         }
     });
     let sub = menu.sub.clone();
+    let (sub_open, sub_bounds) = (menu.sub.clone(), menu.sub_bounds.clone());
     let first_submenu = menu.items.iter().position(|item| matches!(item, MenuItem::Submenu { .. }));
     deferred(
         anchored().position(menu.position).snap_to_window().child(
@@ -195,7 +201,12 @@ pub(crate) fn render(
                     // Keys must not reach what is beneath the menu (the sidebar filter).
                     cx.stop_propagation();
                 })
-                .on_mouse_down_out(move |_, window, cx| on_dismiss(window, cx))
+                .on_mouse_down_out(move |_, window, cx| {
+                    let in_sub = sub_open.get().is_some() && sub_bounds.get().is_some_and(|bounds| bounds.contains(&window.mouse_position()));
+                    if !in_sub {
+                        on_dismiss(window, cx);
+                    }
+                })
                 .min_w(theme.ui(220.))
                 .p_1()
                 .flex()
