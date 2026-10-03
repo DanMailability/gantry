@@ -1228,6 +1228,8 @@ mod tests {
         assert_eq!(sh.rerun_with(&store, &dirs, daemon), Rerun::Start(sh.launch.clone()));
     }
 
+    // Unix-style paths: Windows joins them with `\`.
+    #[cfg(unix)]
     #[test]
     fn continue_uses_the_dirs_current_command() {
         let daemon = Some(Path::new("/home/me/.claude"));
@@ -1494,6 +1496,8 @@ mod tests {
         assert_eq!(dirs.for_folder(Path::new("/r/a"), Some("Nope"), &memory).name, "Personal");
     }
 
+    // Unix-style paths: Windows joins them with `\`.
+    #[cfg(unix)]
     #[test]
     fn claude_with_sets_env_only_for_non_daemon_dir() {
         let dirs = two_dirs();
