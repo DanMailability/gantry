@@ -10,9 +10,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Line numbers in backtraces but no full debug info: linking the GPUI test binaries is most of the build time.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
   fmt:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain from rust-toolchain.toml
@@ -25,6 +30,8 @@ jobs:
       matrix:
         os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["ubuntu-24.04", "macos-15", "windows-2025"]') || fromJSON('["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
+    # A cold build (no cache) takes about 30 min on Linux; a hang must not run for the default 6 hours.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Linux system packages
@@ -37,11 +44,15 @@ jobs:
       - name: Toolchain from rust-toolchain.toml
         run: rustup show
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the built dependencies even when clippy or a test fails (first macOS/Windows runs).
+          cache-on-failure: true
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
   deny:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
