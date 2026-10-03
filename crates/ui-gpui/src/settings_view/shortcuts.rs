@@ -1,7 +1,7 @@
 //! The Shortcuts section: every rebindable action with its keystroke, a recorder, and the "Replace?" card.
 
 use app_core::settings::Settings;
-use app_core::shortcuts::{self, ACTIONS, Action, Check, GO_TO_TAB, Group, Platform};
+use app_core::shortcuts::{self, ACTIONS, Action, Check, Group, Platform};
 use gpui::{Context, Div, FontWeight, Keystroke, Window, div, px, rgb, rgba};
 
 use super::*;
@@ -27,20 +27,17 @@ enum Recorded {
     Cancel,
     /// Backspace: the action gets no shortcut.
     Unset,
-    /// A keystroke (for Go to tab: a modifier set) to check.
+    /// A keystroke to check.
     Choose(String),
 }
 
-/// The keystroke in settings syntax (`ctrl-alt-shift-cmd-key`); for `modifier_set` only its modifiers.
-fn keystroke_text(keystroke: &Keystroke, modifier_set: bool) -> Option<String> {
+/// The keystroke in settings syntax (`ctrl-alt-shift-cmd-key`).
+fn keystroke_text(keystroke: &Keystroke) -> Option<String> {
     let modifiers = &keystroke.modifiers;
     let mut parts: Vec<&str> = [(modifiers.control, "ctrl"), (modifiers.alt, "alt"), (modifiers.shift, "shift"), (modifiers.platform, "cmd")]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
         .collect();
-    if modifier_set {
-        return (!parts.is_empty()).then(|| parts.join("-"));
-    }
     if keystroke.key.is_empty() {
         return None;
     }
@@ -48,7 +45,7 @@ fn keystroke_text(keystroke: &Keystroke, modifier_set: bool) -> Option<String> {
     Some(parts.join("-"))
 }
 
-fn recorded(keystroke: &Keystroke, action: &str) -> Recorded {
+fn recorded(keystroke: &Keystroke) -> Recorded {
     let modifiers = &keystroke.modifiers;
     if matches!(keystroke.key.as_str(), "shift" | "control" | "alt" | "platform" | "function") {
         return Recorded::Ignore;
@@ -62,7 +59,7 @@ fn recorded(keystroke: &Keystroke, action: &str) -> Recorded {
             _ => Recorded::Ignore,
         };
     }
-    keystroke_text(keystroke, action == GO_TO_TAB).map_or(Recorded::Ignore, Recorded::Choose)
+    keystroke_text(keystroke).map_or(Recorded::Ignore, Recorded::Choose)
 }
 
 /// Store `value` for `action`: nothing when it is the default (only changes are written), `null` for no shortcut.
@@ -79,13 +76,7 @@ fn store_shortcut(settings: &mut Settings, action: &str, value: Option<String>, 
 
 /// What the key button of `action` shows.
 fn shown(settings: &Settings, action: &Action, platform: Platform) -> String {
-    let current = shortcuts::current(action.id, &settings.shortcuts, platform);
-    match (action.id == GO_TO_TAB, current) {
-        (true, Some(modifiers)) => {
-            format!("{} … {}", shortcuts::label(Some(&format!("{modifiers}-1")), platform), shortcuts::label(Some(&format!("{modifiers}-9")), platform))
-        }
-        (_, current) => shortcuts::label(current.as_deref(), platform),
-    }
+    shortcuts::label(shortcuts::current(action.id, &settings.shortcuts, platform).as_deref(), platform)
 }
 
 fn label_of(id: &str) -> &'static str {
@@ -106,7 +97,7 @@ impl SettingsView {
     pub(super) fn record(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.end_recording_without_focus(window);
         let Some(id) = self.recording else { return false };
-        match recorded(keystroke, id) {
+        match recorded(keystroke) {
             Recorded::Ignore => {}
             Recorded::Cancel => self.recording = None,
             Recorded::Unset => {
@@ -316,24 +307,22 @@ mod tests {
 
     #[test]
     fn a_pressed_chord_becomes_settings_syntax() {
-        assert_eq!(keystroke_text(&key("d", ctrl_shift()), false).as_deref(), Some("ctrl-shift-d"));
+        assert_eq!(keystroke_text(&key("d", ctrl_shift())).as_deref(), Some("ctrl-shift-d"));
         let all = Modifiers { control: true, alt: true, shift: true, platform: true, ..Default::default() };
-        assert_eq!(keystroke_text(&key("pageup", all), false).as_deref(), Some("ctrl-alt-shift-cmd-pageup"));
-        assert_eq!(keystroke_text(&key("5", Modifiers { alt: true, ..Default::default() }), true).as_deref(), Some("alt"), "Go to tab keeps only the modifiers");
-        assert_eq!(keystroke_text(&key("5", Modifiers::default()), true), None);
+        assert_eq!(keystroke_text(&key("pageup", all)).as_deref(), Some("ctrl-alt-shift-cmd-pageup"));
     }
 
     #[test]
     fn plain_keys_are_checked_except_escape_and_backspace() {
         let none = Modifiers::default();
-        assert_eq!(recorded(&key("escape", none), "closePane"), Recorded::Cancel);
-        assert_eq!(recorded(&key("backspace", none), "closePane"), Recorded::Unset);
-        assert_eq!(recorded(&key("enter", none), "closePane"), Recorded::Choose("enter".into()));
-        assert_eq!(recorded(&key("a", none), "closePane"), Recorded::Choose("a".into()));
-        assert_eq!(recorded(&key("shift", Modifiers { shift: true, ..Default::default() }), "closePane"), Recorded::Ignore);
-        assert_eq!(recorded(&key("control", Modifiers { control: true, ..Default::default() }), "closePane"), Recorded::Ignore);
-        assert_eq!(recorded(&key("d", ctrl_shift()), "closePane"), Recorded::Choose("ctrl-shift-d".into()));
-        assert_eq!(recorded(&key("escape", ctrl_shift()), "closePane"), Recorded::Choose("ctrl-shift-escape".into()));
+        assert_eq!(recorded(&key("escape", none)), Recorded::Cancel);
+        assert_eq!(recorded(&key("backspace", none)), Recorded::Unset);
+        assert_eq!(recorded(&key("enter", none)), Recorded::Choose("enter".into()));
+        assert_eq!(recorded(&key("a", none)), Recorded::Choose("a".into()));
+        assert_eq!(recorded(&key("shift", Modifiers { shift: true, ..Default::default() })), Recorded::Ignore);
+        assert_eq!(recorded(&key("control", Modifiers { control: true, ..Default::default() })), Recorded::Ignore);
+        assert_eq!(recorded(&key("d", ctrl_shift())), Recorded::Choose("ctrl-shift-d".into()));
+        assert_eq!(recorded(&key("escape", ctrl_shift())), Recorded::Choose("ctrl-shift-escape".into()));
     }
 
     #[test]
@@ -350,11 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn the_key_button_shows_the_label_and_go_to_tab_shows_its_range() {
+    fn the_key_button_shows_the_label() {
         let settings = Settings::default();
         let by_id = |id: &str| ACTIONS.iter().find(|action| action.id == id).unwrap();
         assert_eq!(shown(&settings, by_id("newClaudeTab"), Platform::Linux), "Ctrl+Shift+T");
-        assert_eq!(shown(&settings, by_id(GO_TO_TAB), Platform::Linux), "Alt+1 … Alt+9");
         let mut settings = Settings::default();
         settings.shortcuts.insert("closePane".into(), None);
         assert_eq!(shown(&settings, by_id("closePane"), Platform::Linux), "Not set");

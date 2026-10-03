@@ -532,50 +532,19 @@ impl Workspace {
         valid
     }
 
-    /// Show the tab `delta` places away, wrapping around.
-    pub fn cycle_tab(&mut self, delta: isize) {
-        let len = self.tabs.len() as isize;
-        if len > 0 {
-            self.active = (self.active as isize + delta).rem_euclid(len) as usize;
+    /// Show the tab `delta` places away in `leaf_order` (the sidebar's leaves, top to bottom), wrapping around. The
+    /// Settings tab comes first (its row is at the top), each tab counts once (at its first listed leaf), and tabs
+    /// with no listed leaf follow in workspace order.
+    pub fn cycle_tab_in(&mut self, leaf_order: &[NodeId], delta: isize) {
+        let mut order: Vec<usize> = self.settings_tab().into_iter().collect();
+        for index in leaf_order.iter().filter_map(|leaf| self.tab_of(*leaf)).chain(0..self.tabs.len()) {
+            if !order.contains(&index) {
+                order.push(index);
+            }
         }
-    }
-
-    /// Move the visible tab `delta` places, stopping at the ends; it stays visible.
-    pub fn move_tab(&mut self, delta: isize) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        let target = (self.active as isize + delta).clamp(0, self.tabs.len() as isize - 1) as usize;
-        self.move_tab_to(self.active, target);
-    }
-
-    /// Whether tab `index` can be dragged or moved (the Settings tab cannot: it stays last).
-    pub fn can_drag(&self, index: usize) -> bool {
-        !self.tabs.get(index).is_some_and(|tab| tab.settings)
-    }
-
-    /// Move tab `from` to position `to`, stopping before the Settings tab; the visible tab stays visible wherever
-    /// it ends up. Out-of-range indices do nothing, and neither does moving the Settings tab.
-    pub fn move_tab_to(&mut self, from: usize, to: usize) {
-        let len = self.tabs.len();
-        if from >= len || to >= len || !self.can_drag(from) {
-            return;
-        }
-        let to = match self.settings_tab() {
-            Some(settings) if to >= settings => settings - 1,
-            _ => to,
-        };
-        if from == to {
-            return;
-        }
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
-        self.active = match self.active {
-            active if active == from => to,
-            active if from < active && active <= to => active - 1,
-            active if to <= active && active < from => active + 1,
-            active => active,
-        };
+        let Some(at) = order.iter().position(|index| *index == self.active) else { return };
+        let len = order.len() as isize;
+        self.active = order[(at as isize + delta).rem_euclid(len) as usize];
     }
 
     /// Set a split's ratio in the visible tab.
@@ -823,18 +792,44 @@ mod tests {
     }
 
     #[test]
-    fn move_is_clamped_before_settings() {
-        let mut ws = workspace_with_tabs(3);
+    fn cycle_follows_the_sidebar_order_with_settings_first() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.new_tab(shell("/b"));
+        let c = ws.new_tab(shell("/c"));
         ws.open_settings();
-        ws.move_tab_to(0, 3);
-        assert!(ws.tabs[3].settings);
-        assert_eq!(ws.tabs[2].focused, 1, "the dragged tab landed just before Settings");
-        ws.active = 2;
-        ws.move_tab(1);
-        assert!(ws.tabs[3].settings, "Move tab right stops before Settings");
-        ws.move_tab_to(3, 0);
-        assert!(ws.tabs[3].settings, "Settings itself never moves");
-        assert!(!ws.can_drag(3) && ws.can_drag(0));
+        // The sidebar lists c, a, b.
+        let order = [c, a, b];
+        ws.active = ws.tab_of(c).unwrap();
+        ws.cycle_tab_in(&order, 1);
+        assert_eq!(ws.focused(), Some(a));
+        ws.cycle_tab_in(&order, 1);
+        assert_eq!(ws.focused(), Some(b));
+        ws.cycle_tab_in(&order, 1);
+        assert_eq!(ws.settings_tab(), Some(ws.active), "wraps to Settings, the top row");
+        ws.cycle_tab_in(&order, 1);
+        assert_eq!(ws.focused(), Some(c));
+        ws.cycle_tab_in(&order, -1);
+        assert_eq!(ws.settings_tab(), Some(ws.active));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn cycle_counts_a_split_tab_once_and_appends_unlisted_tabs() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let a2 = ws.split(Axis::Horizontal, shell("/a2")).unwrap();
+        let b = ws.new_tab(shell("/b"));
+        let c = ws.new_tab(shell("/c"));
+        // The sidebar lists the split tab's two leaves, then b; c has no row.
+        let order = [a, a2, b];
+        ws.active = ws.tab_of(a).unwrap();
+        ws.cycle_tab_in(&order, 1);
+        assert_eq!(ws.focused(), Some(b), "the split tab's second leaf is not a step");
+        ws.cycle_tab_in(&order, 1);
+        assert_eq!(ws.focused(), Some(c), "a tab with no row comes after the listed ones");
+        ws.cycle_tab_in(&[], 1);
+        assert_eq!(ws.active, 0, "an empty order falls back to workspace order");
     }
 
     #[test]
@@ -851,17 +846,11 @@ mod tests {
     }
 
     #[test]
-    fn settings_tab_takes_part_in_cycle_select_and_move() {
+    fn settings_tab_takes_part_in_select() {
         let mut ws = Workspace::default();
         let a = ws.new_tab(shell("/a"));
         let b = ws.new_tab(shell("/b"));
         ws.open_settings();
-        ws.cycle_tab(1);
-        assert_eq!(ws.active, 0);
-        ws.cycle_tab(-1);
-        assert_eq!(ws.settings_tab(), Some(ws.active));
-        ws.move_tab(-2);
-        assert_eq!((ws.active, ws.settings_tab()), (2, Some(2)), "the Settings tab does not move");
         assert_eq!(ws.tabs.iter().map(|t| t.focused).take(2).collect::<Vec<_>>(), vec![a, b]);
         assert!(ws.select_tab(1));
         assert_eq!(ws.focused(), Some(b));
@@ -905,7 +894,6 @@ mod tests {
         ws.select_tab(0);
         assert_eq!((ws.saveable().active, ws.saveable().focused()), (0, Some(a)));
         ws.select_tab(1);
-        ws.move_tab_to(1, 2);
         assert_eq!((ws.saveable().active, ws.saveable().focused()), (1, Some(b)), "settings last and active: last tab");
         assert_eq!(ws.tabs.len(), 3, "the original keeps it");
     }
@@ -993,20 +981,13 @@ mod tests {
     }
 
     #[test]
-    fn tabs_cycle_with_wraparound_and_move_with_the_active_tab() {
+    fn select_tab_stops_at_the_last_tab() {
         let mut ws = Workspace::default();
-        let a = ws.new_tab(shell("/a"));
+        ws.new_tab(shell("/a"));
         ws.new_tab(shell("/b"));
         ws.new_tab(shell("/c"));
-        ws.cycle_tab(1);
-        assert_eq!(ws.active, 0);
-        ws.cycle_tab(-1);
-        assert_eq!(ws.active, 2);
         assert!(ws.select_tab(0) && !ws.select_tab(3));
-        ws.move_tab(1);
-        assert_eq!((ws.active, ws.tabs[1].focused), (1, a));
-        ws.move_tab(-5);
-        assert_eq!((ws.active, ws.tabs[0].focused), (0, a), "moves stop at the ends");
+        assert_eq!(ws.active, 0);
     }
 
     #[test]
@@ -1197,37 +1178,6 @@ mod tests {
         let restored = restore(None, "i", &live, &launch(), true);
         let leaf = restored.attach[0].0;
         assert_eq!(restored.workspace.leaves[&leaf].session.as_deref(), Some("xyz"));
-    }
-
-    #[test]
-    fn move_tab_to_moves_one_tab_and_the_active_tab_follows_its_content() {
-        let mut ws = Workspace::default();
-        for dir in ["/a", "/b", "/c", "/d"] {
-            ws.new_tab(shell(dir));
-        }
-        let order = |ws: &Workspace| ws.tabs.iter().map(|tab| ws.leaves[&tab.focused].launch.cwd.display().to_string()).collect::<Vec<_>>();
-        ws.active = 1; // "/b"
-        ws.move_tab_to(0, 3);
-        assert_eq!(order(&ws), ["/b", "/c", "/d", "/a"]);
-        assert_eq!(ws.active, 0, "the visible tab is still /b");
-        ws.move_tab_to(3, 0);
-        assert_eq!(order(&ws), ["/a", "/b", "/c", "/d"]);
-        assert_eq!(ws.active, 1);
-        ws.move_tab_to(1, 2);
-        assert_eq!(order(&ws), ["/a", "/c", "/b", "/d"]);
-        assert_eq!(ws.active, 2, "the moved tab was the visible one");
-    }
-
-    #[test]
-    fn moving_a_tab_onto_itself_changes_nothing() {
-        let mut ws = Workspace::default();
-        ws.new_tab(shell("/a"));
-        ws.new_tab(shell("/b"));
-        let before = ws.clone();
-        ws.move_tab_to(1, 1);
-        ws.move_tab_to(0, 7);
-        ws.move_tab_to(9, 0);
-        assert_eq!(ws, before);
     }
 
     #[test]

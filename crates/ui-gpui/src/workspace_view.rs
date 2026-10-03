@@ -53,9 +53,7 @@ mod workspace_actions {
         workspace,
         [
             NewClaudeTab, NewShellTab, SplitRightClaude, SplitRightShell, SplitDownClaude, SplitDownShell, ClosePane,
-            FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
-            ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
-            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher,
+            FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, ToggleSidebar, FindSession, OpenLauncher,
             OpenRecents, OpenSettings
         ]
     );
@@ -79,20 +77,6 @@ fn workspace_binding(id: &str, key: &str) -> Option<gpui::KeyBinding> {
         "newShellTab" => KeyBinding::new(key, NewShellTab, context),
         "nextTab" => KeyBinding::new(key, NextTab, context),
         "previousTab" => KeyBinding::new(key, PreviousTab, context),
-        "moveTabLeft" => KeyBinding::new(key, MoveTabLeft, context),
-        "moveTabRight" => KeyBinding::new(key, MoveTabRight, context),
-        shortcuts::GO_TO_TAB => match key.rsplit('-').next()?.parse::<u8>().ok()? {
-            1 => KeyBinding::new(key, ActivateTab1, context),
-            2 => KeyBinding::new(key, ActivateTab2, context),
-            3 => KeyBinding::new(key, ActivateTab3, context),
-            4 => KeyBinding::new(key, ActivateTab4, context),
-            5 => KeyBinding::new(key, ActivateTab5, context),
-            6 => KeyBinding::new(key, ActivateTab6, context),
-            7 => KeyBinding::new(key, ActivateTab7, context),
-            8 => KeyBinding::new(key, ActivateTab8, context),
-            9 => KeyBinding::new(key, ActivateTab9, context),
-            _ => return None,
-        },
         "splitRightClaude" => KeyBinding::new(key, SplitRightClaude, context),
         "splitRightShell" => KeyBinding::new(key, SplitRightShell, context),
         "splitDownClaude" => KeyBinding::new(key, SplitDownClaude, context),
@@ -1171,7 +1155,7 @@ impl WorkspaceView {
         self.focus_dir(Direction::Down, window, cx)
     }
     fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.cycle_tab(delta);
+        self.workspace.cycle_tab_in(&[], delta);
         self.focus_current(window, cx);
         self.save(cx);
     }
@@ -1180,43 +1164,6 @@ impl WorkspaceView {
     }
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle(1, window, cx)
-    }
-    fn move_tab_left(&mut self, _: &MoveTabLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.move_tab(-1);
-        self.save(cx);
-        cx.notify();
-    }
-    fn move_tab_right(&mut self, _: &MoveTabRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.move_tab(1);
-        self.save(cx);
-        cx.notify();
-    }
-    fn activate_tab_1(&mut self, _: &ActivateTab1, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(0, window, cx)
-    }
-    fn activate_tab_2(&mut self, _: &ActivateTab2, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(1, window, cx)
-    }
-    fn activate_tab_3(&mut self, _: &ActivateTab3, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(2, window, cx)
-    }
-    fn activate_tab_4(&mut self, _: &ActivateTab4, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(3, window, cx)
-    }
-    fn activate_tab_5(&mut self, _: &ActivateTab5, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(4, window, cx)
-    }
-    fn activate_tab_6(&mut self, _: &ActivateTab6, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(5, window, cx)
-    }
-    fn activate_tab_7(&mut self, _: &ActivateTab7, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(6, window, cx)
-    }
-    fn activate_tab_8(&mut self, _: &ActivateTab8, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(7, window, cx)
-    }
-    fn activate_tab_9(&mut self, _: &ActivateTab9, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(8, window, cx)
     }
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -1301,13 +1248,6 @@ impl WorkspaceView {
         }
     }
 
-    /// A dragged tab was dropped on tab `to`: it takes that place.
-    fn drop_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        self.workspace.move_tab_to(from, to);
-        self.save(cx);
-        cx.notify();
-    }
-
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let theme = theme(cx).clone();
@@ -1363,8 +1303,6 @@ impl WorkspaceView {
             // The tabs scroll sideways when even their narrowest widths don't fit, so the buttons and window
             // controls after them stay visible.
             .child(div().id("tabs").min_w_0().flex_shrink(1.).h_full().flex().flex_row().items_center().gap(theme.ui(6.)).overflow_x_scroll().children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings, project))| {
-                let dragged = DraggedTab { index, title: title.clone() };
-                let line = theme.tokens.line;
                 let active = index == self.workspace.active;
                 // Claude tabs are filled with what their most urgent session needs; shells stay plain.
                 let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
@@ -1375,7 +1313,6 @@ impl WorkspaceView {
                     colors.map_or(if active { theme.tokens.text } else { theme.tokens.muted }, |colors| colors.ink)
                 };
                 let fill = if settings { Some(theme.tokens.text) } else { colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised)) };
-                let can_drag = self.workspace.can_drag(index);
                 let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
                 let card = HoverCard {
                     title: title.clone(),
@@ -1431,7 +1368,6 @@ impl WorkspaceView {
                             .text_xs()
                             .hover(|style| style.bg(rgba(0x00000026)))
                             .child("×")
-                            // Pressing × must not start dragging the tab.
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -1439,8 +1375,7 @@ impl WorkspaceView {
                             })),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
-                    .when(can_drag, |tab| tab.on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone())))
-                    // A middle click closes the tab, like ×; it must not start a drag or select the tab.
+                    // A middle click closes the tab, like ×; it must not select the tab.
                     .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
                         this.middle_pressed = Some(index);
                         cx.stop_propagation();
@@ -1451,8 +1386,6 @@ impl WorkspaceView {
                             this.close_tab_at(index, window, cx);
                         }
                     }))
-                    .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(line)))
-                    .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1762,17 +1695,6 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::focus_down))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::next_tab))
-            .on_action(cx.listener(Self::move_tab_left))
-            .on_action(cx.listener(Self::move_tab_right))
-            .on_action(cx.listener(Self::activate_tab_1))
-            .on_action(cx.listener(Self::activate_tab_2))
-            .on_action(cx.listener(Self::activate_tab_3))
-            .on_action(cx.listener(Self::activate_tab_4))
-            .on_action(cx.listener(Self::activate_tab_5))
-            .on_action(cx.listener(Self::activate_tab_6))
-            .on_action(cx.listener(Self::activate_tab_7))
-            .on_action(cx.listener(Self::activate_tab_8))
-            .on_action(cx.listener(Self::activate_tab_9))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::find_session))
             .on_action(cx.listener(Self::open_launcher))
@@ -1836,32 +1758,6 @@ impl Render for WorkspaceView {
     }
 }
 
-/// A tab being dragged: its index, and the title its floating copy shows.
-#[derive(Clone)]
-struct DraggedTab {
-    index: usize,
-    title: String,
-}
-
-impl Render for DraggedTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme(cx).clone();
-        div()
-            .h(theme.ui(32.))
-            .px_3()
-            .flex()
-            .items_center()
-            .rounded(px(RADIUS - 2.))
-            .border_2()
-            .border_color(rgb(theme.tokens.accent))
-            .bg(rgb(theme.tokens.raised))
-            .text_sm()
-            .font_family(UI_FONT)
-            .text_color(rgb(theme.tokens.text))
-            .child(self.title.clone())
-    }
-}
-
 /// Drop the alerts of the leaves the user can see, except those marked unread by hand while visible; a kept mark
 /// ends once its leaf is out of sight.
 fn forget_seen(unseen: &mut HashMap<NodeId, AlertKind>, kept: &mut HashSet<NodeId>, visible: impl Fn(NodeId) -> bool) {
@@ -1914,10 +1810,6 @@ mod tests {
             ("ctrl-shift-down", "workspace::FocusDown"),
             ("ctrl-tab", "workspace::NextTab"),
             ("ctrl-shift-tab", "workspace::PreviousTab"),
-            ("ctrl-shift-pageup", "workspace::MoveTabLeft"),
-            ("ctrl-shift-pagedown", "workspace::MoveTabRight"),
-            ("alt-1", "workspace::ActivateTab1"),
-            ("alt-9", "workspace::ActivateTab9"),
             ("ctrl-shift-b", "workspace::ToggleSidebar"),
             ("ctrl-shift-f", "workspace::FindSession"),
             ("ctrl-shift-o", "workspace::OpenLauncher"),
@@ -1930,7 +1822,7 @@ mod tests {
 
     #[test]
     fn plain_control_keys_stay_with_the_pane() {
-        for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab", "tab"] {
+        for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab", "tab", "alt-1"] {
             assert_eq!(action_for(keys), None, "{keys}");
         }
     }
@@ -1945,7 +1837,7 @@ mod tests {
     fn no_default_binding_is_reserved() {
         let bindings = shortcuts::bindings(&Default::default(), Platform::Linux);
         for (id, key) in &bindings {
-            if *id == shortcuts::GO_TO_TAB || key == "ctrl-+" {
+            if key == "ctrl-+" {
                 continue;
             }
             assert!(!matches!(shortcuts::check(key, id, &[]), shortcuts::Check::Reserved(_)), "{id} {key}");
@@ -1974,12 +1866,8 @@ mod tests {
     }
 
     #[test]
-    fn go_to_tab_follows_its_modifiers_and_terminal_actions_are_bound() {
-        let mut settings = Settings::default();
-        settings.shortcuts.insert("goToTab".into(), Some("ctrl-alt".into()));
-        let bindings = all_bindings(&settings, Platform::Linux);
-        assert_eq!(action_in(&bindings, "ctrl-alt-4"), Some("workspace::ActivateTab4"));
-        assert_eq!(action_in(&bindings, "alt-4"), None);
+    fn terminal_actions_are_bound() {
+        let bindings = all_bindings(&Settings::default(), Platform::Linux);
         assert_eq!(action_in(&bindings, "ctrl-shift-c"), Some("terminal::Copy"));
         assert_eq!(action_in(&bindings, "ctrl-="), Some("terminal::ZoomIn"));
     }

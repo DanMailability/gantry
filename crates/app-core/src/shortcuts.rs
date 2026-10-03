@@ -50,15 +50,12 @@ const fn action(id: &'static str, group: Group, label: &'static str, linux: &'st
     Action { id, group, label, linux: Some(linux), macos: Some(macos) }
 }
 
-/// Every action, in page order. `goToTab` holds a modifier set (`alt`) that is bound to each of the keys 1 to 9.
+/// Every action, in page order.
 pub const ACTIONS: &[Action] = &[
     action("newClaudeTab", Group::Tabs, "New Claude tab", "ctrl-shift-t", "cmd-t"),
     action("newShellTab", Group::Tabs, "New shell tab", "ctrl-shift-alt-t", "cmd-alt-t"),
     action("nextTab", Group::Tabs, "Next tab", "ctrl-tab", "cmd-shift-]"),
     action("previousTab", Group::Tabs, "Previous tab", "ctrl-shift-tab", "cmd-shift-["),
-    action("moveTabLeft", Group::Tabs, "Move tab left", "ctrl-shift-pageup", "cmd-pageup"),
-    action("moveTabRight", Group::Tabs, "Move tab right", "ctrl-shift-pagedown", "cmd-pagedown"),
-    action(GO_TO_TAB, Group::Tabs, "Go to tab 1 … 9", "alt", "cmd"),
     action("splitRightClaude", Group::Panes, "Split right (Claude)", "ctrl-shift-d", "cmd-d"),
     action("splitRightShell", Group::Panes, "Split right (shell)", "ctrl-shift-alt-d", "cmd-alt-d"),
     action("splitDownClaude", Group::Panes, "Split down (Claude)", "ctrl-shift-e", "cmd-e"),
@@ -79,9 +76,6 @@ pub const ACTIONS: &[Action] = &[
     action("zoomOut", Group::Terminal, "Zoom out", "ctrl--", "cmd--"),
     action("zoomReset", Group::Terminal, "Reset zoom", "ctrl-0", "cmd-0"),
 ];
-
-/// The action whose value is a modifier set rather than a keystroke.
-pub const GO_TO_TAB: &str = "goToTab";
 
 /// Which defaults and labels apply. Windows uses `Linux`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,7 +195,7 @@ fn zoom_alias(platform: Platform) -> &'static str {
     }
 }
 
-/// The resolved bindings as (action id, keystroke). `goToTab` expands to its modifiers plus `1` to `9`. Fixed
+/// The resolved bindings as (action id, keystroke). Fixed
 /// aliases of defaults are included: `ctrl-+` for Zoom in, and on macOS `ctrl-tab` / `ctrl-shift-tab` for the tab
 /// keys. Actions the user set to `null` have none.
 pub fn bindings(overrides: &BTreeMap<String, Option<String>>, platform: Platform) -> Vec<(&'static str, String)> {
@@ -209,10 +203,6 @@ pub fn bindings(overrides: &BTreeMap<String, Option<String>>, platform: Platform
     for entry in ACTIONS {
         let Some(keystroke) = current(entry.id, overrides, platform) else { continue };
         let on_default = default_of(entry, platform) == Some(keystroke.as_str());
-        if entry.id == GO_TO_TAB {
-            out.extend((1..=9).map(|n| (entry.id, format!("{keystroke}-{n}"))));
-            continue;
-        }
         out.push((entry.id, keystroke));
         let alias = match entry.id {
             "zoomIn" => Some(zoom_alias(platform)),
@@ -241,11 +231,10 @@ pub enum Check {
 }
 
 /// Whether `keystroke` (GPUI syntax, e.g. `ctrl-shift-d`) is usable for `action`, given the `current` resolved
-/// bindings. For `goToTab` the keystroke is a modifier set (`alt`, `ctrl-alt`).
+/// bindings.
 pub fn check(keystroke: &str, action: &str, current: &[(&'static str, String)]) -> Check {
     let Some(parsed) = parse(keystroke) else { return Check::Invalid };
-    let modifier_set = action == GO_TO_TAB;
-    if parsed.key.is_empty() != modifier_set {
+    if parsed.key.is_empty() {
         return Check::Invalid;
     }
     if matches!(keystroke, "escape" | "tab" | "shift-tab" | "enter" | "backspace") {
@@ -258,12 +247,8 @@ pub fn check(keystroke: &str, action: &str, current: &[(&'static str, String)]) 
     if parsed.ctrl && !parsed.alt && !parsed.shift && !parsed.cmd && letter {
         return Check::Reserved("belongs to the terminal");
     }
-    let wanted: Vec<String> = if modifier_set {
-        (1..=9).map(|n| format!("{}-{n}", parsed.canonical())).collect()
-    } else {
-        vec![parsed.canonical()]
-    };
-    let clash = current.iter().find(|(id, bound)| *id != action && wanted.contains(&canonical(bound)));
+    let wanted = parsed.canonical();
+    let clash = current.iter().find(|(id, bound)| *id != action && canonical(bound) == wanted);
     match clash {
         Some((id, _)) => Check::Conflict(id),
         None => Check::Ok,
@@ -334,7 +319,7 @@ mod tests {
             ("splitRightShell", "ctrl-shift-alt-d"), ("splitDownClaude", "ctrl-shift-e"), ("splitDownShell", "ctrl-shift-alt-e"),
             ("closePane", "ctrl-shift-w"), ("focusLeft", "ctrl-shift-left"), ("focusRight", "ctrl-shift-right"),
             ("focusUp", "ctrl-shift-up"), ("focusDown", "ctrl-shift-down"), ("previousTab", "ctrl-shift-tab"),
-            ("nextTab", "ctrl-tab"), ("moveTabLeft", "ctrl-shift-pageup"), ("moveTabRight", "ctrl-shift-pagedown"),
+            ("nextTab", "ctrl-tab"),
             ("toggleSidebar", "ctrl-shift-b"), ("findSession", "ctrl-shift-f"), ("openLauncher", "ctrl-shift-o"),
             ("openRecents", "ctrl-shift-r"), ("openSettings", "ctrl-,"), ("copy", "ctrl-shift-c"), ("paste", "ctrl-shift-v"),
             ("zoomIn", "ctrl-="), ("zoomOut", "ctrl--"), ("zoomReset", "ctrl-0"),
@@ -342,7 +327,7 @@ mod tests {
         for (id, key) in expected {
             assert_eq!(ks(&linux, id).first().map(String::as_str), Some(key), "{id}");
         }
-        assert_eq!(linux.len(), expected.len() + 9 + 1, "25 single bindings, 9 tab numbers, the zoom alias");
+        assert_eq!(linux.len(), expected.len() + 1, "23 single bindings, the zoom alias");
         let mac = bindings(&none(), Platform::MacOs);
         assert_eq!(ks(&mac, "nextTab"), ["cmd-shift-]", "ctrl-tab"]);
         assert_eq!(ks(&mac, "previousTab"), ["cmd-shift-[", "ctrl-shift-tab"]);
@@ -359,12 +344,16 @@ mod tests {
     }
 
     #[test]
-    fn go_to_tab_expands() {
-        let linux = bindings(&none(), Platform::Linux);
-        assert_eq!(ks(&linux, GO_TO_TAB), ["alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9"]);
-        let changed = bindings(&of(&[(GO_TO_TAB, Some("ctrl-alt"))]), Platform::Linux);
-        assert_eq!(ks(&changed, GO_TO_TAB)[0], "ctrl-alt-1");
-        assert_eq!(bindings(&none(), Platform::MacOs).iter().find(|(id, _)| *id == GO_TO_TAB).unwrap().1, "cmd-1");
+    fn old_tab_ids_in_settings_are_ignored() {
+        let overrides: BTreeMap<String, Option<String>> = [
+            ("goToTab".to_string(), Some("alt".to_string())),
+            ("moveTabLeft".to_string(), Some("ctrl-shift-pageup".to_string())),
+            ("toggleSidebar".to_string(), Some("ctrl-alt-s".to_string())),
+        ]
+        .into();
+        let bound = bindings(&overrides, Platform::Linux);
+        assert!(bound.iter().all(|(id, _)| !matches!(*id, "goToTab" | "moveTabLeft" | "moveTabRight")));
+        assert!(bound.iter().any(|(id, key)| *id == "toggleSidebar" && key == "ctrl-alt-s"));
     }
 
     #[test]
@@ -400,7 +389,6 @@ mod tests {
             assert!(matches!(check(key, "closePane", &now), Check::Reserved(_)), "{key}");
         }
         assert!(matches!(check("alt", "newClaudeTab", &now), Check::Invalid));
-        assert!(matches!(check("shift", GO_TO_TAB, &now), Check::Reserved(_)));
     }
 
     #[test]
@@ -410,9 +398,6 @@ mod tests {
         assert_eq!(check("shift-ctrl-r", "closePane", &now), Check::Conflict("openRecents"), "order does not matter");
         assert_eq!(check("ctrl-shift-r", "openRecents", &now), Check::Ok, "its own key");
         assert_eq!(check("ctrl-+", "closePane", &now), Check::Conflict("zoomIn"));
-        assert_eq!(check("alt-3", "closePane", &now), Check::Conflict(GO_TO_TAB));
-        let with_alt_1 = bindings(&of(&[("toggleSidebar", Some("alt-1"))]), Platform::Linux);
-        assert_eq!(check("alt", GO_TO_TAB, &with_alt_1), Check::Conflict("toggleSidebar"));
     }
 
     #[test]
@@ -421,8 +406,6 @@ mod tests {
         for key in ["ctrl-alt-s", "ctrl-shift-j", "alt-x", "ctrl-f5", "ctrl-shift-home", "cmd-k", "ctrl-."] {
             assert_eq!(check(key, "toggleSidebar", &now), Check::Ok, "{key}");
         }
-        assert_eq!(check("ctrl-alt", GO_TO_TAB, &now), Check::Ok);
-        assert_eq!(check("alt", GO_TO_TAB, &now), Check::Ok);
     }
 
     #[test]
@@ -431,7 +414,7 @@ mod tests {
         for key in ["", "ctrl-", "ctrl-banana", "ctrl-ctrl-a", "ctrl-shift", "f99"] {
             assert_eq!(check(key, "toggleSidebar", &now), Check::Invalid, "{key:?}");
         }
-        assert_eq!(check("ctrl-alt-s", GO_TO_TAB, &now), Check::Invalid, "a modifier set has no key");
+        assert_eq!(check("ctrl-alt", "toggleSidebar", &now), Check::Invalid, "a modifier set has no key");
     }
 
     #[test]
