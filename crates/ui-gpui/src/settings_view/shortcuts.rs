@@ -1,16 +1,19 @@
-//! The Shortcuts section: every rebindable action with its keystroke, a recorder, and the "Replace?" card.
+//! The Shortcuts section: every rebindable action with its keystroke, a recorder, and the "Replace?" and "Use anyway?"
+//! cards.
 
 use app_core::settings::Settings;
 use app_core::shortcuts::{self, ACTIONS, Action, Check, Group, Platform};
 use gpui::{Context, Div, FontWeight, Keystroke, Window, div, px, rgb, rgba};
 
 use super::*;
+use crate::hover_card::{self, HoverCard};
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
 
 const GROUPS: [Group; 5] = [Group::Tabs, Group::Panes, Group::Focus, Group::Overlays, Group::Terminal];
 
-/// A keystroke another action has, waiting for the user to say whether it may be taken over.
+/// A keystroke waiting for the user's yes: another action has it (`other` is that action), or programs in the
+/// terminal use it (`other` is why).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Replace {
     id: &'static str,
@@ -79,6 +82,23 @@ fn shown(settings: &Settings, action: &Action, platform: Platform) -> String {
     shortcuts::label(shortcuts::current(action.id, &settings.shortcuts, platform).as_deref(), platform)
 }
 
+/// The `!` badge of a key taken from the terminal, in the Needs input colours.
+fn warn_mark(theme: &Theme) -> Div {
+    let colors = theme.tone(Tone::NeedsInput);
+    div()
+        .flex_none()
+        .size(theme.ui(15.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(colors.fill.unwrap_or(colors.dot)))
+        .text_color(rgb(colors.ink))
+        .text_size(theme.ui(10.))
+        .font_weight(FontWeight::BOLD)
+        .child("!")
+}
+
 fn label_of(id: &str) -> &'static str {
     ACTIONS.iter().find(|action| action.id == id).map_or("", |action| action.label)
 }
@@ -122,8 +142,8 @@ impl SettingsView {
                 SettingsStore::update(cx, |settings| store_shortcut(settings, id, Some(text), platform));
             }
             Check::Reserved(reason) => {
-                let shown = shortcuts::label(Some(&text), platform);
-                self.shortcut_message = Some((id, format!("{shown} {reason}. Press other keys, or Esc.")));
+                self.recording = None;
+                self.pending_take = Some(Replace { id, keystroke: text, other: reason });
             }
             Check::Conflict(other) => {
                 self.recording = None;
@@ -207,12 +227,16 @@ impl SettingsView {
             this.recording = Some(id);
             this.shortcut_message = None;
             this.pending_replace = None;
+            this.pending_take = None;
             cx.notify();
         });
+        // A key taken from the terminal is marked: amber outline and `!`.
+        let taken = !recording && shortcuts::current(id, &settings.shortcuts, platform).is_some_and(|keystroke| shortcuts::takes_from_terminal(&keystroke));
+        let warn = theme.tone(Tone::NeedsInput).dot;
         let key_text = if recording { "Press keys…".to_string() } else { shown(settings, action, platform) };
         let key_ink = if recording { theme.tokens.accent } else if unset { theme.tokens.muted } else { theme.tokens.text };
         let key = self
-            .pressable("shortcut", index, Some(if recording { theme.tokens.accent } else { theme.tokens.line }), window, cx, record)
+            .pressable("shortcut", index, Some(if recording { theme.tokens.accent } else if taken { warn } else { theme.tokens.line }), window, cx, record)
             .h(theme.ui(28.))
             .min_w(theme.ui(120.))
             .px(theme.ui(10.))
@@ -225,6 +249,11 @@ impl SettingsView {
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(key_ink))
             .whitespace_nowrap()
+            .gap(theme.ui(6.))
+            .when(taken, |key| {
+                let card = HoverCard { title: "Taken from the terminal".into(), status: Some("Programs there no longer get it.".into()), dir: None, container: false, folder: None };
+                key.tooltip(hover_card::tooltip(card)).child(warn_mark(theme))
+            })
             .child(key_text);
         let reset = self.reset_button("shortcut-reset", index, changed, change(move |settings| {
             settings.shortcuts.remove(id);
@@ -288,7 +317,52 @@ impl SettingsView {
                 .child(div().text_sm().text_color(rgb(theme.tokens.muted)).child(format!("Replace it? “{other}” will have no shortcut until you set one.")))
                 .child(div().flex().flex_wrap().justify_end().gap(theme.ui(8.)).child(cancel).child(confirm))
         });
-        div().flex().flex_col().child(row).children(message).children(replace)
+        let take = self.pending_take.clone().filter(|pending| pending.id == id).map(|pending| {
+            let shown = shortcuts::label(Some(&pending.keystroke), platform);
+            let cancel = handler(|this, _, cx| {
+                this.pending_take = None;
+                cx.notify();
+            });
+            let confirm = handler(move |this, _, cx| {
+                let Some(pending) = this.pending_take.take() else { return };
+                let current = shortcuts::bindings(&cx.global::<SettingsStore>().settings().shortcuts, platform);
+                match shortcuts::conflict(&pending.keystroke, pending.id, &current) {
+                    Some(other) => this.pending_replace = Some(Replace { other, ..pending }),
+                    None => SettingsStore::update(cx, |settings| store_shortcut(settings, pending.id, Some(pending.keystroke.clone()), platform)),
+                }
+                cx.notify();
+            });
+            let cancel = self.button("shortcut-take-cancel", index, "Cancel", window, cx, cancel);
+            let confirm = self
+                .pressable("shortcut-take", index, None, window, cx, confirm)
+                .h(theme.ui(34.))
+                .px(theme.ui(14.))
+                .flex()
+                .items_center()
+                .rounded(px(RADIUS_SMALL))
+                .bg(rgb(theme.tokens.accent))
+                .text_color(rgb(theme.tokens.on_accent))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_sm()
+                .child("Use anyway");
+            div()
+                .mx(theme.ui(16.))
+                .mb(theme.ui(12.))
+                .p(theme.ui(14.))
+                .flex()
+                .flex_col()
+                .gap(theme.ui(10.))
+                .rounded(px(RADIUS))
+                .bg(rgb(theme.tokens.raised))
+                .border_1()
+                .border_color(rgb(warn))
+                .child(div().flex().items_center().gap(theme.ui(8.)).child(warn_mark(theme)).child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{shown} {}.", pending.other))))
+                .child(div().text_sm().text_color(rgb(theme.tokens.muted)).child(format!(
+                    "Use it anyway? Programs in the terminal (your shell, Claude, vim…) will no longer receive {shown}."
+                )))
+                .child(div().flex().flex_wrap().justify_end().gap(theme.ui(8.)).child(cancel).child(confirm))
+        });
+        div().flex().flex_col().child(row).children(message).children(replace).children(take)
     }
 }
 

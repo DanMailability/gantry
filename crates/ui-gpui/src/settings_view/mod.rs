@@ -196,6 +196,8 @@ pub(crate) struct SettingsView {
     shortcut_message: Option<(&'static str, String)>,
     /// A key another action has, waiting for "Replace".
     pending_replace: Option<shortcuts::Replace>,
+    /// A key programs in the terminal use, waiting for "Use anyway".
+    pending_take: Option<shortcuts::Replace>,
     /// The Shortcuts page's filter field.
     shortcut_filter: TextField,
     filter_focus: FocusHandle,
@@ -237,6 +239,7 @@ impl SettingsView {
             recording: None,
             shortcut_message: None,
             pending_replace: None,
+            pending_take: None,
             shortcut_filter: TextField::default(),
             filter_focus: cx.focus_handle(),
             _keystrokes: keystrokes,
@@ -673,6 +676,7 @@ impl Render for SettingsView {
                 this.recording = None;
                 this.shortcut_message = None;
                 this.pending_replace = None;
+                this.pending_take = None;
                 this.body_scroll.set_offset(point(px(0.), px(0.)));
                 cx.notify();
             });
