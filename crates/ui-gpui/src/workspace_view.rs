@@ -16,7 +16,7 @@ use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    PathPromptOptions, Point, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
+    PathPromptOptions, Point, PromptLevel, Render, Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
 };
 use protocol::message::{ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
@@ -37,7 +37,8 @@ use crate::settings_view::SettingsView;
 use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
 use crate::window_frame;
 
-pub(crate) const TAB_BAR_HEIGHT: f32 = 48.0;
+/// Height of the title bar.
+pub(crate) const TITLE_BAR_HEIGHT: f32 = 36.0;
 /// Space between split panes (and around them).
 const PANE_GAP: f32 = 8.0;
 /// Width of the sidebar's drag edge.
@@ -53,9 +54,7 @@ mod workspace_actions {
         workspace,
         [
             NewClaudeTab, NewShellTab, SplitRightClaude, SplitRightShell, SplitDownClaude, SplitDownShell, ClosePane,
-            FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, MoveTabLeft, MoveTabRight,
-            ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6, ActivateTab7,
-            ActivateTab8, ActivateTab9, ToggleSidebar, FindSession, OpenLauncher,
+            FocusLeft, FocusRight, FocusUp, FocusDown, PreviousTab, NextTab, ToggleSidebar, FindSession, OpenLauncher,
             OpenRecents, OpenSettings
         ]
     );
@@ -79,20 +78,6 @@ fn workspace_binding(id: &str, key: &str) -> Option<gpui::KeyBinding> {
         "newShellTab" => KeyBinding::new(key, NewShellTab, context),
         "nextTab" => KeyBinding::new(key, NextTab, context),
         "previousTab" => KeyBinding::new(key, PreviousTab, context),
-        "moveTabLeft" => KeyBinding::new(key, MoveTabLeft, context),
-        "moveTabRight" => KeyBinding::new(key, MoveTabRight, context),
-        shortcuts::GO_TO_TAB => match key.rsplit('-').next()?.parse::<u8>().ok()? {
-            1 => KeyBinding::new(key, ActivateTab1, context),
-            2 => KeyBinding::new(key, ActivateTab2, context),
-            3 => KeyBinding::new(key, ActivateTab3, context),
-            4 => KeyBinding::new(key, ActivateTab4, context),
-            5 => KeyBinding::new(key, ActivateTab5, context),
-            6 => KeyBinding::new(key, ActivateTab6, context),
-            7 => KeyBinding::new(key, ActivateTab7, context),
-            8 => KeyBinding::new(key, ActivateTab8, context),
-            9 => KeyBinding::new(key, ActivateTab9, context),
-            _ => return None,
-        },
         "splitRightClaude" => KeyBinding::new(key, SplitRightClaude, context),
         "splitRightShell" => KeyBinding::new(key, SplitRightShell, context),
         "splitDownClaude" => KeyBinding::new(key, SplitDownClaude, context),
@@ -141,15 +126,9 @@ struct PendingOpen {
     cwd_from: Option<PaneId>,
 }
 
-/// What the tab bar draws for a tab: title, status, unseen alert, in a container, config dir name, is the Settings tab,
-/// project colour.
-type TabView = (String, Option<SessionStatus>, bool, bool, Option<DirBadge>, bool, Option<u32>);
-
 /// Root view of the Gantry window.
 pub struct WorkspaceView {
     workspace: Workspace,
-    /// The tab a middle-button press started on, until the button is released.
-    middle_pressed: Option<usize>,
     slots: HashMap<NodeId, Slot>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
@@ -181,6 +160,8 @@ pub struct WorkspaceView {
     recents: Option<(Entity<RecentsView>, Subscription)>,
     /// The Settings page, while its tab is open.
     settings: Option<Entity<SettingsView>>,
+    /// The leaf that had focus when Settings opened; closing Settings goes back to it.
+    before_settings: Option<NodeId>,
     /// The open right-click menu of a tab.
     tab_menu: Option<OpenMenu>,
     /// Take-over requests waiting for the daemon, by session.
@@ -230,6 +211,8 @@ impl WorkspaceView {
         let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
             this.on_sidebar_event(event.clone(), window, cx)
         });
+        // The title bar shows what the sidebar's rows say, so it redraws with them.
+        cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
         // Coming back to the window counts as seeing its visible tab.
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.clear_seen(window, cx);
@@ -273,8 +256,8 @@ impl WorkspaceView {
             launcher: None,
             recents: None,
             settings: None,
+            before_settings: None,
             tab_menu: None,
-            middle_pressed: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -484,10 +467,15 @@ impl WorkspaceView {
 
     /// The colour of the project `leaf` belongs to (its session's directory, else the pane's), if project colours are on.
     fn leaf_project_color(&self, leaf: NodeId, cx: &App) -> Option<u32> {
+        let cwd = self.leaf_cwd(leaf, cx)?;
+        theme(cx).project(&self.sidebar.read(cx).project_of(&cwd))
+    }
+
+    /// The directory `leaf` works in: its session's, else the pane's.
+    fn leaf_cwd(&self, leaf: NodeId, cx: &App) -> Option<PathBuf> {
         let entry = self.workspace.leaves.get(&leaf)?;
-        let sidebar = self.sidebar.read(cx);
-        let cwd = entry.session.as_deref().and_then(|id| sidebar.sessions().get(id)).map_or(entry.launch.cwd.as_path(), |info| info.cwd.as_path());
-        theme(cx).project(&sidebar.project_of(cwd))
+        let sessions = self.sidebar.read(cx).sessions();
+        Some(entry.session.as_deref().and_then(|id| sessions.get(id)).map_or(&entry.launch.cwd, |info| &info.cwd).clone())
     }
 
     /// Start `launch` in the finished `leaf`.
@@ -755,13 +743,6 @@ impl WorkspaceView {
         self.save(cx);
     }
 
-    fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace.select_tab(index) {
-            self.focus_current(window, cx);
-            self.save(cx);
-        }
-    }
-
     fn focus_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.focus(leaf) {
             self.focus_current(window, cx);
@@ -771,6 +752,8 @@ impl WorkspaceView {
 
     /// Give keyboard focus to the workspace's focused leaf (or the empty window).
     fn focus_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (open, active) = (self.workspace.settings_tab().is_some(), self.settings_active());
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_settings(open, active, cx));
         let settings = self.workspace.active_tab().is_some_and(|tab| tab.settings).then(|| self.settings.clone()).flatten();
         if let Some(settings) = settings {
             settings.focus_handle(cx).focus(window, cx);
@@ -801,7 +784,7 @@ impl WorkspaceView {
         self.sync_panes(cx);
     }
 
-    /// Tab `index`'s title as the tab bar and the sidebar show it: the focused pane's, without the Claude glyph
+    /// Tab `index`'s title as the title bar and the sidebar show it: the focused pane's, without the Claude glyph
     /// while the tab has a session status.
     fn tab_title(&self, index: usize, cx: &App) -> String {
         let Some(tab) = self.workspace.tabs.get(index) else { return String::new() };
@@ -979,6 +962,8 @@ impl WorkspaceView {
             SidebarEvent::New { claude } => self.open(claude, None),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
+            SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
+            SidebarEvent::CloseSettings => self.close_settings(window, cx),
         }
     }
 
@@ -1171,7 +1156,8 @@ impl WorkspaceView {
         self.focus_dir(Direction::Down, window, cx)
     }
     fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.cycle_tab(delta);
+        let order = self.sidebar.read(cx).leaf_order();
+        self.workspace.cycle_tab_in(&order, delta);
         self.focus_current(window, cx);
         self.save(cx);
     }
@@ -1181,45 +1167,11 @@ impl WorkspaceView {
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle(1, window, cx)
     }
-    fn move_tab_left(&mut self, _: &MoveTabLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.move_tab(-1);
-        self.save(cx);
-        cx.notify();
-    }
-    fn move_tab_right(&mut self, _: &MoveTabRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.move_tab(1);
-        self.save(cx);
-        cx.notify();
-    }
-    fn activate_tab_1(&mut self, _: &ActivateTab1, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(0, window, cx)
-    }
-    fn activate_tab_2(&mut self, _: &ActivateTab2, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(1, window, cx)
-    }
-    fn activate_tab_3(&mut self, _: &ActivateTab3, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(2, window, cx)
-    }
-    fn activate_tab_4(&mut self, _: &ActivateTab4, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(3, window, cx)
-    }
-    fn activate_tab_5(&mut self, _: &ActivateTab5, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(4, window, cx)
-    }
-    fn activate_tab_6(&mut self, _: &ActivateTab6, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(5, window, cx)
-    }
-    fn activate_tab_7(&mut self, _: &ActivateTab7, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(6, window, cx)
-    }
-    fn activate_tab_8(&mut self, _: &ActivateTab8, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(7, window, cx)
-    }
-    fn activate_tab_9(&mut self, _: &ActivateTab9, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab(8, window, cx)
-    }
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(leaf) = self.workspace.focused() {
+            self.before_settings = Some(leaf);
+        }
         self.workspace.open_settings();
         if self.settings.is_none() {
             self.settings = Some(cx.new(|cx| SettingsView::new(self.daemon_dir.clone(), window, cx)));
@@ -1231,7 +1183,11 @@ impl WorkspaceView {
 
     /// Close the Settings tab and drop its page; no confirmation, it runs nothing.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = self.settings_active();
         self.workspace.close_settings();
+        if let Some(leaf) = self.before_settings.take().filter(|_| showing) {
+            self.workspace.focus(leaf);
+        }
         self.settings = None;
         self.focus_current(window, cx);
         self.save(cx);
@@ -1301,37 +1257,16 @@ impl WorkspaceView {
         }
     }
 
-    /// A dragged tab was dropped on tab `to`: it takes that place.
-    fn drop_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        self.workspace.move_tab_to(from, to);
-        self.save(cx);
-        cx.notify();
-    }
-
-    fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let theme = theme(cx).clone();
-        let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
-        let sessions = self.sidebar.read(cx).sessions();
-        let tabs: Vec<TabView> = self
-            .workspace
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                let title = self.tab_title(index, cx);
-                let status = self.workspace.tab_status(index, sessions).cloned();
-                let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
-                let container = self.workspace.leaves.get(&tab.focused).is_some_and(|leaf| leaf.launch.container.is_some());
-                let dir = self.leaf_dir_badge(tab.focused, cx);
-                let project = if tab.settings { None } else { self.leaf_project_color(tab.focused, cx) };
-                (title, status, unseen, container, dir, tab.settings, project)
-            })
-            .collect();
+        let waiting = self.sidebar.read(cx).needs_input().len();
+        let pill_colors = theme.tone(Tone::NeedsInput);
         let sidebar = &self.workspace.sidebar;
+        let spacer = div().id("drag-area").flex_1().min_w(theme.ui(40.)).h_full();
         div()
-            .id("tab-bar")
-            .h(theme.ui(TAB_BAR_HEIGHT))
+            .id("title-bar")
+            .h(theme.ui(TITLE_BAR_HEIGHT))
             .w_full()
             .flex_none()
             .flex()
@@ -1343,134 +1278,45 @@ impl WorkspaceView {
             .border_color(rgb(theme.tokens.line))
             .text_sm()
             .map(|bar| {
+                // The brand keeps the sidebar's width; the focused session starts where the panes do.
+                let brand = div().id("brand").flex_none().h_full().flex().items_center().font_weight(FontWeight::BOLD).child("Gantry");
                 if sidebar.visible {
-                    // The brand sits above the sidebar; the tabs start where the panes do.
-                    let brand = div()
-                        .id("brand")
-                        .flex_none()
-                        .h_full()
-                        .w(theme.ui(sidebar.width) + px(SIDEBAR_EDGE))
-                        .pl(theme.ui(18.))
-                        .flex()
-                        .items_center()
-                        .font_weight(FontWeight::BOLD)
-                        .child("Gantry");
+                    let brand = brand.w(theme.ui(sidebar.width) + px(SIDEBAR_EDGE)).pl(theme.ui(18.));
                     bar.child(if client_decorations { moves_window(brand) } else { brand })
                 } else {
-                    bar.pl_2()
+                    bar.pl_2().child(if client_decorations { moves_window(brand) } else { brand })
                 }
             })
-            // The tabs scroll sideways when even their narrowest widths don't fit, so the buttons and window
-            // controls after them stay visible.
-            .child(div().id("tabs").min_w_0().flex_shrink(1.).h_full().flex().flex_row().items_center().gap(theme.ui(6.)).overflow_x_scroll().children(tabs.into_iter().enumerate().map(|(index, (title, status, unseen, container, dir, settings, project))| {
-                let dragged = DraggedTab { index, title: title.clone() };
-                let line = theme.tokens.line;
-                let active = index == self.workspace.active;
-                // Claude tabs are filled with what their most urgent session needs; shells stay plain.
-                let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
-                // The Settings tab stands out: light on Mist, dark on Mist light.
-                let ink = if settings {
-                    theme.tokens.ground
-                } else {
-                    colors.map_or(if active { theme.tokens.text } else { theme.tokens.muted }, |colors| colors.ink)
-                };
-                let fill = if settings { Some(theme.tokens.text) } else { colors.and_then(|colors| colors.fill).or(active.then_some(theme.tokens.raised)) };
-                let can_drag = self.workspace.can_drag(index);
-                let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
-                let card = HoverCard {
-                    title: title.clone(),
-                    status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
-                    dir: dir.clone(),
-                    container,
-                    folder: self
-                        .workspace
-                        .tabs
-                        .get(index)
-                        .and_then(|tab| self.workspace.leaves.get(&tab.focused))
-                        .map(|leaf| display_path(&leaf.launch.cwd, std::env::home_dir().as_deref())),
-                };
-                div()
-                    .id(("tab", index))
-                    .when(!settings, |tab| tab.tooltip(hover_card::tooltip(card)))
-                    .relative()
-                    .h(theme.ui(32.))
-                    .when(project.is_some(), |tab| tab.pl(theme.ui(16.)))
-                    .when(project.is_none(), |tab| tab.pl_3())
-                    .pr_1()
-                    .max_w(theme.ui(220.))
-                    // Tabs shrink (titles truncate, tags clip away) down to what the dot, a short title and × need.
-                    .min_w(theme.ui(if colors.is_some() || settings { 96. } else { 80. }))
-                    .flex_shrink(1.)
-                    .overflow_hidden()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded(px(RADIUS - 2.))
-                    .border_2()
-                    .border_color(if active { rgb(theme.tokens.accent) } else { rgba(0) })
-                    .text_color(rgb(ink))
-                    .when(active, |tab| tab.font_weight(FontWeight::SEMIBOLD))
-                    .when_some(fill, |tab, fill| tab.bg(rgb(fill)))
-                    .when(fill.is_none(), |tab| tab.hover(|style| style.bg(rgb(theme.tokens.raised))))
-                    .cursor_pointer()
-                    .when(sweep, |tab| tab.child(working_sweep(("sweep-tab", index), px(RADIUS - 2.), &theme)))
-                    .when_some(project, |tab, color| tab.child(side_line(color, &theme)))
-                    .when(settings, |tab| tab.child(div().flex_none().child("⚙")))
-                    .child(div().min_w(theme.ui(24.)).truncate().child(title))
-                    .when(container, |tab| tab.child(container_icon(ink, &theme)))
-                    .children(dir.map(|badge| dir_badge(&badge, &theme)))
-                    .child(
-                        div()
-                            .id(("close-tab", index))
-                            .flex_none()
-                            .size(theme.ui(20.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .text_xs()
-                            .hover(|style| style.bg(rgba(0x00000026)))
-                            .child("×")
-                            // Pressing × must not start dragging the tab.
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close_tab_at(index, window, cx);
-                            })),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
-                    .when(can_drag, |tab| tab.on_drag(dragged, |tab: &DraggedTab, _offset, _window, cx: &mut App| cx.new(|_| tab.clone())))
-                    // A middle click closes the tab, like ×; it must not start a drag or select the tab.
-                    .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
-                        this.middle_pressed = Some(index);
-                        cx.stop_propagation();
-                    }))
-                    .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        if this.middle_pressed.take() == Some(index) {
-                            this.close_tab_at(index, window, cx);
-                        }
-                    }))
-                    .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(line)))
-                    .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.drop_tab(dragged.index, index, cx)))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.open_tab_menu(index, event.position, window, cx);
-                            // Keep focus on the menu: the workspace's tracked focus must not take it back.
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }),
-                    )
-            })))
+            .child(self.render_title_session(window, cx))
+            .child(if client_decorations { moves_window(spacer) } else { spacer })
+            .when(waiting > 0, |bar| {
+                bar.child(
+                    div()
+                        .id("need-input")
+                        .flex_none()
+                        .h(theme.ui(24.))
+                        .px(theme.ui(10.))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(pill_colors.ink))
+                        .when_some(pill_colors.fill, |pill, fill| pill.bg(rgb(fill)))
+                        .cursor_pointer()
+                        .child(format!("{} {}", waiting, if waiting == 1 { "needs input" } else { "need input" }))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let next = this.sidebar.read(cx).next_needing_input(this.workspace.focused());
+                            if let Some(leaf) = next {
+                                this.focus_leaf(leaf, window, cx);
+                            }
+                        })),
+                )
+            })
             .child(round_button("new-claude", "+", &theme, cx.listener(|this, _, _, _| this.open(true, None))))
             .child(round_button("open-settings", "⚙", &theme, cx.listener(|this, _, window, cx| this.open_settings(&OpenSettings, window, cx))))
-            .when(!client_decorations, |bar| bar.child(div().flex_1().h_full()))
             .when(client_decorations, |bar| {
-                bar.child(
-                    moves_window(div().id("drag-area").flex_1().min_w(theme.ui(40.)).h_full()),
-                )
-                .child(window_frame::window_controls(
+                bar.child(window_frame::window_controls(
                     window,
                     &theme,
                     cx.listener(|this, _, window, cx| {
@@ -1480,6 +1326,100 @@ impl WorkspaceView {
                     }),
                 ))
             })
+    }
+
+    /// The middle of the title bar: `Settings`, or the project and the focused session's chip.
+    fn render_title_session(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = theme(cx).clone();
+        let middle = div().min_w_0().flex_shrink(1.).flex().flex_row().items_center().gap(theme.ui(8.));
+        let Some(tab) = self.workspace.active_tab() else { return middle };
+        if tab.settings {
+            // With the sidebar hidden its row is gone, so the bar closes Settings.
+            return middle.font_weight(FontWeight::SEMIBOLD).child("Settings").when(!self.workspace.sidebar.visible, |middle| {
+                middle.child(
+                    div()
+                        .id("close-settings")
+                        .flex_none()
+                        .size(theme.ui(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .text_xs()
+                        .font_weight(FontWeight::NORMAL)
+                        .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                        .cursor_pointer()
+                        .child("×")
+                        .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx))),
+                )
+            });
+        }
+        let index = self.workspace.active;
+        let leaf = tab.focused;
+        let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
+        let title = self.sidebar.read(cx).leaf_title(leaf).unwrap_or_else(|| self.tab_title(index, cx));
+        let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
+        let unseen = self.unseen.contains_key(&leaf);
+        let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());
+        let dir = self.leaf_dir_badge(leaf, cx);
+        let cwd = self.leaf_cwd(leaf, cx);
+        let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
+        let ink = colors.map_or(theme.tokens.text, |colors| colors.ink);
+        let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
+        let card = HoverCard {
+            title: title.clone(),
+            status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
+            dir: dir.clone(),
+            container,
+            folder: cwd.as_deref().map(|cwd| display_path(cwd, std::env::home_dir().as_deref())),
+        };
+        let sidebar = self.sidebar.read(cx);
+        let project = cwd.as_deref().map(|cwd| {
+            let root = sidebar.project_of(cwd);
+            let label = sidebar.project_label(&root).unwrap_or_else(|| root.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()));
+            (label, theme.project(&root).unwrap_or(theme.tokens.muted))
+        });
+        middle
+            .children(project.map(|(label, color)| {
+                div()
+                    .min_w_0()
+                    .max_w(theme.ui(240.))
+                    .flex()
+                    .gap(theme.ui(8.))
+                    .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_color(rgb(color)).child(label))
+                    .child(div().flex_none().text_color(rgb(theme.tokens.muted)).child("›"))
+            }))
+            .child(
+                div()
+                    .id("title-chip")
+                    .tooltip(hover_card::tooltip(card))
+                    .relative()
+                    .h(theme.ui(26.))
+                    .px(theme.ui(10.))
+                    .min_w_0()
+                    .flex_shrink(1.)
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(RADIUS_SMALL))
+                    .text_color(rgb(ink))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when_some(colors.and_then(|colors| colors.fill), |chip, fill| chip.bg(rgb(fill)))
+                    .when(sweep, |chip| chip.child(working_sweep("sweep-title", px(RADIUS_SMALL), &theme)))
+                    .child(div().min_w_0().truncate().child(title))
+                    .when(container, |chip| chip.child(container_icon(ink, &theme)))
+                    .children(dir.map(|badge| dir_badge(&badge, &theme)))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_tab_menu(index, event.position, window, cx);
+                            // Keep focus on the menu: the workspace's tracked focus must not take it back.
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
     }
 
     fn render_active_tab(&self, animate: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1664,7 +1604,7 @@ fn pane_header(
         .children(dir.map(|badge| dir_badge(&badge, theme)))
 }
 
-/// Title-bar behaviour for an empty stretch of the tab bar (client-side decorations): drag moves the window,
+/// Title-bar behaviour for an empty stretch of the title bar (client-side decorations): drag moves the window,
 /// double-click maximizes, right-click opens the window menu.
 fn moves_window(area: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
     area.on_mouse_down(MouseButton::Left, |event, window, _| {
@@ -1677,7 +1617,7 @@ fn moves_window(area: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
     .on_mouse_down(MouseButton::Right, |event, window, _| window.show_window_menu(event.position))
 }
 
-/// A small round icon button in the tab bar.
+/// A small round icon button in the title bar.
 pub(crate) fn round_button(
     id: &'static str,
     label: &'static str,
@@ -1762,17 +1702,6 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::focus_down))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::next_tab))
-            .on_action(cx.listener(Self::move_tab_left))
-            .on_action(cx.listener(Self::move_tab_right))
-            .on_action(cx.listener(Self::activate_tab_1))
-            .on_action(cx.listener(Self::activate_tab_2))
-            .on_action(cx.listener(Self::activate_tab_3))
-            .on_action(cx.listener(Self::activate_tab_4))
-            .on_action(cx.listener(Self::activate_tab_5))
-            .on_action(cx.listener(Self::activate_tab_6))
-            .on_action(cx.listener(Self::activate_tab_7))
-            .on_action(cx.listener(Self::activate_tab_8))
-            .on_action(cx.listener(Self::activate_tab_9))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::find_session))
             .on_action(cx.listener(Self::open_launcher))
@@ -1786,7 +1715,6 @@ impl Render for WorkspaceView {
                 }
             }))
             .on_mouse_move(cx.listener(Self::drag_sidebar))
-            .on_mouse_up(MouseButton::Middle, cx.listener(|this, _, _, _| this.middle_pressed = None))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if std::mem::take(&mut this.resizing_sidebar) {
                     this.save(cx);
@@ -1799,7 +1727,7 @@ impl Render for WorkspaceView {
             .bg(rgb(theme.tokens.ground))
             .text_color(rgb(theme.tokens.text))
             .font_family(UI_FONT)
-            .child(self.render_tab_bar(window, cx))
+            .child(self.render_title_bar(window, cx))
             .child(body)
             .when_some(self.launcher.as_ref().map(|(view, _)| view.clone()), |root, view| {
                 root.child(
@@ -1833,32 +1761,6 @@ impl Render for WorkspaceView {
                 ))
             });
         window_frame::frame(window, theme.tokens.line, root)
-    }
-}
-
-/// A tab being dragged: its index, and the title its floating copy shows.
-#[derive(Clone)]
-struct DraggedTab {
-    index: usize,
-    title: String,
-}
-
-impl Render for DraggedTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme(cx).clone();
-        div()
-            .h(theme.ui(32.))
-            .px_3()
-            .flex()
-            .items_center()
-            .rounded(px(RADIUS - 2.))
-            .border_2()
-            .border_color(rgb(theme.tokens.accent))
-            .bg(rgb(theme.tokens.raised))
-            .text_sm()
-            .font_family(UI_FONT)
-            .text_color(rgb(theme.tokens.text))
-            .child(self.title.clone())
     }
 }
 
@@ -1914,10 +1816,6 @@ mod tests {
             ("ctrl-shift-down", "workspace::FocusDown"),
             ("ctrl-tab", "workspace::NextTab"),
             ("ctrl-shift-tab", "workspace::PreviousTab"),
-            ("ctrl-shift-pageup", "workspace::MoveTabLeft"),
-            ("ctrl-shift-pagedown", "workspace::MoveTabRight"),
-            ("alt-1", "workspace::ActivateTab1"),
-            ("alt-9", "workspace::ActivateTab9"),
             ("ctrl-shift-b", "workspace::ToggleSidebar"),
             ("ctrl-shift-f", "workspace::FindSession"),
             ("ctrl-shift-o", "workspace::OpenLauncher"),
@@ -1930,7 +1828,7 @@ mod tests {
 
     #[test]
     fn plain_control_keys_stay_with_the_pane() {
-        for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab", "tab"] {
+        for keys in ["ctrl-c", "ctrl-r", "ctrl-d", "ctrl-w", "escape", "shift-tab", "tab", "alt-1"] {
             assert_eq!(action_for(keys), None, "{keys}");
         }
     }
@@ -1945,7 +1843,7 @@ mod tests {
     fn no_default_binding_is_reserved() {
         let bindings = shortcuts::bindings(&Default::default(), Platform::Linux);
         for (id, key) in &bindings {
-            if *id == shortcuts::GO_TO_TAB || key == "ctrl-+" {
+            if key == "ctrl-+" {
                 continue;
             }
             assert!(!matches!(shortcuts::check(key, id, &[]), shortcuts::Check::Reserved(_)), "{id} {key}");
@@ -1974,12 +1872,8 @@ mod tests {
     }
 
     #[test]
-    fn go_to_tab_follows_its_modifiers_and_terminal_actions_are_bound() {
-        let mut settings = Settings::default();
-        settings.shortcuts.insert("goToTab".into(), Some("ctrl-alt".into()));
-        let bindings = all_bindings(&settings, Platform::Linux);
-        assert_eq!(action_in(&bindings, "ctrl-alt-4"), Some("workspace::ActivateTab4"));
-        assert_eq!(action_in(&bindings, "alt-4"), None);
+    fn terminal_actions_are_bound() {
+        let bindings = all_bindings(&Settings::default(), Platform::Linux);
         assert_eq!(action_in(&bindings, "ctrl-shift-c"), Some("terminal::Copy"));
         assert_eq!(action_in(&bindings, "ctrl-="), Some("terminal::ZoomIn"));
     }

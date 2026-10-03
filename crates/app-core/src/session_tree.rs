@@ -127,9 +127,9 @@ impl ProjectOrder {
 /// One tab of the layout, for grouping split tabs in the Active list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabEntry {
-    /// Position in the tab bar (0-based; shown as `index + 1`).
+    /// Index in the workspace's tabs.
     pub index: usize,
-    /// Its title, as the tab bar shows it.
+    /// Its title, as the title bar shows it.
     pub title: String,
     /// The leaf with focus in it.
     pub focused: NodeId,
@@ -252,9 +252,9 @@ pub enum RowKind {
     },
     /// A tab with more than one pane; its panes follow it (with `in_tab`).
     Tab {
-        /// Position in the tab bar (0-based).
+        /// Index in the workspace's tabs.
         index: usize,
-        /// Its title, as the tab bar shows it.
+        /// Its title, as the title bar shows it.
         title: String,
         /// How many panes it has.
         panes: usize,
@@ -680,6 +680,68 @@ pub fn row_of_leaf(rows: &[Row], leaf: NodeId) -> Option<usize> {
         RowKind::Session { leaf: Some(shown), .. } => *shown == leaf,
         RowKind::Pane { entry, .. } => entry.leaf == leaf,
         _ => false,
+    })
+}
+
+/// The leaf of a row: a pane's, a session's in a pane, or a split tab heading's first leaf.
+fn row_leaf(row: &Row) -> Option<NodeId> {
+    match &row.kind {
+        RowKind::Session { leaf, .. } => *leaf,
+        RowKind::Pane { entry, .. } => Some(entry.leaf),
+        RowKind::Tab { first, .. } => Some(*first),
+        _ => None,
+    }
+}
+
+/// Every leaf listed in `rows`, top to bottom, once each (the tab order of Ctrl+Tab).
+pub fn leaves_in_order(rows: &[Row]) -> Vec<NodeId> {
+    let mut leaves = Vec::new();
+    for leaf in rows.iter().filter_map(row_leaf) {
+        if !leaves.contains(&leaf) {
+            leaves.push(leaf);
+        }
+    }
+    leaves
+}
+
+/// Leaves whose session needs input, top to bottom (sessions outside Gantry have no leaf and are left out).
+pub fn needs_input_leaves(rows: &[Row]) -> Vec<NodeId> {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::Session { tone: Tone::NeedsInput, leaf, .. } => *leaf,
+            _ => None,
+        })
+        .collect()
+}
+
+/// The first leaf needing input after `focused` in list order, wrapping around (`focused` itself when it is the only one).
+pub fn next_needing_input(rows: &[Row], focused: Option<NodeId>) -> Option<NodeId> {
+    let waiting = needs_input_leaves(rows);
+    let order = leaves_in_order(rows);
+    let at = focused.and_then(|leaf| order.iter().position(|l| *l == leaf));
+    let place = |leaf: &NodeId| order.iter().position(|l| l == leaf).unwrap_or(usize::MAX);
+    match at {
+        Some(at) => waiting.iter().find(|leaf| place(leaf) > at).or(waiting.first()).copied(),
+        None => waiting.first().copied(),
+    }
+}
+
+/// The title of the row showing `leaf`, as the sidebar shows it.
+pub fn leaf_title(rows: &[Row], leaf: NodeId) -> Option<String> {
+    let row = &rows[row_of_leaf(rows, leaf)?];
+    match &row.kind {
+        RowKind::Session { session, .. } => Some(session_title(session).to_string()),
+        RowKind::Pane { entry, .. } if entry.claude => Some("New session".to_string()),
+        RowKind::Pane { entry, .. } => Some(entry.title.clone()),
+        _ => None,
+    }
+}
+
+/// The label of the project heading for `root`.
+pub fn project_label(rows: &[Row], root: &Path) -> Option<String> {
+    rows.iter().find_map(|row| match &row.kind {
+        RowKind::Project { path, label, .. } if path == root => Some(label.clone()),
+        _ => None,
     })
 }
 
@@ -1256,5 +1318,67 @@ mod tests {
         let heading = row_of(&rows, &RowKey::Tab(1));
         assert!(heading.selectable());
         assert_eq!(heading.activation(), Activation::FocusLeaf(2));
+    }
+
+    fn waiting(id: &str, cwd: &str) -> SessionInfo {
+        with(managed(id, cwd, NOW - 1000), SessionStatus::NeedsInput { reason: None })
+    }
+
+    #[test]
+    fn leaves_in_order_lists_each_pane_once_and_a_split_tab_by_its_rows() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha"), shell_pane(3, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 2, &[2, 1]), tab(1, 3, &[3])];
+        let rows = fixture.rows();
+        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Leaf(3), RowKey::Tab(2), RowKey::Leaf(2), RowKey::Leaf(1)]);
+        assert_eq!(leaves_in_order(&rows), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn needs_input_counts_only_gantry_panes() {
+        let busy = with(managed("b", "/r/alpha", NOW - 2000), SessionStatus::Busy);
+        let outside = with(external("e", "/r/alpha", NOW - 3000), SessionStatus::NeedsInput { reason: None });
+        let mut fixture = Fixture::of(
+            vec![waiting("w", "/r/alpha"), busy, outside],
+            vec![pane(1, "/r/alpha", Some("w")), pane(2, "/r/alpha", Some("b"))],
+        );
+        let rows = fixture.rows();
+        assert_eq!(needs_input_leaves(&rows), vec![1]);
+    }
+
+    #[test]
+    fn next_needing_input_wraps_and_stays_on_the_only_one() {
+        let mut fixture = Fixture::of(
+            vec![waiting("x", "/r/alpha"), waiting("y", "/r/alpha")],
+            vec![pane(1, "/r/alpha", Some("x")), pane(2, "/r/alpha", Some("y"))],
+        );
+        let rows = fixture.rows();
+        let (x, y) = (needs_input_leaves(&rows)[0], needs_input_leaves(&rows)[1]);
+        assert_eq!(next_needing_input(&rows, Some(x)), Some(y));
+        assert_eq!(next_needing_input(&rows, Some(y)), Some(x));
+        assert_eq!(next_needing_input(&rows, None), Some(x));
+        let mut one = Fixture::of(vec![waiting("x", "/r/alpha")], vec![pane(1, "/r/alpha", Some("x"))]);
+        let rows = one.rows();
+        assert_eq!(next_needing_input(&rows, Some(1)), Some(1));
+        let mut none = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha")]);
+        assert_eq!(next_needing_input(&none.rows(), Some(1)), None);
+    }
+
+    #[test]
+    fn project_label_is_the_heading_label() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha")]);
+        let rows = fixture.rows();
+        assert_eq!(project_label(&rows, Path::new("/r/alpha")).as_deref(), Some("alpha"));
+        assert_eq!(project_label(&rows, Path::new("/r/none")), None);
+    }
+
+    #[test]
+    fn leaf_title_is_the_row_title() {
+        let w = waiting("w", "/r/alpha");
+        let expected = session_title(&w).to_string();
+        let mut fixture = Fixture::of(vec![w], vec![pane(1, "/r/alpha", Some("w")), shell_pane(2, "/r/alpha")]);
+        let rows = fixture.rows();
+        assert_eq!(leaf_title(&rows, 1), Some(expected));
+        assert_eq!(leaf_title(&rows, 2), Some(shell_pane(2, "/r/alpha").title));
+        assert_eq!(leaf_title(&rows, 9), None);
     }
 }
