@@ -151,7 +151,8 @@ impl TextField {
         };
         let kind = class(c);
         let pivot = if offset < self.text.len() { offset } else { offset - c.len_utf8() };
-        let before = self.text[..pivot].chars().rev().take_while(|&c| class(c) == kind).map(char::len_utf8).sum::<usize>();
+        let before =
+            self.text[..pivot].chars().rev().take_while(|&c| class(c) == kind).map(char::len_utf8).sum::<usize>();
         let after = self.text[pivot..].chars().take_while(|&c| class(c) == kind).map(char::len_utf8).sum::<usize>();
         self.anchor = pivot - before;
         self.cursor = pivot + after;

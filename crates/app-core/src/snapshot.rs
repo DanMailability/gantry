@@ -191,16 +191,14 @@ mod tests {
         spacer.spacer = true;
         let row = vec![cell('a', 1), wide, spacer, cell('b', 1)];
         let spans = row_spans(&row);
-        let summary: Vec<_> =
-            spans.iter().map(|s| (s.start_col, s.width_cols, s.text.as_str(), s.wide)).collect();
+        let summary: Vec<_> = spans.iter().map(|s| (s.start_col, s.width_cols, s.text.as_str(), s.wide)).collect();
         assert_eq!(summary, vec![(0, 1, "a", false), (1, 2, "漢", true), (3, 1, "b", false)]);
     }
 
     #[test]
     fn rtl_chars_get_single_cell_spans() {
         let row: Vec<_> = "aשלום b".chars().map(|c| cell(c, 1)).collect();
-        let summary: Vec<_> =
-            row_spans(&row).iter().map(|s| (s.start_col, s.width_cols, s.text.clone())).collect();
+        let summary: Vec<_> = row_spans(&row).iter().map(|s| (s.start_col, s.width_cols, s.text.clone())).collect();
         let expected: Vec<_> = [(0, 1, "a"), (1, 1, "ש"), (2, 1, "ל"), (3, 1, "ו"), (4, 1, "ם"), (5, 2, " b")]
             .into_iter()
             .map(|(c, w, t)| (c, w, t.to_string()))
@@ -220,10 +218,11 @@ mod tests {
     #[test]
     fn fallback_symbols_get_their_own_span() {
         let row: Vec<_> = "a⏺✓b".chars().map(|c| cell(c, 1)).collect();
-        let summary: Vec<_> =
-            row_spans(&row).iter().map(|s| (s.start_col, s.width_cols, s.text.clone())).collect();
-        let expected: Vec<_> =
-            [(0, 1, "a"), (1, 1, "⏺"), (2, 1, "✓"), (3, 1, "b")].into_iter().map(|(c, w, t)| (c, w, t.to_string())).collect();
+        let summary: Vec<_> = row_spans(&row).iter().map(|s| (s.start_col, s.width_cols, s.text.clone())).collect();
+        let expected: Vec<_> = [(0, 1, "a"), (1, 1, "⏺"), (2, 1, "✓"), (3, 1, "b")]
+            .into_iter()
+            .map(|(c, w, t)| (c, w, t.to_string()))
+            .collect();
         assert_eq!(summary, expected);
     }
 

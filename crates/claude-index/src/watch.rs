@@ -12,7 +12,9 @@ pub fn watch(config: &Path, on_change: impl Fn() + Send + 'static) -> notify::Re
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         // Only real changes: inotify also reports opens and reads, and the index's own scan reads
         // every watched file, so counting those would make every scan trigger the next one.
-        if event.is_ok_and(|event| matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))) {
+        if event
+            .is_ok_and(|event| matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)))
+        {
             on_change();
         }
     })?;

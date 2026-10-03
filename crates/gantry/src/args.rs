@@ -28,9 +28,7 @@ impl LaunchArgs {
                     break;
                 }
                 other => {
-                    return Err(format!(
-                        "unknown argument `{other}` (usage: gantry [--cwd DIR] [-- PROGRAM ARGS...])"
-                    ));
+                    return Err(format!("unknown argument `{other}` (usage: gantry [--cwd DIR] [-- PROGRAM ARGS...])"));
                 }
             }
         }
@@ -40,10 +38,26 @@ impl LaunchArgs {
     /// Turn the arguments into a launch request.
     pub fn into_launch(self) -> std::io::Result<Launch> {
         let current = std::env::current_dir()?;
-        let default = PaneLaunch { program: default_shell(), args: Vec::new(), cwd: current.clone(), container: None, claude: false, claude_dir: None, env: Vec::new() };
+        let default = PaneLaunch {
+            program: default_shell(),
+            args: Vec::new(),
+            cwd: current.clone(),
+            container: None,
+            claude: false,
+            claude_dir: None,
+            env: Vec::new(),
+        };
         let explicit = (self.cwd.is_some() || !self.command.is_empty()).then(|| {
             let mut command = self.command.into_iter();
-            PaneLaunch { program: command.next().unwrap_or_else(default_shell), args: command.collect(), cwd: self.cwd.unwrap_or(current), container: None, claude: false, claude_dir: None, env: Vec::new() }
+            PaneLaunch {
+                program: command.next().unwrap_or_else(default_shell),
+                args: command.collect(),
+                cwd: self.cwd.unwrap_or(current),
+                container: None,
+                claude: false,
+                claude_dir: None,
+                env: Vec::new(),
+            }
         });
         Ok(Launch { explicit, default })
     }
@@ -69,7 +83,10 @@ mod tests {
     fn command_or_cwd_makes_an_explicit_launch() {
         let launch = parse(&["--cwd", "/tmp", "--", "claude", "--resume", "abc"]).unwrap().into_launch().unwrap();
         let explicit = launch.explicit.unwrap();
-        assert_eq!((explicit.program.as_str(), explicit.args.clone(), explicit.cwd.clone()), ("claude", vec!["--resume".into(), "abc".into()], PathBuf::from("/tmp")));
+        assert_eq!(
+            (explicit.program.as_str(), explicit.args.clone(), explicit.cwd.clone()),
+            ("claude", vec!["--resume".into(), "abc".into()], PathBuf::from("/tmp"))
+        );
         let cwd_only = parse(&["--cwd", "/tmp"]).unwrap().into_launch().unwrap();
         assert_eq!(cwd_only.explicit.unwrap().program, daemon::pty::default_shell());
     }

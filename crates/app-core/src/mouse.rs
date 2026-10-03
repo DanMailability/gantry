@@ -93,8 +93,14 @@ mod tests {
     #[test]
     fn legacy_release_is_button_three() {
         let legacy = ScrollModes { mouse_report: true, ..Default::default() };
-        assert_eq!(encode_mouse(legacy, MouseAction::Press(Button::Middle), NONE, 4, 2), Some(vec![0x1b, b'[', b'M', 33, 37, 35]));
-        assert_eq!(encode_mouse(legacy, MouseAction::Release(Button::Middle), NONE, 4, 2), Some(vec![0x1b, b'[', b'M', 35, 37, 35]));
+        assert_eq!(
+            encode_mouse(legacy, MouseAction::Press(Button::Middle), NONE, 4, 2),
+            Some(vec![0x1b, b'[', b'M', 33, 37, 35])
+        );
+        assert_eq!(
+            encode_mouse(legacy, MouseAction::Release(Button::Middle), NONE, 4, 2),
+            Some(vec![0x1b, b'[', b'M', 35, 37, 35])
+        );
     }
 
     #[test]
@@ -109,7 +115,10 @@ mod tests {
         let click = sgr();
         assert_eq!(encode_mouse(click, MouseAction::Motion(Some(Button::Left)), NONE, 1, 0), None);
         let drag = ScrollModes { mouse_drag: true, ..sgr() };
-        assert_eq!(encode_mouse(drag, MouseAction::Motion(Some(Button::Left)), NONE, 1, 0), Some(b"\x1b[<32;2;1M".to_vec()));
+        assert_eq!(
+            encode_mouse(drag, MouseAction::Motion(Some(Button::Left)), NONE, 1, 0),
+            Some(b"\x1b[<32;2;1M".to_vec())
+        );
         assert_eq!(encode_mouse(drag, MouseAction::Motion(None), NONE, 1, 0), None);
         let motion = ScrollModes { mouse_motion: true, ..sgr() };
         assert_eq!(encode_mouse(motion, MouseAction::Motion(None), NONE, 0, 0), Some(b"\x1b[<35;1;1M".to_vec()));

@@ -5,7 +5,10 @@ use std::rc::Rc;
 
 use app_core::menus::{MenuAction, MenuEntry, MenuItem, Shortcut};
 use app_core::settings::Settings;
-use gpui::{App, Bounds, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, canvas, deferred, div, prelude::*, px, relative, rgb, rgba};
+use gpui::{
+    App, Bounds, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, canvas, deferred, div,
+    prelude::*, px, relative, rgb, rgba,
+};
 
 use crate::settings_store::shortcut_label;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
@@ -73,7 +76,9 @@ pub(crate) fn render(
             .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
             .child(div().flex_1().whitespace_nowrap().child(entry.label.clone()))
             .when(entry.checked, |item| item.child(div().flex_none().text_color(rgb(theme.tokens.accent)).child("✓")))
-            .when_some(entry.shortcut, |item, shortcut| item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings))))
+            .when_some(entry.shortcut, |item, shortcut| {
+                item.child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(shortcut_text(shortcut, settings)))
+            })
             .when_some(closes_sub, |item, sub| {
                 item.on_hover(move |hovered, window, _| {
                     if *hovered && sub.get().is_some() {
@@ -125,9 +130,12 @@ pub(crate) fn render(
                     }
                     grid = grid.child(div().flex().flex_row().gap(theme.ui(6.)).children(row));
                 }
-                let has_swatches = items.iter().any(|item| matches!(item, MenuItem::Entry(MenuEntry { swatch: Some(_), .. })));
+                let has_swatches =
+                    items.iter().any(|item| matches!(item, MenuItem::Entry(MenuEntry { swatch: Some(_), .. })));
                 let entries = items.iter().enumerate().filter_map(|(position, item)| match item {
-                    MenuItem::Entry(entry) if entry.swatch.is_none() => Some(entry_row(("menu-sub-item", index * 100 + position), entry, None)),
+                    MenuItem::Entry(entry) if entry.swatch.is_none() => {
+                        Some(entry_row(("menu-sub-item", index * 100 + position), entry, None))
+                    }
                     _ => None,
                 });
                 div()
@@ -202,7 +210,8 @@ pub(crate) fn render(
                     cx.stop_propagation();
                 })
                 .on_mouse_down_out(move |_, window, cx| {
-                    let in_sub = sub_open.get().is_some() && sub_bounds.get().is_some_and(|bounds| bounds.contains(&window.mouse_position()));
+                    let in_sub = sub_open.get().is_some()
+                        && sub_bounds.get().is_some_and(|bounds| bounds.contains(&window.mouse_position()));
                     if !in_sub {
                         on_dismiss(window, cx);
                     }

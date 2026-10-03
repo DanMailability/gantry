@@ -117,7 +117,9 @@ fn grouped<'a>(input: &RecentsInput<'a>) -> Vec<(PathBuf, Vec<&'a SessionInfo>)>
     for (_, sessions) in &mut projects {
         sessions.sort_by(newest_first);
     }
-    projects.sort_by(|(a_path, a), (b_path, b)| b[0].last_active_ms.cmp(&a[0].last_active_ms).then_with(|| a_path.cmp(b_path)));
+    projects.sort_by(|(a_path, a), (b_path, b)| {
+        b[0].last_active_ms.cmp(&a[0].last_active_ms).then_with(|| a_path.cmp(b_path))
+    });
     projects
 }
 
@@ -146,7 +148,11 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
         let display = display_path(&path, input.home);
         items.push(RecentItem::Heading { label: labels[&path].clone(), display, path: path.clone() });
         for session in matching.iter().take(cap) {
-            items.push(RecentItem::Session { session: (*session).clone(), age: age(input.now_ms, session.last_active_ms), project: path.clone() });
+            items.push(RecentItem::Session {
+                session: (*session).clone(),
+                age: age(input.now_ms, session.last_active_ms),
+                project: path.clone(),
+            });
         }
         if matching.len() > cap {
             items.push(RecentItem::More { project: path, hidden: matching.len() - cap });
@@ -192,15 +198,23 @@ pub fn projects(input: &RecentsInput<'_>) -> Vec<ProjectItem> {
     grouped
         .into_iter()
         .filter(|(path, _)| keep(&mut fuzzy, &labels[path], path, input.home))
-        .map(|(path, sessions)| ProjectItem { label: labels[&path].clone(), display: display_path(&path, input.home), count: sessions.len(), path })
+        .map(|(path, sessions)| ProjectItem {
+            label: labels[&path].clone(),
+            display: display_path(&path, input.home),
+            count: sessions.len(),
+            path,
+        })
         .collect()
 }
 
 /// Sessions matching the search, and sessions in scope (the picked project, else all).
 pub fn counts(input: &RecentsInput<'_>) -> (usize, usize) {
     let mut fuzzy = Fuzzy::new(input.query);
-    let scoped: Vec<&SessionInfo> =
-        grouped(input).into_iter().filter(|(path, _)| in_scope(input, path)).flat_map(|(_, sessions)| sessions).collect();
+    let scoped: Vec<&SessionInfo> = grouped(input)
+        .into_iter()
+        .filter(|(path, _)| in_scope(input, path))
+        .flat_map(|(_, sessions)| sessions)
+        .collect();
     let matching = scoped.iter().filter(|s| keep(&mut fuzzy, session_title(s), &s.cwd, input.home)).count();
     (matching, scoped.len())
 }
@@ -222,7 +236,8 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
-            container: None, claude_dir: None,
+            container: None,
+            claude_dir: None,
         }
     }
 
@@ -299,7 +314,13 @@ mod tests {
     fn closed_sessions_by_project_newest_first_without_live_or_open_ones() {
         let mut live = closed("live", "/r/a", 0);
         live.state = SessionState::Managed { pane: 3 };
-        let mut fixture = Fixture::of(vec![closed("a-old", "/r/a", 5), closed("b", "/r/b", 1), closed("a-new", "/r/a", 2), closed("tab", "/r/b", 0), live]);
+        let mut fixture = Fixture::of(vec![
+            closed("a-old", "/r/a", 5),
+            closed("b", "/r/b", 1),
+            closed("a-new", "/r/a", 2),
+            closed("tab", "/r/b", 0),
+            live,
+        ]);
         fixture.open.insert("tab".into());
         assert_eq!(fixture.outline(), vec!["# b", "b", "# a", "a-new", "a-old"]);
         assert_eq!(fixture.with(counts), (3, 3));
@@ -317,7 +338,11 @@ mod tests {
                 RecentItem::More { .. } => {}
             }
         }
-        assert!(items.iter().any(|item| matches!(item, RecentItem::Session { project, .. } if project == Path::new("/r/a"))));
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, RecentItem::Session { project, .. } if project == Path::new("/r/a")))
+        );
     }
 
     #[test]
@@ -356,7 +381,10 @@ mod tests {
     fn chips_are_all_then_the_six_newest_projects_then_more() {
         let sessions: Vec<SessionInfo> = (0..8).map(|i| closed(&format!("s{i}"), &format!("/r/p{i}"), i)).collect();
         let mut fixture = Fixture::of(sessions);
-        assert_eq!(fixture.chip_labels(), vec!["All projects 8", "p0 1", "p1 1", "p2 1", "p3 1", "p4 1", "p5 1", "More… 0"]);
+        assert_eq!(
+            fixture.chip_labels(),
+            vec!["All projects 8", "p0 1", "p1 1", "p2 1", "p3 1", "p4 1", "p5 1", "More… 0"]
+        );
         // A picked project beyond the six still gets its chip.
         fixture.project = Some("/r/p7".into());
         assert!(fixture.chip_labels().contains(&"p7 1".to_string()));
@@ -377,8 +405,11 @@ mod tests {
 
     #[test]
     fn the_project_chooser_lists_every_project_filtered_by_the_search() {
-        let mut fixture = Fixture::of(vec![closed("x", "/r/api", 1), closed("y", "/r/web", 2), closed("z", "/r/api", 3)]);
-        let names = |fixture: &Fixture| fixture.with(projects).into_iter().map(|p| format!("{} {}", p.label, p.count)).collect::<Vec<_>>();
+        let mut fixture =
+            Fixture::of(vec![closed("x", "/r/api", 1), closed("y", "/r/web", 2), closed("z", "/r/api", 3)]);
+        let names = |fixture: &Fixture| {
+            fixture.with(projects).into_iter().map(|p| format!("{} {}", p.label, p.count)).collect::<Vec<_>>()
+        };
         assert_eq!(names(&fixture), vec!["api 2", "web 1"]);
         fixture.query = "web".into();
         assert_eq!(names(&fixture), vec!["web 1"]);
@@ -393,7 +424,8 @@ mod tests {
 
     #[test]
     fn sizes_come_from_the_input() {
-        let sessions: Vec<SessionInfo> = (0..4).map(|n| closed(&format!("s{n}"), "/r/a", n + 1)).chain([closed("t", "/r/b", 9)]).collect();
+        let sessions: Vec<SessionInfo> =
+            (0..4).map(|n| closed(&format!("s{n}"), "/r/a", n + 1)).chain([closed("t", "/r/b", 9)]).collect();
         let one = Fixture { per_project: 1, ..Fixture::of(sessions.clone()) };
         assert_eq!(one.outline(), vec!["# a", "s0", "+3", "# b", "t"]);
         let no_chips = Fixture { chips: 0, ..Fixture::of(sessions) };

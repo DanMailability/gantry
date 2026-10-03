@@ -28,7 +28,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn home_fallback_and_empty_values_count_as_unset() {
-        assert_eq!(config_dir(&env(&[("HOME", "/home/me"), ("CLAUDE_CONFIG_DIR", "")])), Some(PathBuf::from("/home/me/.claude")));
+        assert_eq!(
+            config_dir(&env(&[("HOME", "/home/me"), ("CLAUDE_CONFIG_DIR", "")])),
+            Some(PathBuf::from("/home/me/.claude"))
+        );
         assert_eq!(config_dir(&env(&[("PATH", "/bin")])), None);
     }
 }

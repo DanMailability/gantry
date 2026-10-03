@@ -81,7 +81,14 @@ impl Paths {
     /// Locations entirely inside `dir` (for tests).
     pub fn in_dir(dir: &Path, profile: &str) -> Paths {
         let unique = dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        Paths::build(profile, dir.join("run"), dir.join("logs"), dir.join("layout.json"), dir.join("settings.json"), &unique)
+        Paths::build(
+            profile,
+            dir.join("run"),
+            dir.join("logs"),
+            dir.join("layout.json"),
+            dir.join("settings.json"),
+            &unique,
+        )
     }
 
     #[cfg_attr(unix, allow(unused_variables))]
@@ -98,7 +105,16 @@ impl Paths {
         #[cfg(windows)]
         let socket = SocketLocation::Pipe(format!("gantry-{profile}-{unique}"));
         let containers_file = layout_file.with_file_name("containers.json");
-        Paths { profile: profile.into(), lock_file: runtime_dir.join("daemon.lock"), runtime_dir, log_dir, layout_file, containers_file, settings_file, socket }
+        Paths {
+            profile: profile.into(),
+            lock_file: runtime_dir.join("daemon.lock"),
+            runtime_dir,
+            log_dir,
+            layout_file,
+            containers_file,
+            settings_file,
+            socket,
+        }
     }
 
     /// Name to bind or connect to.

@@ -266,8 +266,7 @@ mod tests {
     #[test]
     fn terminal_env_is_set() {
         let dir = tempfile::tempdir().unwrap();
-        let (_pty, reader) =
-            PtyProcess::spawn(&sh("printf \"$TERM/$COLORTERM\"", dir.path())).unwrap();
+        let (_pty, reader) = PtyProcess::spawn(&sh("printf \"$TERM/$COLORTERM\"", dir.path())).unwrap();
         let out = read_until(reader, "truecolor", Duration::from_secs(5));
         assert!(out.contains("xterm-256color/truecolor"), "got: {out:?}");
     }
@@ -298,8 +297,7 @@ mod tests {
     #[test]
     fn written_input_reaches_the_child() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut pty, reader) =
-            PtyProcess::spawn(&sh("read line; printf \"got:$line\"", dir.path())).unwrap();
+        let (mut pty, reader) = PtyProcess::spawn(&sh("read line; printf \"got:$line\"", dir.path())).unwrap();
         pty.write(b"abc\r").unwrap();
         let out = read_until(reader, "got:abc", Duration::from_secs(5));
         assert!(out.contains("got:abc"), "got: {out:?}");

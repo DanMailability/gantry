@@ -81,7 +81,9 @@ pub fn parse_inspect(line: &str) -> Option<Container> {
         mounts: mounts
             .iter()
             .filter(|m| m["Type"] == "bind")
-            .filter_map(|m| Some(Mount { source: m["Source"].as_str()?.into(), destination: m["Destination"].as_str()?.into() }))
+            .filter_map(|m| {
+                Some(Mount { source: m["Source"].as_str()?.into(), destination: m["Destination"].as_str()?.into() })
+            })
             .collect(),
         remote_user: Some(meta_user.or(image_user).unwrap_or_else(|| "root".into())),
         config_dir,
@@ -252,7 +254,10 @@ mod tests {
     #[test]
     fn cgroups_name_their_docker_container() {
         assert_eq!(container_from_cgroup("0::/system.slice/docker-4a31e6.scope\n").as_deref(), Some("4a31e6"));
-        assert_eq!(container_from_cgroup("12:pids:/docker/4a31e6\n1:name=systemd:/docker/4a31e6\n").as_deref(), Some("4a31e6"));
+        assert_eq!(
+            container_from_cgroup("12:pids:/docker/4a31e6\n1:name=systemd:/docker/4a31e6\n").as_deref(),
+            Some("4a31e6")
+        );
         assert_eq!(container_from_cgroup("0::/user.slice/user-1000.slice/session-2.scope\n"), None);
         assert_eq!(container_from_cgroup("0::/system.slice/docker-.scope\n"), None);
     }

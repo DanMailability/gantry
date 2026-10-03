@@ -65,7 +65,9 @@ pub fn parse(text: &str) -> Option<LiveRecord> {
     let activity = match file.status.as_ref().and_then(Value::as_str) {
         Some("busy") => Some(Activity::Busy),
         Some("idle") => Some(Activity::Idle),
-        Some("waiting") => Some(Activity::Waiting { reason: file.waiting_for.as_ref().and_then(Value::as_str).map(String::from) }),
+        Some("waiting") => {
+            Some(Activity::Waiting { reason: file.waiting_for.as_ref().and_then(Value::as_str).map(String::from) })
+        }
         _ => None,
     };
     // Timestamps of another type mean unknown; they never drop the file.
@@ -109,17 +111,20 @@ mod tests {
     #[test]
     fn the_observed_pid_file_shape_parses() {
         let record = parse(REAL_SHAPE).unwrap();
-        assert_eq!(record, LiveRecord {
-            pid: 3394468,
-            session_id: "9835b878-ce17".into(),
-            cwd: "/home/me/repo".into(),
-            proc_start: Some("64344299".into()),
-            pid_domain: Some("linux:9dec:pid:[4026531836]".into()),
-            updated_at_ms: Some(1790840985757),
-            activity: Some(Activity::Busy),
-            // No `statusUpdatedAt` in this shape: `updatedAt` stands in.
-            activity_since_ms: Some(1790840985757),
-        });
+        assert_eq!(
+            record,
+            LiveRecord {
+                pid: 3394468,
+                session_id: "9835b878-ce17".into(),
+                cwd: "/home/me/repo".into(),
+                proc_start: Some("64344299".into()),
+                pid_domain: Some("linux:9dec:pid:[4026531836]".into()),
+                updated_at_ms: Some(1790840985757),
+                activity: Some(Activity::Busy),
+                // No `statusUpdatedAt` in this shape: `updatedAt` stands in.
+                activity_since_ms: Some(1790840985757),
+            }
+        );
     }
 
     #[test]

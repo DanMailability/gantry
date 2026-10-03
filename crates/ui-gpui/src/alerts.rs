@@ -105,14 +105,19 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(900));
         }
         // Do not wait for a click: pass as soon as it is shown.
-        let shown = notify_rust::Notification::new().appname("Gantry").summary("Gantry test").body("Delivered by the alerts module test").show();
+        let shown = notify_rust::Notification::new()
+            .appname("Gantry")
+            .summary("Gantry test")
+            .body("Delivered by the alerts module test")
+            .show();
         assert!(shown.is_ok(), "{:?}", shown.err());
     }
 
     #[test]
     fn every_tone_is_a_decodable_recording() {
         for tone in AlertTone::ALL {
-            let source = rodio::Decoder::new(std::io::Cursor::new(recording(tone))).unwrap_or_else(|err| panic!("{tone:?}: {err}"));
+            let source = rodio::Decoder::new(std::io::Cursor::new(recording(tone)))
+                .unwrap_or_else(|err| panic!("{tone:?}: {err}"));
             assert!(source.count() > 0, "{tone:?}");
         }
     }

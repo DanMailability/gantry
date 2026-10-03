@@ -46,7 +46,13 @@ pub struct Action {
     pub macos: Option<&'static str>,
 }
 
-const fn action(id: &'static str, group: Group, label: &'static str, linux: &'static str, macos: &'static str) -> Action {
+const fn action(
+    id: &'static str,
+    group: Group,
+    label: &'static str,
+    linux: &'static str,
+    macos: &'static str,
+) -> Action {
     Action { id, group, label, linux: Some(linux), macos: Some(macos) }
 }
 
@@ -132,7 +138,23 @@ fn parse(keystroke: &str) -> Option<Parsed<'_>> {
 }
 
 fn valid_key(key: &str) -> bool {
-    const NAMED: &[&str] = &["tab", "enter", "escape", "backspace", "delete", "space", "up", "down", "left", "right", "home", "end", "pageup", "pagedown", "insert"];
+    const NAMED: &[&str] = &[
+        "tab",
+        "enter",
+        "escape",
+        "backspace",
+        "delete",
+        "space",
+        "up",
+        "down",
+        "left",
+        "right",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "insert",
+    ];
     if NAMED.contains(&key) {
         return true;
     }
@@ -184,7 +206,11 @@ pub fn current(action: &str, overrides: &BTreeMap<String, Option<String>>, platf
 
 /// Whether `keystroke` is `action`'s default on `platform` (spelled in any modifier order).
 pub fn is_default(action: &str, keystroke: &str, platform: Platform) -> bool {
-    ACTIONS.iter().find(|entry| entry.id == action).and_then(|entry| default_of(entry, platform)).is_some_and(|default| canonical(default) == canonical(keystroke))
+    ACTIONS
+        .iter()
+        .find(|entry| entry.id == action)
+        .and_then(|entry| default_of(entry, platform))
+        .is_some_and(|default| canonical(default) == canonical(keystroke))
 }
 
 /// The alias that stays bound while Zoom in is on its default: `ctrl-+` is what Ctrl+Shift+= reports.
@@ -291,10 +317,11 @@ pub fn label(keystroke: Option<&str>, platform: Platform) -> String {
             format!("{mods}{key}")
         }
         Platform::Linux => {
-            let mut parts: Vec<&str> = [(parsed.ctrl, "Ctrl"), (parsed.shift, "Shift"), (parsed.alt, "Alt"), (parsed.cmd, "Super")]
-                .into_iter()
-                .filter_map(|(on, name)| on.then_some(name))
-                .collect();
+            let mut parts: Vec<&str> =
+                [(parsed.ctrl, "Ctrl"), (parsed.shift, "Shift"), (parsed.alt, "Alt"), (parsed.cmd, "Super")]
+                    .into_iter()
+                    .filter_map(|(on, name)| on.then_some(name))
+                    .collect();
             if !key.is_empty() {
                 parts.push(&key);
             }
@@ -324,14 +351,29 @@ mod tests {
         // From workspace_view / terminal_view before this change, minus Ctrl+PageUp/PageDown for the tabs.
         let linux = bindings(&none(), Platform::Linux);
         let expected = [
-            ("newClaudeTab", "ctrl-shift-t"), ("newShellTab", "ctrl-shift-alt-t"), ("splitRightClaude", "ctrl-shift-d"),
-            ("splitRightShell", "ctrl-shift-alt-d"), ("splitDownClaude", "ctrl-shift-e"), ("splitDownShell", "ctrl-shift-alt-e"),
-            ("closePane", "ctrl-shift-w"), ("focusLeft", "ctrl-shift-left"), ("focusRight", "ctrl-shift-right"),
-            ("focusUp", "ctrl-shift-up"), ("focusDown", "ctrl-shift-down"), ("previousTab", "ctrl-shift-tab"),
+            ("newClaudeTab", "ctrl-shift-t"),
+            ("newShellTab", "ctrl-shift-alt-t"),
+            ("splitRightClaude", "ctrl-shift-d"),
+            ("splitRightShell", "ctrl-shift-alt-d"),
+            ("splitDownClaude", "ctrl-shift-e"),
+            ("splitDownShell", "ctrl-shift-alt-e"),
+            ("closePane", "ctrl-shift-w"),
+            ("focusLeft", "ctrl-shift-left"),
+            ("focusRight", "ctrl-shift-right"),
+            ("focusUp", "ctrl-shift-up"),
+            ("focusDown", "ctrl-shift-down"),
+            ("previousTab", "ctrl-shift-tab"),
             ("nextTab", "ctrl-tab"),
-            ("toggleSidebar", "ctrl-shift-b"), ("findSession", "ctrl-shift-f"), ("openLauncher", "ctrl-shift-o"),
-            ("openRecents", "ctrl-shift-r"), ("openSettings", "ctrl-,"), ("copy", "ctrl-shift-c"), ("paste", "ctrl-shift-v"),
-            ("zoomIn", "ctrl-="), ("zoomOut", "ctrl--"), ("zoomReset", "ctrl-0"),
+            ("toggleSidebar", "ctrl-shift-b"),
+            ("findSession", "ctrl-shift-f"),
+            ("openLauncher", "ctrl-shift-o"),
+            ("openRecents", "ctrl-shift-r"),
+            ("openSettings", "ctrl-,"),
+            ("copy", "ctrl-shift-c"),
+            ("paste", "ctrl-shift-v"),
+            ("zoomIn", "ctrl-="),
+            ("zoomOut", "ctrl--"),
+            ("zoomReset", "ctrl-0"),
         ];
         for (id, key) in expected {
             assert_eq!(ks(&linux, id).first().map(String::as_str), Some(key), "{id}");
@@ -374,7 +416,8 @@ mod tests {
 
     #[test]
     fn override_and_null() {
-        let overrides = of(&[("toggleSidebar", Some("ctrl-alt-s")), ("splitRightClaude", None), ("nope", Some("ctrl-alt-q"))]);
+        let overrides =
+            of(&[("toggleSidebar", Some("ctrl-alt-s")), ("splitRightClaude", None), ("nope", Some("ctrl-alt-q"))]);
         let list = bindings(&overrides, Platform::Linux);
         assert_eq!(ks(&list, "toggleSidebar"), ["ctrl-alt-s"]);
         assert!(ks(&list, "splitRightClaude").is_empty());
@@ -401,7 +444,8 @@ mod tests {
     #[test]
     fn check_reserved() {
         let now = bindings(&none(), Platform::Linux);
-        for key in ["ctrl-c", "ctrl-d", "ctrl-r", "ctrl-w", "ctrl-z", "ctrl-l", "ctrl-a", "ctrl-e", "ctrl-u", "ctrl-k"] {
+        for key in ["ctrl-c", "ctrl-d", "ctrl-r", "ctrl-w", "ctrl-z", "ctrl-l", "ctrl-a", "ctrl-e", "ctrl-u", "ctrl-k"]
+        {
             assert!(matches!(check(key, "closePane", &now), Check::Reserved(_)), "{key}");
         }
         for key in ["escape", "tab", "shift-tab", "enter", "backspace", "t", "shift-t", "f5", "shift-left"] {

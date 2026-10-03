@@ -4,13 +4,8 @@
 /// inject control sequences or end bracketed paste early), and bracketed-paste markers are
 /// added when the program enabled that mode.
 pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
-    let cleaned: String =
-        text.replace("\r\n", "\r").replace('\n', "\r").chars().filter(|&c| c != '\x1b').collect();
-    if bracketed {
-        [b"\x1b[200~".as_slice(), cleaned.as_bytes(), b"\x1b[201~"].concat()
-    } else {
-        cleaned.into_bytes()
-    }
+    let cleaned: String = text.replace("\r\n", "\r").replace('\n', "\r").chars().filter(|&c| c != '\x1b').collect();
+    if bracketed { [b"\x1b[200~".as_slice(), cleaned.as_bytes(), b"\x1b[201~"].concat() } else { cleaned.into_bytes() }
 }
 
 #[cfg(test)]

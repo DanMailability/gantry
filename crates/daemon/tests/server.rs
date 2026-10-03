@@ -22,7 +22,14 @@ async fn start_server(idle_timeout: Duration) -> Harness {
     let paths = Paths::in_dir(dir.path(), "test");
     std::fs::create_dir_all(&paths.runtime_dir).unwrap();
     let listener = ListenerOptions::new().name(paths.socket_name().unwrap()).create_tokio().unwrap();
-    let options = ServerOptions { base_env: std::env::vars().collect(), owner_uid: None, idle_timeout, claude_dir: None, containers_file: None, docker: None };
+    let options = ServerOptions {
+        base_env: std::env::vars().collect(),
+        owner_uid: None,
+        idle_timeout,
+        claude_dir: None,
+        containers_file: None,
+        docker: None,
+    };
     let server = tokio::spawn(serve(listener, options));
     Harness { paths, server, _dir: dir }
 }
@@ -55,7 +62,10 @@ impl TestClient {
     }
 
     async fn frame(&mut self) -> Option<Frame> {
-        timeout(Duration::from_secs(5), read_frame(&mut self.recv)).await.expect("timed out waiting for a frame").unwrap()
+        timeout(Duration::from_secs(5), read_frame(&mut self.recv))
+            .await
+            .expect("timed out waiting for a frame")
+            .unwrap()
     }
 
     /// Next control message, skipping data frames.

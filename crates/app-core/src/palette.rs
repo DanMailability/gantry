@@ -80,13 +80,25 @@ impl Default for Palette {
 impl From<Palette> for PaletteColors {
     fn from(p: Palette) -> Self {
         let pack = |c: Rgb| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
-        PaletteColors { foreground: pack(p.foreground), background: pack(p.background), cursor: pack(p.cursor), selection: pack(p.selection), ansi: p.ansi.map(pack) }
+        PaletteColors {
+            foreground: pack(p.foreground),
+            background: pack(p.background),
+            cursor: pack(p.cursor),
+            selection: pack(p.selection),
+            ansi: p.ansi.map(pack),
+        }
     }
 }
 
 impl From<PaletteColors> for Palette {
     fn from(c: PaletteColors) -> Self {
-        Palette { foreground: Rgb::hex(c.foreground), background: Rgb::hex(c.background), cursor: Rgb::hex(c.cursor), selection: Rgb::hex(c.selection), ansi: c.ansi.map(Rgb::hex) }
+        Palette {
+            foreground: Rgb::hex(c.foreground),
+            background: Rgb::hex(c.background),
+            cursor: Rgb::hex(c.cursor),
+            selection: Rgb::hex(c.selection),
+            ansi: c.ansi.map(Rgb::hex),
+        }
     }
 }
 
@@ -98,11 +110,7 @@ impl Palette {
             16..=231 => {
                 const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
                 let i = index - 16;
-                Rgb {
-                    r: LEVELS[(i / 36) as usize],
-                    g: LEVELS[((i / 6) % 6) as usize],
-                    b: LEVELS[(i % 6) as usize],
-                }
+                Rgb { r: LEVELS[(i / 36) as usize], g: LEVELS[((i / 6) % 6) as usize], b: LEVELS[(i % 6) as usize] }
             }
             232..=255 => {
                 let v = 8 + 10 * (index - 232);

@@ -114,7 +114,8 @@ impl ProjectOrder {
     pub fn move_project(&mut self, root: &Path, before: Option<&Path>) {
         let Some(from) = self.order.iter().position(|path| path == root) else { return };
         let moved = self.order.remove(from);
-        let to = before.and_then(|before| self.order.iter().position(|path| path == before)).unwrap_or(self.order.len());
+        let to =
+            before.and_then(|before| self.order.iter().position(|path| path == before)).unwrap_or(self.order.len());
         self.order.insert(to, moved);
     }
 
@@ -456,11 +457,23 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                 in_leaves.insert(session.id.as_str());
                 let title = session_title(session);
                 let kind = EntryKind::Session { session, leaf: Some(pane) };
-                entries.push(Entry { key: EntryKey::Leaf(pane.leaf), cwd: &session.cwd, title, activity: session.last_active_ms, kind });
+                entries.push(Entry {
+                    key: EntryKey::Leaf(pane.leaf),
+                    cwd: &session.cwd,
+                    title,
+                    activity: session.last_active_ms,
+                    kind,
+                });
             }
             None => {
                 let title = if pane.claude { "New session" } else { pane.title.as_str() };
-                entries.push(Entry { key: EntryKey::Leaf(pane.leaf), cwd: &pane.cwd, title, activity: u64::MAX, kind: EntryKind::Pane(pane) });
+                entries.push(Entry {
+                    key: EntryKey::Leaf(pane.leaf),
+                    cwd: &pane.cwd,
+                    title,
+                    activity: u64::MAX,
+                    kind: EntryKind::Pane(pane),
+                });
             }
         }
     }
@@ -469,7 +482,13 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             continue;
         }
         let kind = EntryKind::Session { session, leaf: None };
-        entries.push(Entry { key: EntryKey::Session(session.id.clone()), cwd: &session.cwd, title: session_title(session), activity: session.last_active_ms, kind });
+        entries.push(Entry {
+            key: EntryKey::Session(session.id.clone()),
+            cwd: &session.cwd,
+            title: session_title(session),
+            activity: session.last_active_ms,
+            kind,
+        });
     }
     // New keys are numbered oldest first, so that at startup newer leaves sit above older ones and leaves above
     // outside sessions (which go by activity).
@@ -484,12 +503,19 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     arrivals.update(&keys.into_iter().map(|(key, _)| key.clone()).collect::<Vec<_>>());
 
     // A tab with several panes is one item, placed in the project of its first leaf that has an entry.
-    let leaf_cwd: HashMap<NodeId, &Path> = entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, entry.cwd))).collect();
+    let leaf_cwd: HashMap<NodeId, &Path> =
+        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, entry.cwd))).collect();
     let mut groups: Vec<Group<'_>> = Vec::new();
     let mut group_of: HashMap<NodeId, usize> = HashMap::new();
     for tab in input.tabs.iter().filter(|tab| tab.leaves.len() >= 2) {
         let Some(cwd) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf)) else { continue };
-        let place = tab.leaves.iter().filter(|leaf| leaf_cwd.contains_key(leaf)).map(|leaf| arrivals.of(&EntryKey::Leaf(*leaf))).min().unwrap_or(0);
+        let place = tab
+            .leaves
+            .iter()
+            .filter(|leaf| leaf_cwd.contains_key(leaf))
+            .map(|leaf| arrivals.of(&EntryKey::Leaf(*leaf)))
+            .min()
+            .unwrap_or(0);
         for leaf in &tab.leaves {
             group_of.insert(*leaf, groups.len());
         }
@@ -528,7 +554,8 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     }
     // Sessions decide; a project with only shells or new leaves counts as now.
     let latest = |items: &[Item<'_>]| {
-        let sessions = items.iter().flat_map(Item::entries).filter(|entry| matches!(entry.kind, EntryKind::Session { .. }));
+        let sessions =
+            items.iter().flat_map(Item::entries).filter(|entry| matches!(entry.kind, EntryKind::Session { .. }));
         sessions.map(|entry| entry.activity).max().unwrap_or(u64::MAX)
     };
     projects.sort_by(|(a_path, a), (b_path, b)| latest(b).cmp(&latest(a)).then_with(|| a_path.cmp(b_path)));
@@ -558,7 +585,13 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                 }
                 Item::Group(group) => {
                     let tab = group.tab;
-                    let mut heading = Row::new(RowKind::Tab { index: tab.index, title: tab.title.clone(), panes: tab.leaves.len(), focused: tab.focused, first: tab.leaves[0] });
+                    let mut heading = Row::new(RowKind::Tab {
+                        index: tab.index,
+                        title: tab.title.clone(),
+                        panes: tab.leaves.len(),
+                        focused: tab.focused,
+                        first: tab.leaves[0],
+                    });
                     heading.project = Some(path.clone());
                     rendered.push(heading);
                     for entry in &group.members {
@@ -579,7 +612,9 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         if expanded {
             for row in rendered {
                 let details = match &row.kind {
-                    RowKind::Session { session, .. } if input.details == Some(session.id.as_str()) => Some(session.clone()),
+                    RowKind::Session { session, .. } if input.details == Some(session.id.as_str()) => {
+                        Some(session.clone())
+                    }
                     _ => None,
                 };
                 rows.push(row);
@@ -802,7 +837,8 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
-            container: None, claude_dir: None,
+            container: None,
+            claude_dir: None,
         }
     }
 
@@ -829,7 +865,16 @@ mod tests {
     }
 
     fn pane(leaf: NodeId, cwd: &str, session: Option<&str>) -> PaneEntry {
-        PaneEntry { leaf, cwd: cwd.into(), title: format!("pane {leaf}"), session: session.map(String::from), claude: session.is_some(), ended: false, alone: true, container: None }
+        PaneEntry {
+            leaf,
+            cwd: cwd.into(),
+            title: format!("pane {leaf}"),
+            session: session.map(String::from),
+            claude: session.is_some(),
+            ended: false,
+            alone: true,
+            container: None,
+        }
     }
 
     fn shell_pane(leaf: NodeId, cwd: &str) -> PaneEntry {
@@ -875,7 +920,9 @@ mod tests {
             self.rows()
                 .iter()
                 .map(|row| match &row.kind {
-                    RowKind::Project { label, expanded, .. } => format!("{} {label}", if *expanded { "▾" } else { "▸" }),
+                    RowKind::Project { label, expanded, .. } => {
+                        format!("{} {label}", if *expanded { "▾" } else { "▸" })
+                    }
                     RowKind::Session { session, note, .. } => format!("  {} ({note})", session.id),
                     RowKind::Pane { entry, note, .. } => format!("  leaf {} ({note})", entry.leaf),
                     RowKind::Detail { text, .. } => format!("    ({text})"),
@@ -899,15 +946,18 @@ mod tests {
             ],
             vec![pane(1, "/r/app", Some("m")), pane(2, "/r/app", Some("fresh")), shell_pane(3, "/r/app/src"), ended],
         );
-        assert_eq!(fixture.outline(), vec![
-            "▾ app",
-            "  gone (Exited · tab open)",
-            "  leaf 3 (shell)",
-            "  leaf 2 (Idle)",
-            "  m (Working · 1m)",
-            "▾ web",
-            "  e (Elsewhere · 2h)",
-        ]);
+        assert_eq!(
+            fixture.outline(),
+            vec![
+                "▾ app",
+                "  gone (Exited · tab open)",
+                "  leaf 3 (shell)",
+                "  leaf 2 (Idle)",
+                "  m (Working · 1m)",
+                "▾ web",
+                "  e (Elsewhere · 2h)",
+            ]
+        );
     }
 
     #[test]
@@ -980,10 +1030,16 @@ mod tests {
     #[test]
     fn at_startup_newer_leaves_come_first_then_outside_sessions_newest_first() {
         let mut fixture = Fixture::of(
-            vec![managed("one", "/r/app", 5), managed("two", "/r/app", 4), external("x", "/r/app", 3), external("y", "/r/app", 9)],
+            vec![
+                managed("one", "/r/app", 5),
+                managed("two", "/r/app", 4),
+                external("x", "/r/app", 3),
+                external("y", "/r/app", 9),
+            ],
             vec![pane(1, "/r/app", Some("one")), pane(2, "/r/app", Some("two"))],
         );
-        let ids: Vec<String> = fixture.outline().into_iter().skip(1).map(|r| r.split_whitespace().next().unwrap().to_string()).collect();
+        let ids: Vec<String> =
+            fixture.outline().into_iter().skip(1).map(|r| r.split_whitespace().next().unwrap().to_string()).collect();
         assert_eq!(ids, ["two", "one", "y", "x"]);
     }
 
@@ -1029,16 +1085,22 @@ mod tests {
 
     #[test]
     fn the_row_of_a_leaf_is_found_for_sessions_and_panes() {
-        let mut fixture = Fixture::of(vec![managed("m", "/r/p", 1)], vec![pane(1, "/r/p", Some("m")), shell_pane(2, "/r/p")]);
+        let mut fixture =
+            Fixture::of(vec![managed("m", "/r/p", 1)], vec![pane(1, "/r/p", Some("m")), shell_pane(2, "/r/p")]);
         let rows = fixture.rows();
-        assert!(matches!(&rows[row_of_leaf(&rows, 1).unwrap()].kind, RowKind::Session { session, .. } if session.id == "m"));
+        assert!(
+            matches!(&rows[row_of_leaf(&rows, 1).unwrap()].kind, RowKind::Session { session, .. } if session.id == "m")
+        );
         assert!(matches!(&rows[row_of_leaf(&rows, 2).unwrap()].kind, RowKind::Pane { entry, .. } if entry.leaf == 2));
         assert_eq!(row_of_leaf(&rows, 9), None);
     }
 
     #[test]
     fn take_over_is_offered_for_outside_host_sessions_whose_directory_exists() {
-        let mut fixture = Fixture::of(vec![external("e", "/p", 3), SessionInfo { cwd_exists: false, ..external("gone", "/p", 2) }], vec![]);
+        let mut fixture = Fixture::of(
+            vec![external("e", "/p", 3), SessionInfo { cwd_exists: false, ..external("gone", "/p", 2) }],
+            vec![],
+        );
         fixture.details = Some("gone".into());
         assert!(!fixture.outline().contains(&"    Take over…".to_string()));
         fixture.details = Some("e".into());
@@ -1054,7 +1116,10 @@ mod tests {
         boxed.container = Some(ContainerPlace { host_folder: Some("/p".into()), path: "/workspaces/p".into() });
         let mut fixture = Fixture::of(vec![external("e", "/p", 2), boxed], vec![]);
         fixture.details = Some("e".into());
-        assert_eq!(fixture.outline()[2..4], ["    (Running outside Gantry (pid 42))".to_string(), "    Take over…".to_string()]);
+        assert_eq!(
+            fixture.outline()[2..4],
+            ["    (Running outside Gantry (pid 42))".to_string(), "    Take over…".to_string()]
+        );
         fixture.details = Some("box".into());
         assert!(fixture.outline().contains(&"    (Running in a dev container)".to_string()));
     }
@@ -1078,7 +1143,10 @@ mod tests {
     fn projects_with_the_same_name_show_their_paths() {
         let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/api"), shell_pane(2, "/home/me/work/api")]);
         let outline = fixture.outline();
-        assert!(outline.contains(&"▾ /r/api".to_string()) && outline.contains(&"▾ ~/work/api".to_string()), "{outline:?}");
+        assert!(
+            outline.contains(&"▾ /r/api".to_string()) && outline.contains(&"▾ ~/work/api".to_string()),
+            "{outline:?}"
+        );
     }
 
     #[test]
@@ -1088,8 +1156,14 @@ mod tests {
         assert_eq!(tone(&idle, true), Tone::Done);
         assert_eq!(tone(&managed("starting", "/a", 1), false), Tone::Idle);
         assert_eq!(tone(&with(managed("b", "/a", 1), SessionStatus::Busy), true), Tone::Working);
-        assert_eq!(tone(&with(managed("n", "/a", 1), SessionStatus::NeedsInput { reason: None }), true), Tone::NeedsInput);
-        assert_eq!(tone(&with(external("e", "/a", 1), SessionStatus::NeedsInput { reason: None }), false), Tone::Elsewhere);
+        assert_eq!(
+            tone(&with(managed("n", "/a", 1), SessionStatus::NeedsInput { reason: None }), true),
+            Tone::NeedsInput
+        );
+        assert_eq!(
+            tone(&with(external("e", "/a", 1), SessionStatus::NeedsInput { reason: None }), false),
+            Tone::Elsewhere
+        );
         assert_eq!(tone(&closed("c", "/a", 1), true), Tone::Closed);
         assert_eq!(status_tone(None, false), Tone::Idle);
     }
@@ -1118,7 +1192,10 @@ mod tests {
         assert_eq!(display_path(Path::new("/home/me/x/y"), home), "~/x/y");
         assert_eq!(display_path(Path::new("/home/meow"), home), "/home/meow");
         let minute = 60_000;
-        assert_eq!([0, 5 * minute, 3 * 60 * minute, 2 * DAY_MS, 42 * DAY_MS].map(|ago| age(NOW, NOW - ago)), ["now", "5m", "3h", "2d", "6w"]);
+        assert_eq!(
+            [0, 5 * minute, 3 * 60 * minute, 2 * DAY_MS, 42 * DAY_MS].map(|ago| age(NOW, NOW - ago)),
+            ["now", "5m", "3h", "2d", "6w"]
+        );
     }
 
     fn tab(index: usize, focused: NodeId, leaves: &[NodeId]) -> TabEntry {
@@ -1195,7 +1272,8 @@ mod tests {
 
     #[test]
     fn active_keeps_project_places_while_activity_changes() {
-        let mut fixture = Fixture::of(vec![external("a", "/r/alpha", NOW - 5), external("b", "/r/beta", NOW - 10)], vec![]);
+        let mut fixture =
+            Fixture::of(vec![external("a", "/r/alpha", NOW - 5), external("b", "/r/beta", NOW - 10)], vec![]);
         assert_eq!(fixture.outline()[0], "▾ alpha");
         fixture.sessions[1].last_active_ms = NOW;
         assert_eq!(fixture.outline()[0], "▾ alpha", "activity no longer moves projects");
@@ -1205,7 +1283,8 @@ mod tests {
 
     #[test]
     fn filtering_does_not_reorder_rows() {
-        let mut fixture = Fixture::of(vec![external("a", "/r/alpha", NOW - 5), external("b", "/r/beta", NOW - 10)], vec![]);
+        let mut fixture =
+            Fixture::of(vec![external("a", "/r/alpha", NOW - 5), external("b", "/r/beta", NOW - 10)], vec![]);
         fixture.sessions.push(external("c", "/r/gamma", NOW - 20));
         let before = fixture.outline();
         fixture.filter = "gamma".into();
@@ -1220,17 +1299,23 @@ mod tests {
         fixture.tabs = vec![tab(0, 1, &[1, 2])];
         let rows = fixture.rows();
         assert_eq!(rows[0].project.as_deref(), Some(Path::new("/r/alpha")));
-        assert_eq!(rows[1].project.as_deref(), Some(Path::new("/r/alpha")), "the tab heading takes the group's project");
+        assert_eq!(
+            rows[1].project.as_deref(),
+            Some(Path::new("/r/alpha")),
+            "the tab heading takes the group's project"
+        );
         assert_eq!(rows[2].project.as_deref(), Some(Path::new("/r/alpha")));
         assert_eq!(rows[3].project.as_deref(), Some(Path::new("/r/beta")));
     }
 
     #[test]
     fn group_edges_mark_first_and_last_rows() {
-        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/p"), shell_pane(2, "/r/p"), shell_pane(3, "/r/q")]);
+        let mut fixture =
+            Fixture::of(vec![], vec![shell_pane(1, "/r/p"), shell_pane(2, "/r/p"), shell_pane(3, "/r/q")]);
         fixture.toggled.insert("/r/q".into());
         let rows = fixture.rows();
-        let edges: Vec<(bool, bool)> = (0..rows.len()).map(|i| group_edges(&rows, i)).map(|e| (e.first, e.last)).collect();
+        let edges: Vec<(bool, bool)> =
+            (0..rows.len()).map(|i| group_edges(&rows, i)).map(|e| (e.first, e.last)).collect();
         assert_eq!(keys(&rows).len(), 4);
         assert_eq!(edges, vec![(true, false), (false, false), (false, true), (true, true)]);
     }
@@ -1240,8 +1325,15 @@ mod tests {
         let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha")]);
         fixture.tabs = vec![tab(0, 1, &[2, 1])];
         let rows = fixture.rows();
-        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(2), RowKey::Leaf(2), RowKey::Leaf(1)]);
-        assert!(matches!(&rows[1].kind, RowKind::Tab { index: 0, panes: 2, first: 2, focused: 1, .. }), "{:?}", rows[1]);
+        assert_eq!(
+            keys(&rows),
+            vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(2), RowKey::Leaf(2), RowKey::Leaf(1)]
+        );
+        assert!(
+            matches!(&rows[1].kind, RowKind::Tab { index: 0, panes: 2, first: 2, focused: 1, .. }),
+            "{:?}",
+            rows[1]
+        );
         assert!(!rows[1].in_tab);
         assert!(rows[2].in_tab && rows[3].in_tab);
     }
@@ -1260,14 +1352,18 @@ mod tests {
         let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/beta")]);
         fixture.tabs = vec![tab(0, 1, &[1, 2])];
         let rows = fixture.rows();
-        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(1), RowKey::Leaf(1), RowKey::Leaf(2)]);
+        assert_eq!(
+            keys(&rows),
+            vec![RowKey::Project("/r/alpha".into()), RowKey::Tab(1), RowKey::Leaf(1), RowKey::Leaf(2)]
+        );
         assert_eq!(rows[2].project_label, None);
         assert_eq!(rows[3].project_label.as_deref(), Some("beta"));
     }
 
     #[test]
     fn other_project_keeps_heading_for_its_own_rows() {
-        let mut fixture = Fixture::of(vec![external("e", "/r/beta", 5)], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/beta")]);
+        let mut fixture =
+            Fixture::of(vec![external("e", "/r/beta", 5)], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/beta")]);
         fixture.tabs = vec![tab(0, 1, &[1, 2])];
         let rows = fixture.rows();
         let beta = find(&rows, &RowKey::Project("/r/beta".into())).unwrap();
@@ -1302,7 +1398,10 @@ mod tests {
 
     #[test]
     fn filter_keeps_group_heading_with_matching_panes() {
-        let mut fixture = Fixture::of(vec![], vec![titled_shell(1, "/r/alpha", "Alpha task"), titled_shell(2, "/r/beta", "Beta task")]);
+        let mut fixture = Fixture::of(
+            vec![],
+            vec![titled_shell(1, "/r/alpha", "Alpha task"), titled_shell(2, "/r/beta", "Beta task")],
+        );
         fixture.tabs = vec![tab(0, 1, &[1, 2])];
         fixture.filter = "beta".into();
         let rows = fixture.rows();
@@ -1326,10 +1425,14 @@ mod tests {
 
     #[test]
     fn leaves_in_order_lists_each_pane_once_and_a_split_tab_by_its_rows() {
-        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha"), shell_pane(3, "/r/alpha")]);
+        let mut fixture =
+            Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha"), shell_pane(3, "/r/alpha")]);
         fixture.tabs = vec![tab(0, 2, &[2, 1]), tab(1, 3, &[3])];
         let rows = fixture.rows();
-        assert_eq!(keys(&rows), vec![RowKey::Project("/r/alpha".into()), RowKey::Leaf(3), RowKey::Tab(2), RowKey::Leaf(2), RowKey::Leaf(1)]);
+        assert_eq!(
+            keys(&rows),
+            vec![RowKey::Project("/r/alpha".into()), RowKey::Leaf(3), RowKey::Tab(2), RowKey::Leaf(2), RowKey::Leaf(1)]
+        );
         assert_eq!(leaves_in_order(&rows), vec![3, 2, 1]);
     }
 

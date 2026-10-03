@@ -20,7 +20,10 @@ fn main() -> ExitCode {
         _ => {}
     }
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
-    let launch = match LaunchArgs::parse(argv).map_err(|m| m.to_string()).and_then(|a| a.into_launch().map_err(|e| e.to_string())) {
+    let launch = match LaunchArgs::parse(argv)
+        .map_err(|m| m.to_string())
+        .and_then(|a| a.into_launch().map_err(|e| e.to_string()))
+    {
         Ok(launch) => launch,
         Err(message) => {
             eprintln!("gantry: {message}");
@@ -66,7 +69,13 @@ fn daemon_main() -> ExitCode {
         .with_writer(appender)
         .with_ansi(false)
         .init();
-    match run_daemon(DaemonOptions { paths, base_env: None, idle_timeout: Duration::from_secs(10), claude_dir: None, docker: Some("docker".into()) }) {
+    match run_daemon(DaemonOptions {
+        paths,
+        base_env: None,
+        idle_timeout: Duration::from_secs(10),
+        claude_dir: None,
+        docker: Some("docker".into()),
+    }) {
         Ok(DaemonOutcome::Stopped | DaemonOutcome::AlreadyRunning) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!("daemon failed: {err:#}");

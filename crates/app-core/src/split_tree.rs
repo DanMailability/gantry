@@ -232,7 +232,9 @@ impl Node {
             .filter_map(|&(id, r)| {
                 let (touches, overlap) = match direction {
                     Direction::Left => ((r.x + r.w - origin.x).abs() < EPS, overlap(r.y, r.h, origin.y, origin.h)),
-                    Direction::Right => ((origin.x + origin.w - r.x).abs() < EPS, overlap(r.y, r.h, origin.y, origin.h)),
+                    Direction::Right => {
+                        ((origin.x + origin.w - r.x).abs() < EPS, overlap(r.y, r.h, origin.y, origin.h))
+                    }
                     Direction::Up => ((r.y + r.h - origin.y).abs() < EPS, overlap(r.x, r.w, origin.x, origin.w)),
                     Direction::Down => ((origin.y + origin.h - r.y).abs() < EPS, overlap(r.x, r.w, origin.x, origin.w)),
                 };
@@ -305,7 +307,10 @@ mod tests {
     fn ratio_is_clamped_and_moves_the_divider() {
         let mut tree = three();
         assert!(tree.set_ratio(10, 0.02));
-        assert_eq!(tree.dividers(Rect::UNIT)[0], Divider { split: 10, axis: Axis::Horizontal, area: Rect::UNIT, ratio: MIN_RATIO });
+        assert_eq!(
+            tree.dividers(Rect::UNIT)[0],
+            Divider { split: 10, axis: Axis::Horizontal, area: Rect::UNIT, ratio: MIN_RATIO }
+        );
         assert!(tree.set_ratio(11, 0.75));
         assert_eq!(tree.layout(Rect::UNIT)[2].1.h, 0.25);
         assert!(!tree.set_ratio(1, 0.5), "leaves have no ratio");

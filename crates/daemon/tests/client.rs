@@ -9,13 +9,30 @@ use daemon::paths::Paths;
 use protocol::message::SpawnRequest;
 
 fn sh(script: &str) -> SpawnRequest {
-    SpawnRequest { program: "sh".into(), args: vec!["-c".into(), script.into()], cwd: std::env::temp_dir(), cols: 80, rows: 24, cwd_from: None, container: None, claude: false, env: Vec::new(), scrollback: None }
+    SpawnRequest {
+        program: "sh".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: std::env::temp_dir(),
+        cols: 80,
+        rows: 24,
+        cwd_from: None,
+        container: None,
+        claude: false,
+        env: Vec::new(),
+        scrollback: None,
+    }
 }
 
 fn daemon_spawner(paths: Paths) -> impl FnOnce() -> std::io::Result<()> + Send + 'static {
     move || {
         let claude_dir = Some(paths.runtime_dir.with_file_name("claude"));
-        let options = DaemonOptions { paths, base_env: Some(std::env::vars().collect()), idle_timeout: Duration::from_secs(5), claude_dir, docker: None };
+        let options = DaemonOptions {
+            paths,
+            base_env: Some(std::env::vars().collect()),
+            idle_timeout: Duration::from_secs(5),
+            claude_dir,
+            docker: None,
+        };
         std::thread::spawn(move || run_daemon(options));
         Ok(())
     }
@@ -37,7 +54,8 @@ fn output_until(events: &async_channel::Receiver<ClientEvent>, needle: &str) -> 
 fn connect_with(paths: &Paths, script: &str) -> (daemon::client::Connection, protocol::message::PaneId) {
     let conn = DaemonClient::connect(paths, daemon_spawner(paths.clone())).unwrap();
     conn.client.spawn(1, sh(script));
-    let ClientEvent::Spawned { pane, .. } = next_event(&conn.events, |e| matches!(e, ClientEvent::Spawned { .. })) else {
+    let ClientEvent::Spawned { pane, .. } = next_event(&conn.events, |e| matches!(e, ClientEvent::Spawned { .. }))
+    else {
         unreachable!()
     };
     (conn, pane)
@@ -96,7 +114,9 @@ fn connect_then_spawn_attach_and_kill() {
     let first = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
     assert!(first.panes.is_empty());
     first.client.spawn(7, sh("printf 'hello pane'; sleep 10"));
-    let ClientEvent::Spawned { request: 7, pane, cwd } = next_event(&first.events, |e| matches!(e, ClientEvent::Spawned { .. })) else {
+    let ClientEvent::Spawned { request: 7, pane, cwd } =
+        next_event(&first.events, |e| matches!(e, ClientEvent::Spawned { .. }))
+    else {
         unreachable!()
     };
     assert_eq!(cwd, std::env::temp_dir());
@@ -111,11 +131,14 @@ fn connect_then_spawn_attach_and_kill() {
     assert_eq!(again.panes[0].pane, pane);
     assert_eq!(again.panes[0].args, vec!["-c".to_string(), "printf 'hello pane'; sleep 10".to_string()]);
     again.client.attach(pane);
-    let not_sessions = |e: &ClientEvent| !matches!(e, ClientEvent::Sessions { .. } | ClientEvent::SessionsChanged { .. });
+    let not_sessions =
+        |e: &ClientEvent| !matches!(e, ClientEvent::Sessions { .. } | ClientEvent::SessionsChanged { .. });
     assert!(matches!(next_event(&again.events, not_sessions), ClientEvent::Resync { pane: p, .. } if p == pane));
     output_until(&again.events, "hello pane");
     again.client.kill(pane);
-    assert!(matches!(next_event(&again.events, |e| matches!(e, ClientEvent::Exited { .. })), ClientEvent::Exited { pane: p, .. } if p == pane));
+    assert!(
+        matches!(next_event(&again.events, |e| matches!(e, ClientEvent::Exited { .. })), ClientEvent::Exited { pane: p, .. } if p == pane)
+    );
 }
 
 #[test]

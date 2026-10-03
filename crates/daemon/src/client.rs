@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use protocol::message::{ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, PaletteColors, SessionInfo, SpawnRequest, TakeOverOutcome};
+use protocol::message::{
+    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaletteColors, PaneId, PaneInfo, SessionInfo,
+    SpawnRequest, TakeOverOutcome,
+};
 use tokio::sync::mpsc;
 
 use crate::launch::{connect_or_spawn, connect_trusted};
@@ -150,7 +153,10 @@ pub struct Connection {
 
 impl DaemonClient {
     /// Connect (starting the daemon via `spawn` if needed) and begin streaming events.
-    pub fn connect(paths: &Paths, spawn: impl FnOnce() -> io::Result<()> + Send + 'static) -> Result<Connection, StartError> {
+    pub fn connect(
+        paths: &Paths,
+        spawn: impl FnOnce() -> io::Result<()> + Send + 'static,
+    ) -> Result<Connection, StartError> {
         let paths = paths.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
@@ -281,9 +287,15 @@ async fn run_connection(
                 Some(Ok(DaemonMessage::Spawned { request, pane, cwd })) => ClientEvent::Spawned { request, pane, cwd },
                 Some(Ok(DaemonMessage::SpawnFailed { request, error })) => ClientEvent::SpawnFailed { request, error },
                 Some(Ok(DaemonMessage::Sessions { sessions })) => ClientEvent::Sessions { sessions },
-                Some(Ok(DaemonMessage::SessionsChanged { upserted, removed })) => ClientEvent::SessionsChanged { upserted, removed },
-                Some(Ok(DaemonMessage::TakeOverResult { session, outcome })) => ClientEvent::TakeOverResult { session, outcome },
-                Some(Ok(DaemonMessage::ContainerFound { request, container })) => ClientEvent::ContainerFound { request, container },
+                Some(Ok(DaemonMessage::SessionsChanged { upserted, removed })) => {
+                    ClientEvent::SessionsChanged { upserted, removed }
+                }
+                Some(Ok(DaemonMessage::TakeOverResult { session, outcome })) => {
+                    ClientEvent::TakeOverResult { session, outcome }
+                }
+                Some(Ok(DaemonMessage::ContainerFound { request, container })) => {
+                    ClientEvent::ContainerFound { request, container }
+                }
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");
@@ -311,7 +323,9 @@ where
     write_frame(send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.map_err(io)?;
     let (instance, claude_dir) = match next_message(recv).await? {
         DaemonMessage::Welcome { instance, claude_dir, .. } => (instance, claude_dir),
-        DaemonMessage::VersionMismatch { daemon_protocol } => return Err(StartError::VersionMismatch { daemon_protocol }),
+        DaemonMessage::VersionMismatch { daemon_protocol } => {
+            return Err(StartError::VersionMismatch { daemon_protocol });
+        }
         other => return Err(StartError::Io(anyhow::anyhow!("unexpected handshake reply {other:?}"))),
     };
     write_frame(send, &Frame::control(&ClientMessage::ListPanes)).await.map_err(io)?;
@@ -356,7 +370,11 @@ pub fn restart_daemon(paths: &Paths) -> anyhow::Result<()> {
 }
 
 /// Merge consecutive `Output` events of one pane (up to `max_bytes`); stop after the first other event.
-pub fn batch_events(first: ClientEvent, rx: &async_channel::Receiver<ClientEvent>, max_bytes: usize) -> Vec<ClientEvent> {
+pub fn batch_events(
+    first: ClientEvent,
+    rx: &async_channel::Receiver<ClientEvent>,
+    max_bytes: usize,
+) -> Vec<ClientEvent> {
     let mut batch = vec![first];
     loop {
         let Some(ClientEvent::Output { pane, bytes }) = batch.last_mut() else { return batch };
@@ -389,6 +407,9 @@ mod tests {
         let batch = batch_events(ClientEvent::Output { pane: 1, bytes: b"a".to_vec() }, &rx, 3);
         assert_eq!(batch, vec![ClientEvent::Output { pane: 1, bytes: b"abc".to_vec() }]);
         let rest = batch_events(rx.try_recv().unwrap(), &rx, 100);
-        assert_eq!(rest, vec![ClientEvent::Output { pane: 1, bytes: b"d".to_vec() }, ClientEvent::Exited { pane: 1, code: 0 }]);
+        assert_eq!(
+            rest,
+            vec![ClientEvent::Output { pane: 1, bytes: b"d".to_vec() }, ClientEvent::Exited { pane: 1, code: 0 }]
+        );
     }
 }

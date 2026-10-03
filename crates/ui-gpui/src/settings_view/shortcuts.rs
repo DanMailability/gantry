@@ -37,10 +37,11 @@ enum Recorded {
 /// The keystroke in settings syntax (`ctrl-alt-shift-cmd-key`).
 fn keystroke_text(keystroke: &Keystroke) -> Option<String> {
     let modifiers = &keystroke.modifiers;
-    let mut parts: Vec<&str> = [(modifiers.control, "ctrl"), (modifiers.alt, "alt"), (modifiers.shift, "shift"), (modifiers.platform, "cmd")]
-        .into_iter()
-        .filter_map(|(on, name)| on.then_some(name))
-        .collect();
+    let mut parts: Vec<&str> =
+        [(modifiers.control, "ctrl"), (modifiers.alt, "alt"), (modifiers.shift, "shift"), (modifiers.platform, "cmd")]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect();
     if keystroke.key.is_empty() {
         return None;
     }
@@ -149,11 +150,19 @@ impl SettingsView {
                 self.recording = None;
                 self.pending_replace = Some(Replace { id, keystroke: text, other });
             }
-            Check::Invalid => self.shortcut_message = Some((id, "Not a usable shortcut. Press other keys, or Esc.".into())),
+            Check::Invalid => {
+                self.shortcut_message = Some((id, "Not a usable shortcut. Press other keys, or Esc.".into()))
+            }
         }
     }
 
-    pub(super) fn shortcuts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn shortcuts(
+        &mut self,
+        theme: &Theme,
+        settings: &Settings,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let platform = Platform::current();
         let filter = self.shortcut_filter.text().trim().to_lowercase();
 
@@ -202,7 +211,16 @@ impl SettingsView {
                 }
             }))
             .on_click(cx.listener(|this, _, window, cx| this.filter_focus.focus(window, cx)))
-            .child(field::render(&self.shortcut_filter, "Filter shortcuts", focused, theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.shortcut_filter.press(offset, clicks); cx.notify(); })));
+            .child(field::render(
+                &self.shortcut_filter,
+                "Filter shortcuts",
+                focused,
+                theme,
+                field::on_press(cx, |this, offset, clicks, _, cx| {
+                    this.shortcut_filter.press(offset, clicks);
+                    cx.notify();
+                }),
+            ));
 
         div().relative().flex().flex_col().gap(theme.ui(20.)).child(filter_box).child(body)
     }
@@ -231,12 +249,33 @@ impl SettingsView {
             cx.notify();
         });
         // A key taken from the terminal is marked: amber outline and `!`.
-        let taken = !recording && shortcuts::current(id, &settings.shortcuts, platform).is_some_and(|keystroke| shortcuts::takes_from_terminal(&keystroke));
+        let taken = !recording
+            && shortcuts::current(id, &settings.shortcuts, platform)
+                .is_some_and(|keystroke| shortcuts::takes_from_terminal(&keystroke));
         let warn = theme.tone(Tone::NeedsInput).dot;
         let key_text = if recording { "Press keys…".to_string() } else { shown(settings, action, platform) };
-        let key_ink = if recording { theme.tokens.accent } else if unset { theme.tokens.muted } else { theme.tokens.text };
+        let key_ink = if recording {
+            theme.tokens.accent
+        } else if unset {
+            theme.tokens.muted
+        } else {
+            theme.tokens.text
+        };
         let key = self
-            .pressable("shortcut", index, Some(if recording { theme.tokens.accent } else if taken { warn } else { theme.tokens.line }), window, cx, record)
+            .pressable(
+                "shortcut",
+                index,
+                Some(if recording {
+                    theme.tokens.accent
+                } else if taken {
+                    warn
+                } else {
+                    theme.tokens.line
+                }),
+                window,
+                cx,
+                record,
+            )
             .h(theme.ui(28.))
             .min_w(theme.ui(120.))
             .px(theme.ui(10.))
@@ -244,20 +283,37 @@ impl SettingsView {
             .items_center()
             .justify_center()
             .rounded(px(RADIUS_SMALL))
-            .bg(if recording { rgba((theme.tokens.accent << 8) | 0x33) } else { rgba((theme.tokens.raised << 8) | 0xff) })
+            .bg(if recording {
+                rgba((theme.tokens.accent << 8) | 0x33)
+            } else {
+                rgba((theme.tokens.raised << 8) | 0xff)
+            })
             .text_size(theme.ui(12.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(key_ink))
             .whitespace_nowrap()
             .gap(theme.ui(6.))
             .when(taken, |key| {
-                let card = HoverCard { title: "Taken from the terminal".into(), status: Some("Programs there no longer get it.".into()), dir: None, container: false, folder: None };
+                let card = HoverCard {
+                    title: "Taken from the terminal".into(),
+                    status: Some("Programs there no longer get it.".into()),
+                    dir: None,
+                    container: false,
+                    folder: None,
+                };
                 key.tooltip(hover_card::tooltip(card)).child(warn_mark(theme))
             })
             .child(key_text);
-        let reset = self.reset_button("shortcut-reset", index, changed, change(move |settings| {
-            settings.shortcuts.remove(id);
-        }), window, cx);
+        let reset = self.reset_button(
+            "shortcut-reset",
+            index,
+            changed,
+            change(move |settings| {
+                settings.shortcuts.remove(id);
+            }),
+            window,
+            cx,
+        );
 
         let row = row_shell(theme, div().font_weight(FontWeight::MEDIUM).child(action.label), key, reset);
 
@@ -314,7 +370,12 @@ impl SettingsView {
                 .border_1()
                 .border_color(rgb(theme.tokens.line))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{shown} is used by “{other}”.")))
-                .child(div().text_sm().text_color(rgb(theme.tokens.muted)).child(format!("Replace it? “{other}” will have no shortcut until you set one.")))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(theme.tokens.muted))
+                        .child(format!("Replace it? “{other}” will have no shortcut until you set one.")),
+                )
                 .child(div().flex().flex_wrap().justify_end().gap(theme.ui(8.)).child(cancel).child(confirm))
         });
         let take = self.pending_take.clone().filter(|pending| pending.id == id).map(|pending| {
@@ -328,7 +389,9 @@ impl SettingsView {
                 let current = shortcuts::bindings(&cx.global::<SettingsStore>().settings().shortcuts, platform);
                 match shortcuts::conflict(&pending.keystroke, pending.id, &current) {
                     Some(other) => this.pending_replace = Some(Replace { other, ..pending }),
-                    None => SettingsStore::update(cx, |settings| store_shortcut(settings, pending.id, Some(pending.keystroke.clone()), platform)),
+                    None => SettingsStore::update(cx, |settings| {
+                        store_shortcut(settings, pending.id, Some(pending.keystroke.clone()), platform)
+                    }),
                 }
                 cx.notify();
             });
@@ -356,7 +419,14 @@ impl SettingsView {
                 .bg(rgb(theme.tokens.raised))
                 .border_1()
                 .border_color(rgb(warn))
-                .child(div().flex().items_center().gap(theme.ui(8.)).child(warn_mark(theme)).child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{shown} {}.", pending.other))))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme.ui(8.))
+                        .child(warn_mark(theme))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{shown} {}.", pending.other))),
+                )
                 .child(div().text_sm().text_color(rgb(theme.tokens.muted)).child(format!(
                     "Use it anyway? Programs in the terminal (your shell, Claude, vim…) will no longer receive {shown}."
                 )))

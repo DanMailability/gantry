@@ -2,8 +2,10 @@
 
 use app_core::session_tree::Tone;
 use app_core::settings::{Settings, StatusFills, ThemeChoice, parse_hex};
-use app_core::theme_colors::{Preset, ProjectColor, Tokens, contrast, derive, readable_fill, tokens as preset_tokens, tone_colors};
-use gpui::{Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, div, px, rgb, rgba, deferred};
+use app_core::theme_colors::{
+    Preset, ProjectColor, Tokens, contrast, derive, readable_fill, tokens as preset_tokens, tone_colors,
+};
+use gpui::{Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, deferred, div, px, rgb, rgba};
 
 use super::*;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme};
@@ -90,8 +92,10 @@ const INTERFACE_SIZE: Stepped = Stepped {
     unit: "",
 };
 
-const SUGGESTED_FILLS: [u32; 12] =
-    [0xc1e5cd, 0xb7e4dd, 0xcfe8b4, 0xe6efb0, 0xa8dcc0, 0xd5ecd9, 0xf7c9a3, 0xf6b8b8, 0xe9c6ef, 0xc9cdf6, 0xb9d5f6, 0xf1e1a6];
+const SUGGESTED_FILLS: [u32; 12] = [
+    0xc1e5cd, 0xb7e4dd, 0xcfe8b4, 0xe6efb0, 0xa8dcc0, 0xd5ecd9, 0xf7c9a3, 0xf6b8b8, 0xe9c6ef, 0xc9cdf6, 0xb9d5f6,
+    0xf1e1a6,
+];
 
 const THEME_CARDS: [(ThemeChoice, &str, &str); 3] = [
     (ThemeChoice::Mist, "Mist", "Dark slate with a light-blue accent."),
@@ -109,7 +113,11 @@ fn selection_choices(preset: Preset) -> [u32; 4] {
 
 /// "3 folders have a colour you picked." ("1 folder has" in the singular).
 fn picked_text(count: usize) -> String {
-    if count == 1 { "1 folder has a colour you picked.".into() } else { format!("{count} folders have a colour you picked.") }
+    if count == 1 {
+        "1 folder has a colour you picked.".into()
+    } else {
+        format!("{count} folders have a colour you picked.")
+    }
 }
 
 /// The contrast line for a picked `fill`, and whether the fill may be used.
@@ -166,7 +174,13 @@ impl SettingsView {
         cx.notify();
     }
 
-    pub(super) fn appearance(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn appearance(
+        &mut self,
+        theme: &Theme,
+        settings: &Settings,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .flex_col()
@@ -181,7 +195,8 @@ impl SettingsView {
         let cards = THEME_CARDS.iter().enumerate().map(|(index, (choice, name, hint))| {
             let choice = *choice;
             let selected = settings.theme == choice;
-            let preview = preset_tokens(if choice == ThemeChoice::MistLight { Preset::MistLight } else { Preset::Mist });
+            let preview =
+                preset_tokens(if choice == ThemeChoice::MistLight { Preset::MistLight } else { Preset::Mist });
             let preset = if choice == ThemeChoice::MistLight { Preset::MistLight } else { Preset::Mist };
             let bar = |status: Status| div().h(theme.ui(8.)).rounded(px(4.)).bg(rgb(status.default_fill(preset)));
             let light = preset_tokens(Preset::MistLight);
@@ -218,7 +233,9 @@ impl SettingsView {
                         .child(div().w(theme.ui(18.)).h(theme.ui(6.)).rounded(px(3.)).bg(rgb(preview.accent))),
                 )
                 .when(choice == ThemeChoice::System, |mini| {
-                    mini.child(div().flex_1().rounded(px(6.)).bg(rgb(light.terminal)).border_1().border_color(rgb(light.line)))
+                    mini.child(
+                        div().flex_1().rounded(px(6.)).bg(rgb(light.terminal)).border_1().border_color(rgb(light.line)),
+                    )
                 });
             let radio = if selected { theme.tokens.accent } else { theme.tokens.muted };
             self.pressable("theme", index, None, window, cx, change(move |settings| settings.theme = choice))
@@ -250,93 +267,186 @@ impl SettingsView {
                 )
                 .child(div().mt(theme.ui(-6.)).child(muted(theme, *hint)))
         });
-        group(theme, "Theme", None, vec![stacked_row(theme, None, div().flex().flex_wrap().gap(theme.ui(14.)).children(cards))])
+        group(
+            theme,
+            "Theme",
+            None,
+            vec![stacked_row(theme, None, div().flex().flex_wrap().gap(theme.ui(14.)).children(cards))],
+        )
     }
 
     fn status_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
-        let mut rows: Vec<Div> = Status::ALL.map(|status| {
-            let index = status as usize;
-            let chosen = status.fill(&settings.status_fills);
-            let colors = theme.tone(status.tone());
-            let shown = chosen.unwrap_or_else(|| status.default_fill(theme.preset));
-            let open = self.popover == Some(Popover::Fill(status));
-            let sample = div()
-                .w(theme.ui(250.))
-                .flex_none()
-                .h(theme.ui(34.))
-                .px_3()
-                .flex()
-                .items_center()
-                .gap_2()
-                .rounded(px(RADIUS))
-                .bg(rgb(colors.fill.unwrap_or(theme.tokens.surface)))
-                .text_color(rgb(colors.ink))
-                .child(div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .when(status == Status::NeedsInput, |el| el.font_weight(FontWeight::SEMIBOLD))
-                        .child(status.sample()),
-                )
-                .child(div().flex_none().text_xs().text_color(rgba((colors.ink << 8) | 0xcc)).child(status.label()));
-            let open_picker = handler(move |this, window, cx| this.open_fill_picker(status, window, cx));
-            let picker_button = self
-                .pressable("status-colour", index, Some(if open { theme.tokens.accent } else { theme.tokens.line }), window, cx, open_picker)
-                .h(theme.ui(34.))
-                .pl(theme.ui(6.))
-                .pr(theme.ui(12.))
-                .flex()
-                .items_center()
-                .gap(theme.ui(8.))
-                .rounded(px(RADIUS_SMALL))
-                .bg(rgb(theme.tokens.raised))
-                .child(div().size(theme.ui(22.)).rounded(px(6.)).bg(rgb(shown)).border_1().border_color(rgb(theme.tokens.line)))
-                .child(hex(shown));
-            let picker = open.then(|| self.fill_picker(status, theme, window, cx));
-            let reset = self.reset_button("status-reset", index, chosen.is_some(), change(move |settings| status.set(&mut settings.status_fills, None)), window, cx);
-            let control = div().flex().items_center().gap(theme.ui(10.)).child(sample).child(div().relative().flex_none().child(picker_button).children(picker));
-            row(theme, status.label(), status.description(), control, reset)
-        })
-        .into_iter()
-        .collect();
+        let mut rows: Vec<Div> = Status::ALL
+            .map(|status| {
+                let index = status as usize;
+                let chosen = status.fill(&settings.status_fills);
+                let colors = theme.tone(status.tone());
+                let shown = chosen.unwrap_or_else(|| status.default_fill(theme.preset));
+                let open = self.popover == Some(Popover::Fill(status));
+                let sample = div()
+                    .w(theme.ui(250.))
+                    .flex_none()
+                    .h(theme.ui(34.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(RADIUS))
+                    .bg(rgb(colors.fill.unwrap_or(theme.tokens.surface)))
+                    .text_color(rgb(colors.ink))
+                    .child(div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(colors.dot)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(status == Status::NeedsInput, |el| el.font_weight(FontWeight::SEMIBOLD))
+                            .child(status.sample()),
+                    )
+                    .child(
+                        div().flex_none().text_xs().text_color(rgba((colors.ink << 8) | 0xcc)).child(status.label()),
+                    );
+                let open_picker = handler(move |this, window, cx| this.open_fill_picker(status, window, cx));
+                let picker_button = self
+                    .pressable(
+                        "status-colour",
+                        index,
+                        Some(if open { theme.tokens.accent } else { theme.tokens.line }),
+                        window,
+                        cx,
+                        open_picker,
+                    )
+                    .h(theme.ui(34.))
+                    .pl(theme.ui(6.))
+                    .pr(theme.ui(12.))
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(8.))
+                    .rounded(px(RADIUS_SMALL))
+                    .bg(rgb(theme.tokens.raised))
+                    .child(
+                        div()
+                            .size(theme.ui(22.))
+                            .rounded(px(6.))
+                            .bg(rgb(shown))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line)),
+                    )
+                    .child(hex(shown));
+                let picker = open.then(|| self.fill_picker(status, theme, window, cx));
+                let reset = self.reset_button(
+                    "status-reset",
+                    index,
+                    chosen.is_some(),
+                    change(move |settings| status.set(&mut settings.status_fills, None)),
+                    window,
+                    cx,
+                );
+                let control = div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(10.))
+                    .child(sample)
+                    .child(div().relative().flex_none().child(picker_button).children(picker));
+                row(theme, status.label(), status.description(), control, reset)
+            })
+            .into_iter()
+            .collect();
         let animate = settings.animate_working;
-        let toggle = self.switch("animate-working", 0, animate, window, cx, change(move |settings| settings.animate_working = !animate));
-        let reset = self.reset_slot("reset-animate-working", 0, settings, |s| s.animate_working, |s, v| s.animate_working = v, window, cx);
-        rows.push(row(theme, "Animate working sessions", "A slow glow crosses Working rows, tabs and pane headers. Paused while Gantry is not focused.", toggle, reset));
+        let toggle = self.switch(
+            "animate-working",
+            0,
+            animate,
+            window,
+            cx,
+            change(move |settings| settings.animate_working = !animate),
+        );
+        let reset = self.reset_slot(
+            "reset-animate-working",
+            0,
+            settings,
+            |s| s.animate_working,
+            |s, v| s.animate_working = v,
+            window,
+            cx,
+        );
+        rows.push(row(
+            theme,
+            "Animate working sessions",
+            "A slow glow crosses Working rows, tabs and pane headers. Paused while Gantry is not focused.",
+            toggle,
+            reset,
+        ));
         group(theme, "Status colours", Some("Pick a fill for each status. Text and dot colours follow it."), rows)
     }
 
     fn interface_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let control = self.stepper(&INTERFACE_SIZE, settings, window, cx);
-        let reset = self.reset_slot("reset-interface-size", 0, settings, |s| s.ui_font_size, |s, v| s.ui_font_size = v, window, cx);
-        let swatches = [None].into_iter().chain(selection_choices(theme.preset).map(Some)).enumerate().map(|(index, choice)| {
-            let shown = choice.unwrap_or(theme.tokens.accent);
-            let pick = change(move |settings| settings.selection = choice);
-            self.pressable("selection-swatch", index, (settings.selection == choice).then_some(theme.tokens.text), window, cx, pick)
+        let reset = self.reset_slot(
+            "reset-interface-size",
+            0,
+            settings,
+            |s| s.ui_font_size,
+            |s, v| s.ui_font_size = v,
+            window,
+            cx,
+        );
+        let swatches =
+            [None].into_iter().chain(selection_choices(theme.preset).map(Some)).enumerate().map(|(index, choice)| {
+                let shown = choice.unwrap_or(theme.tokens.accent);
+                let pick = change(move |settings| settings.selection = choice);
+                self.pressable(
+                    "selection-swatch",
+                    index,
+                    (settings.selection == choice).then_some(theme.tokens.text),
+                    window,
+                    cx,
+                    pick,
+                )
                 .size(theme.ui(28.))
                 .rounded(px(RADIUS_SMALL))
                 .bg(rgb(shown))
                 .border_2()
-        });
+            });
         let swatches = div().flex().gap(theme.ui(8.)).children(swatches.collect::<Vec<_>>());
-        let selection_reset = self.reset_slot("reset-selection", 0, settings, |s| s.selection, |s, v| s.selection = v, window, cx);
+        let selection_reset =
+            self.reset_slot("reset-selection", 0, settings, |s| s.selection, |s, v| s.selection = v, window, cx);
         group(
             theme,
             "Interface",
             None,
             vec![
                 row(theme, "Interface size", "Sidebar, tabs and menus.", control, reset),
-                row(theme, "Selection ring", "The ring around the selected row. The first swatch is the theme's accent.", swatches, selection_reset),
+                row(
+                    theme,
+                    "Selection ring",
+                    "The ring around the selected row. The first swatch is the theme's accent.",
+                    swatches,
+                    selection_reset,
+                ),
             ],
         )
     }
 
     fn project_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let enabled = settings.project_colors.enabled;
-        let switch = self.switch("project-colours", 0, enabled, window, cx, change(move |settings| settings.project_colors.enabled = !enabled));
-        let switch_reset = self.reset_slot("reset-project-colours", 0, settings, |s| s.project_colors.enabled, |s, v| s.project_colors.enabled = v, window, cx);
+        let switch = self.switch(
+            "project-colours",
+            0,
+            enabled,
+            window,
+            cx,
+            change(move |settings| settings.project_colors.enabled = !enabled),
+        );
+        let switch_reset = self.reset_slot(
+            "reset-project-colours",
+            0,
+            settings,
+            |s| s.project_colors.enabled,
+            |s, v| s.project_colors.enabled = v,
+            window,
+            cx,
+        );
         let strip = |preset: Preset| {
             div()
                 .flex()
@@ -346,9 +456,17 @@ impl SettingsView {
                 .bg(rgb(preset_tokens(preset).ground))
                 .border_1()
                 .border_color(rgb(theme.tokens.line))
-                .children(ProjectColor::ALL.map(|color| div().flex_none().size(theme.ui(18.)).rounded(px(RADIUS_SMALL - 4.)).bg(rgb(color.value(preset)))))
+                .children(ProjectColor::ALL.map(|color| {
+                    div().flex_none().size(theme.ui(18.)).rounded(px(RADIUS_SMALL - 4.)).bg(rgb(color.value(preset)))
+                }))
         };
-        let palette = div().flex().flex_wrap().justify_end().gap(theme.ui(8.)).child(strip(Preset::Mist)).child(strip(Preset::MistLight));
+        let palette = div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .gap(theme.ui(8.))
+            .child(strip(Preset::Mist))
+            .child(strip(Preset::MistLight));
         let picked = settings.project_colors.folders.len();
         let mut rows = vec![
             row(
@@ -361,33 +479,50 @@ impl SettingsView {
             row(theme, "Palette", "Mist, then Mist light.", palette, empty_slot(theme)),
         ];
         if picked > 0 {
-            let forget = self.button("forget-colours", 0, "Forget all", window, cx, change(|settings| settings.project_colors.folders.clear()));
+            let forget = self.button(
+                "forget-colours",
+                0,
+                "Forget all",
+                window,
+                cx,
+                change(|settings| settings.project_colors.folders.clear()),
+            );
             rows.push(row(theme, "Picked colours", picked_text(picked), forget, empty_slot(theme)));
         }
         group(theme, "Project colours", None, rows)
     }
 
-    fn fill_picker(&mut self, status: Status, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn fill_picker(
+        &mut self,
+        status: Status,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let chosen = status.fill(&cx.global::<SettingsStore>().settings().status_fills);
         let current = chosen.unwrap_or_else(|| status.default_fill(theme.preset));
         let typed = parse_fill(self.hex.text());
         let verdict = typed.map(|fill| contrast_label(fill, &theme.tokens));
-        let swatches = SUGGESTED_FILLS.iter().enumerate().map(|(index, fill)| {
-            let fill = *fill;
-            let pick = handler(move |this, _, cx| {
-                this.apply_fill(status, fill, cx);
-                this.hex.clear();
-                this.hex.insert(&hex(fill));
-                this.hex.select_all();
-                cx.notify();
-            });
-            self.pressable("swatch", index, None, window, cx, pick)
-                .h(theme.ui(30.))
-                .rounded(px(RADIUS_SMALL))
-                .bg(rgb(fill))
-                .border_2()
-                .when(fill == current, |swatch| swatch.border_color(rgb(theme.tokens.text)))
-        }).collect::<Vec<_>>();
+        let swatches = SUGGESTED_FILLS
+            .iter()
+            .enumerate()
+            .map(|(index, fill)| {
+                let fill = *fill;
+                let pick = handler(move |this, _, cx| {
+                    this.apply_fill(status, fill, cx);
+                    this.hex.clear();
+                    this.hex.insert(&hex(fill));
+                    this.hex.select_all();
+                    cx.notify();
+                });
+                self.pressable("swatch", index, None, window, cx, pick)
+                    .h(theme.ui(30.))
+                    .rounded(px(RADIUS_SMALL))
+                    .bg(rgb(fill))
+                    .border_2()
+                    .when(fill == current, |swatch| swatch.border_color(rgb(theme.tokens.text)))
+            })
+            .collect::<Vec<_>>();
         let tone = theme.tone(if verdict.as_ref().is_some_and(|(_, ok)| *ok) { Tone::Done } else { Tone::NeedsInput });
         let hex_focused = self.hex_focus.is_focused(window);
         let field_box = div()
@@ -402,12 +537,20 @@ impl SettingsView {
             .bg(rgb(theme.tokens.surface))
             .border_1()
             .border_color(rgb(if hex_focused { theme.tokens.accent } else { theme.tokens.line }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| this.hex_key_down(status, event, window, cx)))
+            .on_key_down(
+                cx.listener(move |this, event: &KeyDownEvent, window, cx| this.hex_key_down(status, event, window, cx)),
+            )
             .on_click(cx.listener(|this, _, window, cx| this.hex_focus.focus(window, cx)))
-            .child(field::render(&self.hex, "#rrggbb", hex_focused, theme, field::on_press(cx, |this, offset, clicks, _, cx| {
-                this.hex.press(offset, clicks);
-                cx.notify();
-            })));
+            .child(field::render(
+                &self.hex,
+                "#rrggbb",
+                hex_focused,
+                theme,
+                field::on_press(cx, |this, offset, clicks, _, cx| {
+                    this.hex.press(offset, clicks);
+                    cx.notify();
+                }),
+            ));
         deferred(
             div()
                 .occlude()
@@ -480,7 +623,10 @@ mod tests {
     fn unreadable_fill_is_refused() {
         let t = tokens(Preset::Mist);
         // Mid grey: neither light nor dark enough for derived text.
-        let grey = (0x00..=0xff_u32).map(|v| v * 0x010101).find(|fill| !readable_fill(*fill, &t)).expect("some grey is unreadable");
+        let grey = (0x00..=0xff_u32)
+            .map(|v| v * 0x010101)
+            .find(|fill| !readable_fill(*fill, &t))
+            .expect("some grey is unreadable");
         assert_eq!(contrast_label(grey, &t), ("Too low contrast; choose a lighter or darker fill".to_string(), false));
     }
 
@@ -488,7 +634,10 @@ mod tests {
     fn the_themes_own_fill_is_stored_as_nothing() {
         assert_eq!(fill_to_store(0xc1e5cd, 0xc1e5cd), None);
         assert_eq!(fill_to_store(0xb7e4dd, 0xc1e5cd), Some(0xb7e4dd));
-        assert_eq!(Status::Done.default_fill(Preset::Mist), tone_colors(Preset::Mist, &StatusFills::default(), Tone::Done).fill.unwrap());
+        assert_eq!(
+            Status::Done.default_fill(Preset::Mist),
+            tone_colors(Preset::Mist, &StatusFills::default(), Tone::Done).fill.unwrap()
+        );
     }
 
     #[test]

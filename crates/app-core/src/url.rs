@@ -5,8 +5,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-static URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"https?://[^\s<>"'`]+"#).expect("valid URL regex"));
+static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"'`]+"#).expect("valid URL regex"));
 
 /// A URL found in a line of terminal text.
 #[derive(Clone, Debug, PartialEq, Eq)]

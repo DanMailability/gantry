@@ -99,7 +99,8 @@ mod tests {
         assert!(load(&path).is_err());
         let mut broken = sample();
         broken.leaves.clear();
-        std::fs::write(&path, serde_json::to_string(&SavedLayout { version: VERSION, workspace: broken }).unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&SavedLayout { version: VERSION, workspace: broken }).unwrap())
+            .unwrap();
         assert!(load(&path).is_err());
     }
 
@@ -128,8 +129,12 @@ mod tests {
     fn layouts_saved_before_m4_still_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("layout.json");
-        std::fs::write(&path, r#"{"version":1,"workspace":{"instance":"i","tabs":[{"root":{"Leaf":1},"focused":1}],"active":0,
-            "leaves":{"1":{"pane":null,"launch":{"program":"claude","args":[],"cwd":"/r"}}},"next_id":1}}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"workspace":{"instance":"i","tabs":[{"root":{"Leaf":1},"focused":1}],"active":0,
+            "leaves":{"1":{"pane":null,"launch":{"program":"claude","args":[],"cwd":"/r"}}},"next_id":1}}"#,
+        )
+        .unwrap();
         let workspace = load(&path).unwrap().unwrap();
         assert_eq!(workspace.leaves[&1].session, None);
         assert_eq!(workspace.sidebar, crate::workspace::SidebarState::default());

@@ -8,11 +8,11 @@ use app_core::session_tree::Tone;
 use std::path::Path;
 
 use app_core::settings::{ProjectColors, StatusFills};
+use app_core::theme_colors::{Preset, Tokens, ToneColors, tone_colors};
 use app_core::workspace::DirBadge;
-use app_core::theme_colors::{Preset, ToneColors, Tokens, tone_colors};
 use gpui::{
-    Animation, AnimationExt, App, Div, ElementId, FontWeight, Global, IntoElement, ParentElement, Pixels, Styled, Svg, div, hsla, linear_color_stop,
-    linear_gradient, px, relative, rgb, rgba, svg,
+    Animation, AnimationExt, App, Div, ElementId, FontWeight, Global, IntoElement, ParentElement, Pixels, Styled, Svg,
+    div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
 };
 
 use crate::assets::CONTAINER_ICON;
@@ -61,7 +61,14 @@ impl Theme {
 /// A project's side line: 4 px wide, rounded, inset 4 px from the left edge and 6 px from the top and bottom of
 /// the (relatively positioned) row, tab or header it is a child of.
 pub(crate) fn side_line(color: u32, theme: &Theme) -> Div {
-    div().absolute().left(theme.ui(4.)).top(theme.ui(6.)).bottom(theme.ui(6.)).w(theme.ui(4.)).rounded(px(2.)).bg(rgb(color))
+    div()
+        .absolute()
+        .left(theme.ui(4.))
+        .top(theme.ui(6.))
+        .bottom(theme.ui(6.))
+        .w(theme.ui(4.))
+        .rounded(px(2.))
+        .bg(rgb(color))
 }
 
 /// The theme global.
@@ -149,8 +156,16 @@ pub(crate) fn working_sweep(id: impl Into<ElementId>, inset: Pixels, theme: &The
                 let (left, strength) = sweep_band(progress);
                 let alpha = peak * strength;
                 band.left(relative(left))
-                    .child(div().h_full().flex_1().bg(linear_gradient(90., linear_color_stop(glow(0.), 0.), linear_color_stop(glow(alpha), 1.))))
-                    .child(div().h_full().flex_1().bg(linear_gradient(90., linear_color_stop(glow(alpha), 0.), linear_color_stop(glow(0.), 1.))))
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(glow(0.), 0.),
+                        linear_color_stop(glow(alpha), 1.),
+                    )))
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(glow(alpha), 0.),
+                        linear_color_stop(glow(0.), 1.),
+                    )))
             },
         ),
     )
@@ -205,7 +220,14 @@ mod tests {
     }
 
     fn theme(preset: Preset) -> Theme {
-        Theme { preset, tokens: tokens(preset), fills: StatusFills::default(), selection: None, ui_scale: 1.0, project_colors: ProjectColors::default() }
+        Theme {
+            preset,
+            tokens: tokens(preset),
+            fills: StatusFills::default(),
+            selection: None,
+            ui_scale: 1.0,
+            project_colors: ProjectColors::default(),
+        }
     }
 
     #[test]
@@ -236,7 +258,11 @@ mod tests {
     #[test]
     fn pane_cards_match_the_terminal_background() {
         for preset in PRESETS {
-            assert_eq!(app_core::snapshot::Rgb::hex(tokens(preset).terminal), terminal_palette(preset).background, "{preset:?}");
+            assert_eq!(
+                app_core::snapshot::Rgb::hex(tokens(preset).terminal),
+                terminal_palette(preset).background,
+                "{preset:?}"
+            );
         }
     }
 

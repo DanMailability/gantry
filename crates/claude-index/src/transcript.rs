@@ -111,9 +111,11 @@ fn user_prompt(record: &Value) -> Option<String> {
     }
     let text = match record.get("message")?.get("content")? {
         Value::String(text) => text.as_str(),
-        Value::Array(blocks) => {
-            blocks.iter().find(|block| block.get("type").and_then(Value::as_str) == Some("text"))?.get("text")?.as_str()?
-        }
+        Value::Array(blocks) => blocks
+            .iter()
+            .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))?
+            .get("text")?
+            .as_str()?,
         _ => return None,
     };
     let text = text.trim_start();
@@ -149,12 +151,15 @@ mod tests {
     #[test]
     fn summary_reads_directory_prompt_and_titles() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), &[
-            r#"{"type":"mode","mode":"normal"}"#.into(),
-            serde_json::json!({"type": "attachment", "cwd": "/home/me/repo"}).to_string(),
-            user("Fix the Jenkins lib\nsecond line"),
-            record("ai-title", "aiTitle", "Jenkins library fix"),
-        ]);
+        let path = write(
+            dir.path(),
+            &[
+                r#"{"type":"mode","mode":"normal"}"#.into(),
+                serde_json::json!({"type": "attachment", "cwd": "/home/me/repo"}).to_string(),
+                user("Fix the Jenkins lib\nsecond line"),
+                record("ai-title", "aiTitle", "Jenkins library fix"),
+            ],
+        );
         let summary = summarize(&path).unwrap().unwrap();
         assert_eq!(summary.session_id, "0f3c-session");
         assert_eq!(summary.cwd, PathBuf::from("/home/me/repo"));
@@ -182,13 +187,16 @@ mod tests {
     #[test]
     fn newest_title_records_win() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), &[
-            user("hello"),
-            record("ai-title", "aiTitle", "old title"),
-            record("custom-title", "customTitle", "First name"),
-            record("ai-title", "aiTitle", "new title"),
-            record("agent-name", "agentName", "Second name"),
-        ]);
+        let path = write(
+            dir.path(),
+            &[
+                user("hello"),
+                record("ai-title", "aiTitle", "old title"),
+                record("custom-title", "customTitle", "First name"),
+                record("ai-title", "aiTitle", "new title"),
+                record("agent-name", "agentName", "Second name"),
+            ],
+        );
         let summary = summarize(&path).unwrap().unwrap();
         assert_eq!((summary.name.as_deref(), summary.ai_title.as_deref()), (Some("Second name"), Some("new title")));
     }
@@ -208,7 +216,8 @@ mod tests {
     #[test]
     fn transcripts_without_a_directory_or_content_are_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        let no_cwd = write(dir.path(), &[serde_json::json!({"type": "user", "message": {"content": "hi"}}).to_string()]);
+        let no_cwd =
+            write(dir.path(), &[serde_json::json!({"type": "user", "message": {"content": "hi"}}).to_string()]);
         assert_eq!(summarize(&no_cwd).unwrap(), None);
         let empty = write(dir.path(), &[serde_json::json!({"type": "attachment", "cwd": "/r"}).to_string()]);
         assert_eq!(summarize(&empty).unwrap(), None);
@@ -237,7 +246,8 @@ mod tests {
     #[test]
     fn titles_are_found_at_the_end_of_large_transcripts() {
         let dir = tempfile::tempdir().unwrap();
-        let filler: Vec<String> = (0..2000).map(|i| format!(r#"{{"type":"assistant","n":{i},"pad":"{}"}}"#, "y".repeat(200))).collect();
+        let filler: Vec<String> =
+            (0..2000).map(|i| format!(r#"{{"type":"assistant","n":{i},"pad":"{}"}}"#, "y".repeat(200))).collect();
         let mut lines = vec![user("start"), record("ai-title", "aiTitle", "early only")];
         lines.extend(filler);
         lines.push(record("custom-title", "customTitle", "Late name"));

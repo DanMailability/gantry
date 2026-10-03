@@ -80,8 +80,11 @@ impl Registry {
 
     /// Remember that `session` runs in the container `container_id` (a known one). Whether anything changed.
     pub fn remember_session(&mut self, session: &str, container_id: &str) -> bool {
-        let Some(mapping) = self.mappings.iter().rev().find(|m| same_container(&m.container_id, container_id)) else { return false };
-        let place = SessionPlace { container_id: mapping.container_id.clone(), host_folder: mapping.host_folder.clone() };
+        let Some(mapping) = self.mappings.iter().rev().find(|m| same_container(&m.container_id, container_id)) else {
+            return false;
+        };
+        let place =
+            SessionPlace { container_id: mapping.container_id.clone(), host_folder: mapping.host_folder.clone() };
         if self.sessions.get(session) == Some(&place) {
             return false;
         }
@@ -140,7 +143,11 @@ impl Registry {
     /// one when it was seen running in a container (remembered), when a container process runs it, or when its
     /// directory lies under a remembered mapping (or `/workspaces`) and does not exist on this host. Its own
     /// container's mapping wins, else the newest that covers its directory.
-    pub fn place(&self, record: &SessionRecord, host_dir_exists: &dyn Fn(&Path) -> bool) -> Option<(ContainerPlace, Option<PathBuf>)> {
+    pub fn place(
+        &self,
+        record: &SessionRecord,
+        host_dir_exists: &dyn Fn(&Path) -> bool,
+    ) -> Option<(ContainerPlace, Option<PathBuf>)> {
         // A session seen running in a container belongs to it, wherever its directory is.
         if let Some(seen) = self.sessions.get(&record.id) {
             let mapping = self
@@ -150,9 +157,15 @@ impl Registry {
                 .find(|m| m.container_id == seen.container_id)
                 .or_else(|| self.mappings.iter().rev().find(|m| m.host_folder == seen.host_folder));
             let host_cwd = mapping.and_then(|m| to_host(&m.mounts, &record.cwd));
-            return Some((ContainerPlace { host_folder: Some(seen.host_folder.clone()), path: record.cwd.clone() }, host_cwd));
+            return Some((
+                ContainerPlace { host_folder: Some(seen.host_folder.clone()), path: record.cwd.clone() },
+                host_cwd,
+            ));
         }
-        let own = record.container_id.as_deref().and_then(|id| self.mappings.iter().rev().find(|m| same_container(&m.container_id, id)));
+        let own = record
+            .container_id
+            .as_deref()
+            .and_then(|id| self.mappings.iter().rev().find(|m| same_container(&m.container_id, id)));
         let mapping = own
             .filter(|m| to_host(&m.mounts, &record.cwd).is_some())
             .or_else(|| self.mappings.iter().rev().find(|m| to_host(&m.mounts, &record.cwd).is_some()));
@@ -173,7 +186,8 @@ pub fn marker(instance: &str, pane: PaneId) -> String {
 }
 
 /// What resuming a session whose dev container is gone says.
-pub const GONE: &str = "This session ran in a dev container that no longer exists. Open the project in VS Code to rebuild it.";
+pub const GONE: &str =
+    "This session ran in a dev container that no longer exists. Open the project in VS Code to rebuild it.";
 
 /// Quote `word` for `bash -c` (single quotes; `'` becomes `'\''`).
 pub fn shell_quote(word: &str) -> String {
@@ -182,20 +196,28 @@ pub fn shell_quote(word: &str) -> String {
 
 /// The `docker exec` command line that runs `program args` in `c` at `container_cwd`, through an interactive bash
 /// so `.bashrc` puts `~/.local/bin` on `PATH`, as in VS Code's terminal. Programs other than Claude get `bash -i`.
-pub fn exec_command(c: &Container, container_cwd: &Path, program: &str, args: &[String], marker: &str) -> (String, Vec<String>) {
+pub fn exec_command(
+    c: &Container,
+    container_cwd: &Path,
+    program: &str,
+    args: &[String],
+    marker: &str,
+) -> (String, Vec<String>) {
     let mut out: Vec<String> = vec!["exec".into(), "-it".into()];
     if let Some(user) = &c.remote_user {
         out.extend(["-u".into(), user.clone()]);
     }
     out.extend(["-w".into(), container_cwd.display().to_string()]);
-    let mut vars = vec!["TERM=xterm-256color".to_string(), "COLORTERM=truecolor".into(), format!("{PANE_MARKER}={marker}")];
+    let mut vars =
+        vec!["TERM=xterm-256color".to_string(), "COLORTERM=truecolor".into(), format!("{PANE_MARKER}={marker}")];
     vars.extend(c.config_dir.as_ref().map(|dir| format!("CLAUDE_CONFIG_DIR={dir}")));
     for var in vars {
         out.extend(["-e".into(), var]);
     }
     out.push(c.id.clone());
     if Path::new(program).file_stem().is_some_and(|stem| stem == "claude") {
-        let words: Vec<String> = std::iter::once(program).chain(args.iter().map(String::as_str)).map(shell_quote).collect();
+        let words: Vec<String> =
+            std::iter::once(program).chain(args.iter().map(String::as_str)).map(shell_quote).collect();
         out.extend(["bash".into(), "-ic".into(), format!("exec {}", words.join(" "))]);
     } else {
         out.extend(["bash".into(), "-i".into()]);
@@ -223,7 +245,9 @@ pub fn ready(docker: &impl Docker, registry: &mut Registry, host_folder: &Path) 
     registry.refresh(docker).map_err(|err| format!("Docker is not available: {err}"))?;
     let container = choose(registry.containers(), host_folder).cloned().ok_or_else(|| GONE.to_string())?;
     if !container.running {
-        docker.start(&container.id).map_err(|err| format!("Could not start the dev container {}: {err}", container.name))?;
+        docker
+            .start(&container.id)
+            .map_err(|err| format!("Could not start the dev container {}: {err}", container.name))?;
     }
     Ok(container)
 }
@@ -307,7 +331,8 @@ mod tests {
         let file = dir.path().join("containers.json");
         let mut registry = Registry::load(Some(file.clone()));
         registry.refresh(&FakeDocker(vec![container("c1", "/home/u/app", "/workspaces/app", "1")])).unwrap();
-        let (place, host) = registry.place(&record("/workspaces/app/sub", IndexState::Closed, None), &|_| false).unwrap();
+        let (place, host) =
+            registry.place(&record("/workspaces/app/sub", IndexState::Closed, None), &|_| false).unwrap();
         assert_eq!(
             (place.host_folder.as_deref(), place.path.as_path(), host.as_deref()),
             (Some(Path::new("/home/u/app")), Path::new("/workspaces/app/sub"), Some(Path::new("/home/u/app/sub")))
@@ -329,8 +354,9 @@ mod tests {
                 container("new", "/home/u/b/app", "/workspaces/app", "2026-06-01"),
             ]))
             .unwrap();
-        let place =
-            |id: Option<&str>| registry.place(&record("/workspaces/app", IndexState::Closed, id), &|_| false).unwrap().0.host_folder;
+        let place = |id: Option<&str>| {
+            registry.place(&record("/workspaces/app", IndexState::Closed, id), &|_| false).unwrap().0.host_folder
+        };
         assert_eq!(place(Some("old")), Some("/home/u/a/app".into()));
         assert_eq!(place(None), Some("/home/u/b/app".into()));
     }
@@ -357,13 +383,30 @@ mod tests {
     #[test]
     fn claude_runs_through_an_interactive_bash_as_the_container_user() {
         let c = container("c1", "/home/u/app", "/workspaces/app", "1");
-        let (program, args) = exec_command(&c, Path::new("/workspaces/app/sub"), "claude", &["--resume".into(), "it's".into()], "i:4");
+        let (program, args) =
+            exec_command(&c, Path::new("/workspaces/app/sub"), "claude", &["--resume".into(), "it's".into()], "i:4");
         assert_eq!(program, "docker");
         assert_eq!(
             args,
             [
-                "exec", "-it", "-u", "u", "-w", "/workspaces/app/sub", "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor",
-                "-e", "GANTRY_PANE=i:4", "-e", "CLAUDE_CONFIG_DIR=/home/u/.claude", "c1", "bash", "-ic", "exec 'claude' '--resume' 'it'\\''s'",
+                "exec",
+                "-it",
+                "-u",
+                "u",
+                "-w",
+                "/workspaces/app/sub",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                "COLORTERM=truecolor",
+                "-e",
+                "GANTRY_PANE=i:4",
+                "-e",
+                "CLAUDE_CONFIG_DIR=/home/u/.claude",
+                "c1",
+                "bash",
+                "-ic",
+                "exec 'claude' '--resume' 'it'\\''s'",
             ]
             .map(String::from)
         );
@@ -446,7 +489,10 @@ mod tests {
             .unwrap();
         // While running, the index names the container (from the process's cgroup); once closed it does not.
         assert!(registry.remember(&record("/workspaces/app", IndexState::InContainer { pid: Some(5) }, Some("old"))));
-        assert!(registry.remember(&SessionRecord { id: "t".into(), ..record("/home/u/c", IndexState::InContainer { pid: Some(6) }, Some("same")) }));
+        assert!(registry.remember(&SessionRecord {
+            id: "t".into(),
+            ..record("/home/u/c", IndexState::InContainer { pid: Some(6) }, Some("same"))
+        }));
         let later = Registry::load(Some(file));
         let closed = later.place(&record("/workspaces/app", IndexState::Closed, None), &|_| false).unwrap();
         assert_eq!((closed.0.host_folder, closed.1), (Some("/home/u/a/app".into()), Some("/home/u/a/app".into())));

@@ -57,9 +57,16 @@ pub struct ContainerView<'a> {
 /// that pane has no running record of its own (Claude has not written its pid file yet); once it has one (e.g.
 /// after `/clear`), the start session is closed. A record whose process is `gone` counts as closed: the index has
 /// not noticed the exit yet. Container sessions report their host directory when it is known.
-pub fn resolve(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone], view: &ContainerView) -> Vec<SessionInfo> {
+pub fn resolve(
+    records: &[SessionRecord],
+    panes: &[PaneSession],
+    gone: &[Gone],
+    view: &ContainerView,
+) -> Vec<SessionInfo> {
     let index_state = |r: &SessionRecord| match r.state {
-        IndexState::Running { pid } if gone.iter().any(|g| g.pid == pid && g.start == r.proc_start) => IndexState::Closed,
+        IndexState::Running { pid } if gone.iter().any(|g| g.pid == pid && g.start == r.proc_start) => {
+            IndexState::Closed
+        }
         state => state,
     };
     let by_pid: HashMap<u32, PaneId> = panes.iter().filter_map(|p| Some((p.pid?, p.pane))).collect();
@@ -225,28 +232,34 @@ mod tests {
             record("old", IndexState::Closed),
         ];
         let sessions = plain(&records, &[pane(7, 100, None)], &[]);
-        assert_eq!(states(&sessions), vec![
-            ("mine", SessionState::Managed { pane: 7 }),
-            ("other", SessionState::External { pid: Some(200) }),
-            ("boxed", SessionState::External { pid: None }),
-            ("old", SessionState::Closed),
-        ]);
+        assert_eq!(
+            states(&sessions),
+            vec![
+                ("mine", SessionState::Managed { pane: 7 }),
+                ("other", SessionState::External { pid: Some(200) }),
+                ("boxed", SessionState::External { pid: None }),
+                ("old", SessionState::Closed),
+            ]
+        );
         assert_eq!((sessions[0].title.as_str(), sessions[0].cwd_exists), ("mine", true));
     }
 
     #[test]
     fn a_pane_is_managed_by_its_launch_session_until_its_process_reports() {
         let records = [record("launched", IndexState::Closed)];
-        assert_eq!(states(&plain(&records, &[pane(7, 100, Some("launched"))], &[])), vec![("launched", SessionState::Managed { pane: 7 })]);
+        assert_eq!(
+            states(&plain(&records, &[pane(7, 100, Some("launched"))], &[])),
+            vec![("launched", SessionState::Managed { pane: 7 })]
+        );
     }
 
     #[test]
     fn after_clear_the_launch_session_is_closed() {
         let records = [record("launched", IndexState::Closed), record("after-clear", IndexState::Running { pid: 100 })];
-        assert_eq!(states(&plain(&records, &[pane(7, 100, Some("launched"))], &[])), vec![
-            ("launched", SessionState::Closed),
-            ("after-clear", SessionState::Managed { pane: 7 }),
-        ]);
+        assert_eq!(
+            states(&plain(&records, &[pane(7, 100, Some("launched"))], &[])),
+            vec![("launched", SessionState::Closed), ("after-clear", SessionState::Managed { pane: 7 }),]
+        );
     }
 
     #[test]
@@ -260,11 +273,14 @@ mod tests {
         let sessions = plain(&[busy, asks, stale], &[pane(7, 100, None)], &[]);
         let status: Vec<(&str, Option<SessionStatus>, u64)> =
             sessions.iter().map(|s| (s.id.as_str(), s.status.clone(), s.status_since_ms)).collect();
-        assert_eq!(status, vec![
-            ("busy", Some(SessionStatus::Busy), 50),
-            ("asks", Some(SessionStatus::NeedsInput { reason: Some("dialog open".into()) }), 60),
-            ("old", None, 0),
-        ]);
+        assert_eq!(
+            status,
+            vec![
+                ("busy", Some(SessionStatus::Busy), 50),
+                ("asks", Some(SessionStatus::NeedsInput { reason: Some("dialog open".into()) }), 60),
+                ("old", None, 0),
+            ]
+        );
     }
 
     #[test]
@@ -294,8 +310,16 @@ mod tests {
     #[test]
     fn diff_reports_new_changed_and_removed_sessions() {
         let infos = |records: &[SessionRecord]| plain(records, &[], &[]);
-        let old = infos(&[record("same", IndexState::Closed), record("changes", IndexState::Closed), record("goes", IndexState::Closed)]);
-        let new = infos(&[record("same", IndexState::Closed), record("changes", IndexState::Running { pid: 5 }), record("arrives", IndexState::Closed)]);
+        let old = infos(&[
+            record("same", IndexState::Closed),
+            record("changes", IndexState::Closed),
+            record("goes", IndexState::Closed),
+        ]);
+        let new = infos(&[
+            record("same", IndexState::Closed),
+            record("changes", IndexState::Running { pid: 5 }),
+            record("arrives", IndexState::Closed),
+        ]);
         let (upserted, removed) = diff(&old, &new);
         assert_eq!(upserted.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["changes", "arrives"]);
         assert_eq!(removed, vec!["goes".to_string()]);
@@ -313,11 +337,14 @@ mod tests {
         let view = ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true };
         // Pane 4 was started as `launched`, then `/clear`ed into `boxed`: the launch session is closed.
         let sessions = resolve(&records, &[pane(4, 100, Some("launched"))], &[], &view);
-        assert_eq!(states(&sessions), vec![
-            ("boxed", SessionState::Managed { pane: 4 }),
-            ("vscode", SessionState::External { pid: Some(9008) }),
-            ("launched", SessionState::Closed),
-        ]);
+        assert_eq!(
+            states(&sessions),
+            vec![
+                ("boxed", SessionState::Managed { pane: 4 }),
+                ("vscode", SessionState::External { pid: Some(9008) }),
+                ("launched", SessionState::Closed),
+            ]
+        );
     }
 
     #[test]
@@ -347,7 +374,9 @@ mod tests {
         boxed.cwd = "/workspaces/app/src".into();
         let marked = HashMap::new();
         let exists = |path: &std::path::Path| path == std::path::Path::new("/home/u/app/src");
-        let info = resolve(&[boxed], &[], &[], &ContainerView { registry: &registry, marked: &marked, dir_exists: &exists }).remove(0);
+        let info =
+            resolve(&[boxed], &[], &[], &ContainerView { registry: &registry, marked: &marked, dir_exists: &exists })
+                .remove(0);
         assert_eq!((info.cwd.as_path(), info.cwd_exists), (std::path::Path::new("/home/u/app/src"), true));
         assert_eq!(
             info.container,
@@ -362,7 +391,10 @@ mod tests {
         (b.last_active_ms, b.claude_dir) = (9, Some("/b".into()));
         let only = record("only", IndexState::Closed);
         let merged = merge_records([&Arc::new(vec![a, only]), &Arc::new(vec![b])]);
-        assert_eq!(merged.iter().map(|r| (r.id.as_str(), r.last_active_ms)).collect::<Vec<_>>(), vec![("dup", 9), ("only", 1)]);
+        assert_eq!(
+            merged.iter().map(|r| (r.id.as_str(), r.last_active_ms)).collect::<Vec<_>>(),
+            vec![("dup", 9), ("only", 1)]
+        );
         assert_eq!(merged[0].claude_dir.as_deref(), Some(Path::new("/b")));
     }
 }
