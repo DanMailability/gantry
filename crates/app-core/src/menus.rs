@@ -245,6 +245,17 @@ pub fn tab_menu(tab: usize, dir: &Path, vscode: Vec<String>, context: &MenuConte
     items
 }
 
+/// What a middle click on a sidebar row does: a split tab's heading closes the tab, a pane's row closes the pane
+/// (and its tab with its last pane); rows without a pane do nothing.
+pub fn middle_click(row: &Row) -> Option<MenuAction> {
+    match &row.kind {
+        RowKind::Tab { index, .. } => Some(MenuAction::CloseTab(*index)),
+        RowKind::Session { leaf: Some(leaf), .. } => Some(MenuAction::ClosePane(*leaf)),
+        RowKind::Pane { entry, .. } => Some(MenuAction::ClosePane(entry.leaf)),
+        _ => None,
+    }
+}
+
 fn close_item(leaf: NodeId, alone: &dyn Fn(NodeId) -> bool) -> MenuItem {
     let label = if alone(leaf) { "Close tab" } else { "Close pane" };
     with_shortcut(label, Shortcut::Close, MenuAction::ClosePane(leaf))
@@ -381,6 +392,17 @@ mod tests {
     }
 
     const ALONE: &dyn Fn(NodeId) -> bool = &|_| true;
+
+    #[test]
+    fn a_middle_click_closes_the_pane_or_tab_a_row_stands_for() {
+        let running = SessionState::Managed { pane: 1 };
+        assert_eq!(middle_click(&session_row(running, Tone::Working, Some(4))), Some(MenuAction::ClosePane(4)));
+        assert_eq!(middle_click(&pane_row(false, false)), Some(MenuAction::ClosePane(7)));
+        let heading = Row::new(RowKind::Tab { index: 2, title: "t".into(), panes: 2, focused: 4, first: 3 });
+        assert_eq!(middle_click(&heading), Some(MenuAction::CloseTab(2)));
+        assert_eq!(middle_click(&session_row(SessionState::External { pid: Some(9) }, Tone::Elsewhere, None)), None, "not in Gantry");
+        assert_eq!(middle_click(&Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true })), None);
+    }
 
     #[test]
     fn a_tab_offers_splits_folder_items_and_close() {

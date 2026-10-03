@@ -177,7 +177,7 @@ pub fn current(action: &str, overrides: &BTreeMap<String, Option<String>>, platf
     let entry = ACTIONS.iter().find(|entry| entry.id == action)?;
     match overrides.get(action) {
         Some(None) => None,
-        Some(Some(keystroke)) if matches!(check(keystroke, action, &[]), Check::Ok) => Some(canonical(keystroke)),
+        Some(Some(keystroke)) if !matches!(check(keystroke, action, &[]), Check::Invalid) => Some(canonical(keystroke)),
         _ => default_of(entry, platform).map(String::from),
     }
 }
@@ -222,7 +222,7 @@ pub fn bindings(overrides: &BTreeMap<String, Option<String>>, platform: Platform
 pub enum Check {
     /// Usable.
     Ok,
-    /// The terminal needs it; the reason is shown to the user.
+    /// Programs in the terminal use it: usable once the user confirms; the reason is shown to the user.
     Reserved(&'static str),
     /// Another action has it (its id).
     Conflict(&'static str),
@@ -247,12 +247,21 @@ pub fn check(keystroke: &str, action: &str, current: &[(&'static str, String)]) 
     if parsed.ctrl && !parsed.alt && !parsed.shift && !parsed.cmd && letter {
         return Check::Reserved("belongs to the terminal");
     }
-    let wanted = parsed.canonical();
-    let clash = current.iter().find(|(id, bound)| *id != action && canonical(bound) == wanted);
-    match clash {
-        Some((id, _)) => Check::Conflict(id),
+    match conflict(keystroke, action, current) {
+        Some(id) => Check::Conflict(id),
         None => Check::Ok,
     }
+}
+
+/// The other action in `current` that has `keystroke`, if any.
+pub fn conflict(keystroke: &str, action: &str, current: &[(&'static str, String)]) -> Option<&'static str> {
+    let wanted = canonical(keystroke);
+    current.iter().find(|(id, bound)| *id != action && canonical(bound) == wanted).map(|(id, _)| *id)
+}
+
+/// Whether binding `keystroke` takes it away from programs in the terminal.
+pub fn takes_from_terminal(keystroke: &str) -> bool {
+    matches!(check(keystroke, "", &[]), Check::Reserved(_))
 }
 
 /// Display text: `Ctrl+Shift+R` (Linux, Windows), `⌘⇧R` (macOS); `Not set` for `None`.
@@ -373,10 +382,20 @@ mod tests {
         assert_eq!(current("toggleSidebar", &overrides, Platform::Linux).as_deref(), Some("ctrl-alt-s"));
         assert_eq!(current("splitRightClaude", &overrides, Platform::Linux), None);
         assert_eq!(current("closePane", &overrides, Platform::Linux).as_deref(), Some("ctrl-shift-w"));
-        // An unusable override falls back to the default.
-        let bad = of(&[("closePane", Some("ctrl-c")), ("copy", Some("bogus-key"))]);
-        assert_eq!(current("closePane", &bad, Platform::Linux).as_deref(), Some("ctrl-shift-w"));
+        // A key taken from the terminal is used; a keystroke that is not one falls back to the default.
+        let bad = of(&[("closePane", Some("ctrl-w")), ("copy", Some("bogus-key"))]);
+        assert_eq!(current("closePane", &bad, Platform::Linux).as_deref(), Some("ctrl-w"));
         assert_eq!(current("copy", &bad, Platform::Linux).as_deref(), Some("ctrl-shift-c"));
+    }
+
+    #[test]
+    fn terminal_keys_are_marked_and_still_clash() {
+        assert!(takes_from_terminal("ctrl-w") && takes_from_terminal("enter") && takes_from_terminal("t"));
+        assert!(!takes_from_terminal("ctrl-shift-w") && !takes_from_terminal("bogus-key"));
+        let taken = bindings(&of(&[("closePane", Some("ctrl-w"))]), Platform::Linux);
+        assert!(taken.iter().any(|(id, key)| *id == "closePane" && key == "ctrl-w"));
+        assert_eq!(conflict("ctrl-w", "copy", &taken), Some("closePane"));
+        assert_eq!(conflict("ctrl-w", "closePane", &taken), None, "its own key is no clash");
     }
 
     #[test]

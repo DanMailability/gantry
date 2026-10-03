@@ -189,12 +189,10 @@ fn shortcut_problems(overrides: &BTreeMap<String, Option<String>>) -> Vec<Proble
         .iter()
         .filter(|(id, _)| shortcuts::ACTIONS.iter().any(|action| action.id == id.as_str()))
         .filter_map(|(id, keystroke)| {
-            let message = match shortcuts::check(keystroke.as_deref()?, id, &[]) {
-                Check::Invalid => "not a keystroke",
-                Check::Reserved(_) => "reserved for the terminal",
-                Check::Ok | Check::Conflict(_) => return None,
-            };
-            Some(Problem { key: format!("shortcuts.{id}"), message: format!("{message}; the default is used") })
+            match shortcuts::check(keystroke.as_deref()?, id, &[]) {
+                Check::Invalid => Some(Problem { key: format!("shortcuts.{id}"), message: "not a keystroke; the default is used".into() }),
+                Check::Ok | Check::Reserved(_) | Check::Conflict(_) => None,
+            }
         })
         .collect()
 }
@@ -316,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn unusable_shortcut_overrides_are_problems_and_the_rest_are_not() {
+    fn only_shortcut_overrides_that_are_not_keystrokes_are_problems() {
         let overrides: BTreeMap<String, Option<String>> = [
             ("closePane", Some("ctrl-c")),
             ("copy", Some("bogus-key")),
@@ -328,7 +326,7 @@ mod tests {
         .map(|(id, key)| (id.to_string(), key.map(String::from)))
         .collect();
         let keys: Vec<String> = shortcut_problems(&overrides).into_iter().map(|problem| problem.key).collect();
-        assert_eq!(keys, ["shortcuts.closePane", "shortcuts.copy"]);
+        assert_eq!(keys, ["shortcuts.copy"], "a key taken from the terminal is allowed");
     }
 
     #[test]
