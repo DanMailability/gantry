@@ -54,7 +54,8 @@ jobs:
           # Keep the built dependencies even when clippy or a test fails (first macOS/Windows runs).
           cache-on-failure: true
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Every crate's failures in one run, not just the first crate's.
+      - run: cargo test --workspace --no-fail-fast
 
   deny:
     if: github.event_name != 'workflow_dispatch' || inputs.linux

@@ -352,6 +352,8 @@ mod tests {
         assert_eq!(dir_badge_for(&settings, None), None);
     }
 
+    // Linux/Windows labels (macOS shows ⌘ symbols).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn labels_follow_the_overrides() {
         let mut settings = Settings::default();
