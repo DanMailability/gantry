@@ -26,7 +26,7 @@ use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, group_tint, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
+use crate::theme::{RADIUS, Theme, UI_FONT, group_tint, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -572,23 +572,9 @@ impl SidebarView {
                         .children(project()),
                 )
             }
-            RowKind::Tab { index, title: tab_title, panes, .. } => base.child(
+            RowKind::Tab { title: tab_title, panes, .. } => base.child(
                 lined(pill(None))
                     .h(theme.ui(28.))
-                    .child(
-                        div()
-                            .flex_none()
-                            .min_w(theme.ui(18.))
-                            .h(theme.ui(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_1()
-                            .border_color(rgb(theme.tokens.line))
-                            .rounded(px(RADIUS_SMALL - 3.))
-                            .text_xs()
-                            .child((index + 1).to_string()),
-                    )
                     .child(title(tab_title.clone()).font_weight(FontWeight::SEMIBOLD))
                     .child(aside(format!("{panes} panes"), theme.tokens.muted)),
             ),

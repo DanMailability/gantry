@@ -127,9 +127,9 @@ impl ProjectOrder {
 /// One tab of the layout, for grouping split tabs in the Active list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabEntry {
-    /// Position in the tab bar (0-based; shown as `index + 1`).
+    /// Index in the workspace's tabs.
     pub index: usize,
-    /// Its title, as the tab bar shows it.
+    /// Its title, as the title bar shows it.
     pub title: String,
     /// The leaf with focus in it.
     pub focused: NodeId,
@@ -254,7 +254,7 @@ pub enum RowKind {
     Tab {
         /// Index in the workspace's tabs.
         index: usize,
-        /// Its title, as the tab bar shows it.
+        /// Its title, as the title bar shows it.
         title: String,
         /// How many panes it has.
         panes: usize,

@@ -20,7 +20,7 @@ pub enum Preset {
 pub struct Tokens {
     /// Behind everything: the window and the gaps between panes.
     pub ground: u32,
-    /// Sidebar and tab bar.
+    /// Sidebar and title bar.
     pub surface: u32,
     /// Fields, buttons, the active segment of a switch.
     pub raised: u32,

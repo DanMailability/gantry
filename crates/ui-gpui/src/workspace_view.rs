@@ -160,6 +160,8 @@ pub struct WorkspaceView {
     recents: Option<(Entity<RecentsView>, Subscription)>,
     /// The Settings page, while its tab is open.
     settings: Option<Entity<SettingsView>>,
+    /// The leaf that had focus when Settings opened; closing Settings goes back to it.
+    before_settings: Option<NodeId>,
     /// The open right-click menu of a tab.
     tab_menu: Option<OpenMenu>,
     /// Take-over requests waiting for the daemon, by session.
@@ -254,6 +256,7 @@ impl WorkspaceView {
             launcher: None,
             recents: None,
             settings: None,
+            before_settings: None,
             tab_menu: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
@@ -1166,6 +1169,9 @@ impl WorkspaceView {
     }
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(leaf) = self.workspace.focused() {
+            self.before_settings = Some(leaf);
+        }
         self.workspace.open_settings();
         if self.settings.is_none() {
             self.settings = Some(cx.new(|cx| SettingsView::new(self.daemon_dir.clone(), window, cx)));
@@ -1177,7 +1183,11 @@ impl WorkspaceView {
 
     /// Close the Settings tab and drop its page; no confirmation, it runs nothing.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = self.settings_active();
         self.workspace.close_settings();
+        if let Some(leaf) = self.before_settings.take().filter(|_| showing) {
+            self.workspace.focus(leaf);
+        }
         self.settings = None;
         self.focus_current(window, cx);
         self.save(cx);
@@ -1274,7 +1284,7 @@ impl WorkspaceView {
                     let brand = brand.w(theme.ui(sidebar.width) + px(SIDEBAR_EDGE)).pl(theme.ui(18.));
                     bar.child(if client_decorations { moves_window(brand) } else { brand })
                 } else {
-                    bar.pl_2().child(brand)
+                    bar.pl_2().child(if client_decorations { moves_window(brand) } else { brand })
                 }
             })
             .child(self.render_title_session(window, cx))
@@ -1354,11 +1364,12 @@ impl WorkspaceView {
         middle
             .children(project.map(|(label, color)| {
                 div()
-                    .flex_none()
+                    .min_w_0()
+                    .max_w(theme.ui(240.))
                     .flex()
                     .gap(theme.ui(8.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(color)).child(label))
-                    .child(div().text_color(rgb(theme.tokens.muted)).child("›"))
+                    .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_color(rgb(color)).child(label))
+                    .child(div().flex_none().text_color(rgb(theme.tokens.muted)).child("›"))
             }))
             .child(
                 div()
