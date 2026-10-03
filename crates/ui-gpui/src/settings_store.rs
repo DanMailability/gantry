@@ -171,6 +171,7 @@ fn apply(cx: &mut App) {
     problems.extend(shortcut_problems(&settings.shortcuts));
     let ui_scale = settings.ui_font_size / BASE_UI_FONT_SIZE;
     let project_colors = settings.project_colors.clone();
+    let selection = settings.selection;
     store.problems = problems;
     let rebind = store.bound.as_ref() != Some(&store.settings.shortcuts);
     if rebind {
@@ -179,7 +180,7 @@ fn apply(cx: &mut App) {
         cx.clear_key_bindings();
         cx.bind_keys(bindings);
     }
-    cx.set_global(Theme { preset, tokens, fills, ui_scale, project_colors });
+    cx.set_global(Theme { preset, tokens, fills, selection, ui_scale, project_colors });
     cx.refresh_windows();
 }
 

@@ -99,6 +99,14 @@ const THEME_CARDS: [(ThemeChoice, &str, &str); 3] = [
     (ThemeChoice::System, "Follow system", "Dark or light, as the desktop is."),
 ];
 
+/// The ring colours offered besides the theme's accent, each readable against the sidebar.
+fn selection_choices(preset: Preset) -> [u32; 4] {
+    match preset {
+        Preset::Mist => [0xffffff, 0xb79cff, 0xff7eb6, 0xffe066],
+        Preset::MistLight => [0x1c2333, 0x6b3fd4, 0xd4206c, 0xb45309],
+    }
+}
+
 /// "3 folders have a colour you picked." ("1 folder has" in the singular).
 fn picked_text(count: usize) -> String {
     if count == 1 { "1 folder has a colour you picked.".into() } else { format!("{count} folders have a colour you picked.") }
@@ -303,7 +311,26 @@ impl SettingsView {
     fn interface_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let control = self.stepper(&INTERFACE_SIZE, settings, window, cx);
         let reset = self.reset_slot("reset-interface-size", 0, settings, |s| s.ui_font_size, |s, v| s.ui_font_size = v, window, cx);
-        group(theme, "Interface", None, vec![row(theme, "Interface size", "Sidebar, tabs and menus.", control, reset)])
+        let swatches = [None].into_iter().chain(selection_choices(theme.preset).map(Some)).enumerate().map(|(index, choice)| {
+            let shown = choice.unwrap_or(theme.tokens.accent);
+            let pick = change(move |settings| settings.selection = choice);
+            self.pressable("selection-swatch", index, (settings.selection == choice).then_some(theme.tokens.text), window, cx, pick)
+                .size(theme.ui(28.))
+                .rounded(px(RADIUS_SMALL))
+                .bg(rgb(shown))
+                .border_2()
+        });
+        let swatches = div().flex().gap(theme.ui(8.)).children(swatches.collect::<Vec<_>>());
+        let selection_reset = self.reset_slot("reset-selection", 0, settings, |s| s.selection, |s, v| s.selection = v, window, cx);
+        group(
+            theme,
+            "Interface",
+            None,
+            vec![
+                row(theme, "Interface size", "Sidebar, tabs and menus.", control, reset),
+                row(theme, "Selection ring", "The ring around the selected row. The first swatch is the theme's accent.", swatches, selection_reset),
+            ],
+        )
     }
 
     fn project_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {

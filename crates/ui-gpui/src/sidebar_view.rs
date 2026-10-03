@@ -30,6 +30,10 @@ use crate::theme::{RADIUS, Theme, UI_FONT, group_tint, container_icon, dir_badge
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
+/// Width of the ring around the selected row.
+const RING: f32 = 2.0;
+/// Empty space between the ring and the selected row's fill.
+const RING_GAP: f32 = 3.0;
 /// Ages ("5m") and project roots are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
 
@@ -450,13 +454,16 @@ impl SidebarView {
         let menu_key = key.clone();
         let (middle_down, middle_up) = (key.clone(), key.clone());
         let theme = theme(cx).clone();
+        // A selected row's fill is pulled in from its ring (which sits 1 px above and below the fill's usual place).
+        let inset = if selected { RING + RING_GAP } else { 0. };
+        let radius = RADIUS - inset;
         let base = div()
             .id(index)
             .flex_1()
             .min_h_0()
             .w_full()
-            .px(theme.ui(10.))
-            .py(px(2.))
+            .px(theme.ui(10. + inset))
+            .py(px(2. + inset - 1.))
             .flex()
             .flex_row()
             .items_center()
@@ -498,18 +505,16 @@ impl SidebarView {
                     }
                 }),
             );
-        // The visible part of a row: a rounded pill, ringed when selected.
+        // The visible part of a row: a rounded pill; when selected it is pulled in from the ring drawn around it.
         let pill = |fill: Option<u32>| {
             div()
                 .size_full()
-                .px_3()
+                .px(theme.ui(12. - inset))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .rounded(px(RADIUS))
-                .border_2()
-                .border_color(if selected { rgb(theme.tokens.accent) } else { rgba(0) })
+                .rounded(px(radius))
                 .cursor_pointer()
                 .map(|pill| match fill {
                     Some(fill) => pill.bg(rgb(fill)),
@@ -519,16 +524,16 @@ impl SidebarView {
         // The row's project colour, as a side line inside the pill's left edge.
         let line = row.project.as_ref().and_then(|root| theme.project(root));
         let lined = |pill: gpui::Div| match line {
-            Some(color) => pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme)),
+            Some(color) => pill.relative().pl(theme.ui(18. - inset)).child(side_line(color, &theme)),
             None => pill,
         };
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
         let aside = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
         let guide = row.in_tab.then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
-        let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32.))).children(guide);
+        let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32. + inset))).children(guide);
         // A row listed under another project's tab heading names its own project.
         let project = || row.project_label.clone().map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label));
-        match &row.kind {
+        let content = match &row.kind {
             RowKind::Project { path, label, expanded } => {
                 let color = theme.project(path);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
@@ -554,7 +559,7 @@ impl SidebarView {
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
-                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme)))
+                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme)))
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
@@ -589,7 +594,7 @@ impl SidebarView {
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
-                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme)))
+                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme)))
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(title("New session".into()))
@@ -606,7 +611,19 @@ impl SidebarView {
                 base.child(div().pl(theme.ui(34.)).text_xs().italic().text_color(rgb(theme.tokens.muted)).child(text.clone()))
             }
             RowKind::TakeOver { .. } => base.child(pill(None).pl(theme.ui(32.)).text_color(rgb(theme.tokens.accent)).child("Take over…")),
-        }
+        };
+        content.when(selected, |content| {
+            let ring = div()
+                .absolute()
+                .left(theme.ui(10.))
+                .right(theme.ui(10.))
+                .top(px(1.))
+                .bottom(px(1.))
+                .rounded(px(RADIUS))
+                .border_2()
+                .border_color(rgb(theme.selection()));
+            content.relative().child(ring)
+        })
     }
 }
 
@@ -685,21 +702,21 @@ impl Render for SidebarView {
                     .child(field::render(&self.filter, "Filter active sessions", focused, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.filter.press(offset, clicks); cx.notify(); }))),
             )
             .when(self.settings_open, |this| {
+                let inset = if self.settings_active { RING + RING_GAP } else { 0. };
+                let ring = self.settings_active.then(|| {
+                    div().absolute().size_full().rounded(px(RADIUS)).border_2().border_color(rgb(theme.selection()))
+                });
                 this.child(
+                    div().relative().h(theme.ui(ROW_HEIGHT - 4.)).flex_none().mx_3().mb_1().p(theme.ui(inset)).children(ring).child(
                     div()
                         .id("settings-row")
-                        .h(theme.ui(ROW_HEIGHT - 4.))
-                        .flex_none()
-                        .mx_3()
-                        .mb_1()
-                        .px_3()
+                        .size_full()
+                        .px(theme.ui(12. - inset))
                         .flex()
                         .items_center()
                         .gap_2()
                         .text_sm()
-                        .rounded(px(RADIUS))
-                        .border_2()
-                        .border_color(if self.settings_active { rgb(theme.tokens.accent) } else { rgba(0) })
+                        .rounded(px(RADIUS - inset))
                         .bg(rgb(theme.tokens.text))
                         .text_color(rgb(theme.tokens.ground))
                         .cursor_pointer()
@@ -733,6 +750,7 @@ impl Render for SidebarView {
                                 cx.emit(SidebarEvent::CloseSettings);
                             }
                         })),
+                    ),
                 )
             })
             .child(

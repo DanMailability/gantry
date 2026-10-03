@@ -254,6 +254,8 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Status fills.
     pub status_fills: StatusFills,
+    /// Colour of the ring around the selected sidebar row (`None` = the theme's accent).
+    pub selection: Option<u32>,
     /// Terminal font.
     pub terminal_font: TerminalFont,
     /// Interface font size in points.
@@ -314,6 +316,7 @@ impl Default for Settings {
         Settings {
             theme: ThemeChoice::Mist,
             status_fills: StatusFills::default(),
+            selection: None,
             terminal_font: TerminalFont { family: None, size: 14.0, line_height: 1.3 },
             ui_font_size: 14.0,
             alerts: AlertSettings {
@@ -632,6 +635,8 @@ impl Reader {
             idle: self.color(&colors, "statusColors.", "idle"),
         };
 
+        let selection = self.color(raw, "", "selection");
+
         let font = self.object(raw, "", "terminalFont");
         let family = match font.get("family") {
             None => None,
@@ -721,6 +726,7 @@ impl Reader {
         Settings {
             theme,
             status_fills,
+            selection,
             terminal_font,
             ui_font_size,
             alerts,
@@ -763,6 +769,7 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     for (key, fill) in fills {
         add(&["statusColors", key], fill.map_or(Value::Null, |color| hex(color).into()), fill.is_some());
     }
+    add(&["selection"], settings.selection.map_or(Value::Null, |color| hex(color).into()), settings.selection.is_some());
     let font = &settings.terminal_font;
     add(&["terminalFont", "family"], font.family.clone().map_or(Value::Null, Value::from), font.family.is_some());
     add(&["terminalFont", "size"], number(font.size), font.size != default.terminal_font.size);
@@ -946,6 +953,7 @@ mod tests {
         assert_eq!(s.alerts.volume, 0.4);
         assert_eq!((s.alerts.needs_input.tone, s.alerts.finished.tone), (AlertTone::FallingBlip, AlertTone::ClassicBlip));
         assert_eq!(s.status_fills, StatusFills::default());
+        assert_eq!(s.selection, None);
         assert!(!s.alerts.when_visible && !s.alerts.only_when_unfocused && s.alerts.play_sounds);
     }
 
@@ -1016,6 +1024,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeChoice::MistLight,
             status_fills: StatusFills { needs_input: Some(0x112233), working: Some(0x445566), done: Some(0x778899), idle: Some(0xaabbcc) },
+            selection: Some(0xff7eb6),
             terminal_font: TerminalFont { family: Some("Fira Code".into()), size: 17.5, line_height: 1.45 },
             ui_font_size: 16.0,
             alerts: AlertSettings {

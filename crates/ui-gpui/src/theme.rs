@@ -26,6 +26,8 @@ pub(crate) struct Theme {
     pub tokens: Tokens,
     /// The user's status fills that are readable on this preset.
     pub fills: StatusFills,
+    /// The `selection` setting.
+    pub selection: Option<u32>,
     /// `uiFontSize / 14`.
     pub ui_scale: f32,
     /// The `projectColors` setting.
@@ -43,6 +45,11 @@ impl Theme {
     /// The colour of the project at `root` on this theme, if project colours are on.
     pub fn project(&self, root: &Path) -> Option<u32> {
         self.project_colors.color_of(root).map(|color| color.value(self.preset))
+    }
+
+    /// The colour of the ring around the selected row: the `selection` setting, else the accent.
+    pub fn selection(&self) -> u32 {
+        self.selection.unwrap_or(self.tokens.accent)
     }
 
     /// `size` scaled with the interface font size.
@@ -198,7 +205,7 @@ mod tests {
     }
 
     fn theme(preset: Preset) -> Theme {
-        Theme { preset, tokens: tokens(preset), fills: StatusFills::default(), ui_scale: 1.0, project_colors: ProjectColors::default() }
+        Theme { preset, tokens: tokens(preset), fills: StatusFills::default(), selection: None, ui_scale: 1.0, project_colors: ProjectColors::default() }
     }
 
     #[test]
