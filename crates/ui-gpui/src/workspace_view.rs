@@ -1340,8 +1340,8 @@ impl WorkspaceView {
         let leaf = tab.focused;
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let title = self.tab_title(index, cx);
-        let status = self.workspace.tab_status(index, self.sidebar.read(cx).sessions()).cloned();
-        let unseen = tab.root.leaves().iter().any(|leaf| self.unseen.contains_key(leaf));
+        let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
+        let unseen = self.unseen.contains_key(&leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());
         let dir = self.leaf_dir_badge(leaf, cx);
         let cwd = self.leaf_cwd(leaf, cx);
