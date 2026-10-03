@@ -1,4 +1,4 @@
-# Build image for build-tarball-ubuntu.sh: Ubuntu 22.04 (glibc 2.35) + build dependencies + Rust.
+# Build image for build-tarball.sh: Ubuntu 22.04 (glibc 2.35) + build dependencies + Rust.
 FROM docker.io/library/ubuntu:22.04
 ARG RUST_TOOLCHAIN
 ENV DEBIAN_FRONTEND=noninteractive RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
