@@ -61,6 +61,27 @@ pub(crate) const FONT_FAMILY: &str = "Consolas";
 #[cfg(target_os = "linux")]
 const FALLBACK_FAMILIES: &[&str] = &["Adwaita Mono", "Symbola"];
 
+/// Monospace families tried, in order, when the chosen one is not installed (a missing family would be drawn in a
+/// proportional font, out of the grid).
+const MONOSPACE_FAMILIES: &[&str] =
+    &[FONT_FAMILY, "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", "Adwaita Mono", "Menlo", "Consolas"];
+
+/// `wanted` (else the platform's family) when it is installed, else the first installed of [`MONOSPACE_FAMILIES`].
+fn installed_family<'a>(wanted: Option<&'a str>, installed: &[String]) -> &'a str {
+    let wanted = wanted.unwrap_or(FONT_FAMILY);
+    let has = |family: &str| installed.iter().any(|name| name == family);
+    if has(wanted) {
+        return wanted;
+    }
+    MONOSPACE_FAMILIES.iter().copied().find(|family| has(family)).unwrap_or(wanted)
+}
+
+/// The installed font families, read once (the text system loads them at start).
+fn installed_families(cx: &App) -> &'static [String] {
+    static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FAMILIES.get_or_init(|| cx.text_system().all_font_names())
+}
+
 /// The pane font (`family`, else the platform's), with its fallback chain on Linux.
 pub(crate) fn pane_font(family: Option<&str>) -> Font {
     #[allow(unused_mut)]
@@ -667,7 +688,7 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
         let terminal_font = cx.global::<SettingsStore>().settings().terminal_font.clone();
-        let font = pane_font(terminal_font.family.as_deref());
+        let font = pane_font(Some(installed_family(terminal_font.family.as_deref(), installed_families(cx))));
         let font_size = px(terminal_font.size);
         let metrics = Self::cell_metrics(&font, font_size, terminal_font.line_height, window);
         let mut snapshot = self.term.snapshot();
@@ -927,6 +948,17 @@ mod tests {
     fn the_pane_font_falls_back_to_fonts_gpui_keeps() {
         let fallbacks = pane_font(None).fallbacks.expect("Linux panes have a fallback chain");
         assert_eq!(fallbacks.fallback_list(), ["Adwaita Mono", "Symbola"]);
+    }
+
+    #[test]
+    fn a_missing_family_falls_back_to_an_installed_monospace_one() {
+        let installed = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        let some = installed(&["DejaVu Sans", "DejaVu Sans Mono", "Fira Code", "Liberation Mono"]);
+        assert_eq!(installed_family(Some("Fira Code"), &some), "Fira Code");
+        assert_eq!(installed_family(Some("Iosevka"), &some), "DejaVu Sans Mono");
+        assert_eq!(installed_family(None, &installed(&["Liberation Mono", FONT_FAMILY])), FONT_FAMILY);
+        assert_eq!(installed_family(None, &installed(&["Liberation Mono"])), "Liberation Mono");
+        assert_eq!(installed_family(Some("Iosevka"), &installed(&["DejaVu Sans"])), "Iosevka");
     }
 
     #[test]
