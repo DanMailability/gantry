@@ -726,6 +726,17 @@ pub fn next_needing_input(rows: &[Row], focused: Option<NodeId>) -> Option<NodeI
     }
 }
 
+/// The title of the row showing `leaf`, as the sidebar shows it.
+pub fn leaf_title(rows: &[Row], leaf: NodeId) -> Option<String> {
+    let row = &rows[row_of_leaf(rows, leaf)?];
+    match &row.kind {
+        RowKind::Session { session, .. } => Some(session_title(session).to_string()),
+        RowKind::Pane { entry, .. } if entry.claude => Some("New session".to_string()),
+        RowKind::Pane { entry, .. } => Some(entry.title.clone()),
+        _ => None,
+    }
+}
+
 /// The label of the project heading for `root`.
 pub fn project_label(rows: &[Row], root: &Path) -> Option<String> {
     rows.iter().find_map(|row| match &row.kind {
@@ -1358,5 +1369,16 @@ mod tests {
         let rows = fixture.rows();
         assert_eq!(project_label(&rows, Path::new("/r/alpha")).as_deref(), Some("alpha"));
         assert_eq!(project_label(&rows, Path::new("/r/none")), None);
+    }
+
+    #[test]
+    fn leaf_title_is_the_row_title() {
+        let w = waiting("w", "/r/alpha");
+        let expected = session_title(&w).to_string();
+        let mut fixture = Fixture::of(vec![w], vec![pane(1, "/r/alpha", Some("w")), shell_pane(2, "/r/alpha")]);
+        let rows = fixture.rows();
+        assert_eq!(leaf_title(&rows, 1), Some(expected));
+        assert_eq!(leaf_title(&rows, 2), Some(shell_pane(2, "/r/alpha").title));
+        assert_eq!(leaf_title(&rows, 9), None);
     }
 }

@@ -1334,12 +1334,30 @@ impl WorkspaceView {
         let middle = div().min_w_0().flex_shrink(1.).flex().flex_row().items_center().gap(theme.ui(8.));
         let Some(tab) = self.workspace.active_tab() else { return middle };
         if tab.settings {
-            return middle.font_weight(FontWeight::SEMIBOLD).child("Settings");
+            // With the sidebar hidden its row is gone, so the bar closes Settings.
+            return middle.font_weight(FontWeight::SEMIBOLD).child("Settings").when(!self.workspace.sidebar.visible, |middle| {
+                middle.child(
+                    div()
+                        .id("close-settings")
+                        .flex_none()
+                        .size(theme.ui(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .text_xs()
+                        .font_weight(FontWeight::NORMAL)
+                        .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                        .cursor_pointer()
+                        .child("×")
+                        .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx))),
+                )
+            });
         }
         let index = self.workspace.active;
         let leaf = tab.focused;
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
-        let title = self.tab_title(index, cx);
+        let title = self.sidebar.read(cx).leaf_title(leaf).unwrap_or_else(|| self.tab_title(index, cx));
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
         let unseen = self.unseen.contains_key(&leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());

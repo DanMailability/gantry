@@ -177,6 +177,11 @@ impl SidebarView {
         session_tree::project_label(&self.all_rows, root)
     }
 
+    /// The title of `leaf`'s row.
+    pub fn leaf_title(&self, leaf: NodeId) -> Option<String> {
+        session_tree::leaf_title(&self.all_rows, leaf)
+    }
+
     /// Whether Settings is open and whether it is the visible tab: its row above the list.
     pub fn set_settings(&mut self, open: bool, active: bool, cx: &mut Context<Self>) {
         if (open, active) != (self.settings_open, self.settings_active) {
