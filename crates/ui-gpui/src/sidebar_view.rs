@@ -61,6 +61,10 @@ pub enum SidebarEvent {
     OpenRecents,
     /// Give keyboard focus back to the pane.
     Dismiss,
+    /// The Settings row was clicked: show Settings.
+    ShowSettings,
+    /// The × of the Settings row was clicked: close Settings.
+    CloseSettings,
 }
 
 /// The session sidebar.
@@ -78,6 +82,8 @@ pub struct SidebarView {
     unseen: HashSet<String>,
     /// The Working glow runs: the setting is on and the window is active.
     animate: bool,
+    /// Every row with no filter, every project expanded and no details: the order Ctrl+Tab and the title bar use.
+    all_rows: Vec<Row>,
     rows: Vec<Row>,
     selected: Option<RowKey>,
     /// The workspace's focused leaf; its row is selected unless the user moved the ring.
@@ -88,6 +94,9 @@ pub struct SidebarView {
     home: Option<PathBuf>,
     /// Project of each directory seen (it stats parent directories; cleared on every refresh).
     roots: ProjectRoots,
+    /// The Settings tab is open (a row above the list), and is the visible tab.
+    settings_open: bool,
+    settings_active: bool,
     _refresh: Task<()>,
 }
 
@@ -127,6 +136,7 @@ impl SidebarView {
             details: None,
             unseen: HashSet::new(),
             animate: false,
+            all_rows: Vec::new(),
             rows: Vec::new(),
             selected: None,
             focused_leaf: None,
@@ -134,6 +144,8 @@ impl SidebarView {
             scroll: UniformListScrollHandle::new(),
             home: std::env::home_dir(),
             roots: ProjectRoots::new(std::env::home_dir()),
+            settings_open: false,
+            settings_active: false,
             _refresh: refresh,
         };
         sidebar.rebuild(cx);
@@ -143,6 +155,35 @@ impl SidebarView {
     /// The project a directory belongs to (its git repository, else the directory).
     pub(crate) fn project_of(&self, cwd: &Path) -> PathBuf {
         self.roots.of(cwd)
+    }
+
+    /// Every Gantry leaf in sidebar order, whatever the filter or collapsed projects hide.
+    pub fn leaf_order(&self) -> Vec<NodeId> {
+        session_tree::leaves_in_order(&self.all_rows)
+    }
+
+    /// The leaves whose session needs input, in sidebar order.
+    pub fn needs_input(&self) -> Vec<NodeId> {
+        session_tree::needs_input_leaves(&self.all_rows)
+    }
+
+    /// The leaf needing input after `focused` in sidebar order, wrapping around.
+    pub fn next_needing_input(&self, focused: Option<NodeId>) -> Option<NodeId> {
+        session_tree::next_needing_input(&self.all_rows, focused)
+    }
+
+    /// The name the sidebar gives the project `root`.
+    pub fn project_label(&self, root: &Path) -> Option<String> {
+        session_tree::project_label(&self.all_rows, root)
+    }
+
+    /// Whether Settings is open and whether it is the visible tab: its row above the list.
+    pub fn set_settings(&mut self, open: bool, active: bool, cx: &mut Context<Self>) {
+        if (open, active) != (self.settings_open, self.settings_active) {
+            self.settings_open = open;
+            self.settings_active = active;
+            cx.notify();
+        }
     }
 
     /// The daemon's sessions as last received.
@@ -187,29 +228,36 @@ impl SidebarView {
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        let rows = {
+        let (all_rows, rows) = {
             let sessions: Vec<&SessionInfo> = self.sessions.all().collect();
             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
             let roots = &self.roots;
             let project_of = |cwd: &Path| roots.of(cwd);
-            let input = ActiveInput {
-                sessions: &sessions,
-                panes: &self.panes,
-                home: self.home.as_deref(),
-                filter: self.filter.text(),
-                toggled: &self.toggled,
-                details: self.details.as_deref(),
-                unseen: &self.unseen,
-                tabs: &self.tabs,
-                project_of: &project_of,
-                now_ms,
+            let build = |filter: &str, toggled: &HashSet<PathBuf>, details: Option<&str>, arrivals: &mut Arrivals, order: &mut ProjectOrder| {
+                let input = ActiveInput {
+                    sessions: &sessions,
+                    panes: &self.panes,
+                    home: self.home.as_deref(),
+                    filter,
+                    toggled,
+                    details,
+                    unseen: &self.unseen,
+                    tabs: &self.tabs,
+                    project_of: &project_of,
+                    now_ms,
+                };
+                session_tree::active(&input, arrivals, order)
             };
             // Until the session list arrives, number nothing: panes and sessions must get their arrival
             // numbers together, so that at startup leaves land above outside sessions.
             let mut unloaded = (Arrivals::default(), ProjectOrder::default());
             let (arrivals, order) = if self.sessions.loaded() { (&mut self.arrivals, &mut self.order) } else { (&mut unloaded.0, &mut unloaded.1) };
-            session_tree::active(&input, arrivals, order)
+            let all_rows = build("", &HashSet::new(), None, arrivals, order);
+            let plain = self.filter.text().is_empty() && self.toggled.is_empty() && self.details.is_none();
+            let rows = if plain { all_rows.clone() } else { build(self.filter.text(), &self.toggled, self.details.as_deref(), arrivals, order) };
+            (all_rows, rows)
         };
+        self.all_rows = all_rows;
         self.rows = rows;
         // A selection whose row is gone falls back to the focused pane's row.
         if self.selected_index().is_none() {
@@ -625,6 +673,47 @@ impl Render for SidebarView {
                     }))
                     .child(field::render(&self.filter, "Filter active sessions", focused, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.filter.press(offset, clicks); cx.notify(); }))),
             )
+            .when(self.settings_open, |this| {
+                this.child(
+                    div()
+                        .id("settings-row")
+                        .h(theme.ui(ROW_HEIGHT - 4.))
+                        .flex_none()
+                        .mx_3()
+                        .mb_1()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .rounded(px(RADIUS))
+                        .border_2()
+                        .border_color(if self.settings_active { rgb(theme.tokens.accent) } else { rgba(0) })
+                        .bg(rgb(theme.tokens.text))
+                        .text_color(rgb(theme.tokens.ground))
+                        .cursor_pointer()
+                        .child("⚙")
+                        .child(div().flex_1().min_w_0().truncate().child("Settings"))
+                        .child(
+                            div()
+                                .id("close-settings")
+                                .flex_none()
+                                .size(theme.ui(20.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .text_xs()
+                                .hover(|style| style.bg(rgba(0x00000026)))
+                                .child("×")
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(SidebarEvent::CloseSettings);
+                                })),
+                        )
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings))),
+                )
+            })
             .child(
                 // Dropping a project heading on the empty space below the rows puts it last.
                 div()

@@ -755,6 +755,8 @@ impl WorkspaceView {
 
     /// Give keyboard focus to the workspace's focused leaf (or the empty window).
     fn focus_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (open, active) = (self.workspace.settings_tab().is_some(), self.settings_active());
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_settings(open, active, cx));
         let settings = self.workspace.active_tab().is_some_and(|tab| tab.settings).then(|| self.settings.clone()).flatten();
         if let Some(settings) = settings {
             settings.focus_handle(cx).focus(window, cx);
@@ -963,6 +965,8 @@ impl WorkspaceView {
             SidebarEvent::New { claude } => self.open(claude, None),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
+            SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
+            SidebarEvent::CloseSettings => self.close_settings(window, cx),
         }
     }
 
@@ -1155,7 +1159,8 @@ impl WorkspaceView {
         self.focus_dir(Direction::Down, window, cx)
     }
     fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace.cycle_tab_in(&[], delta);
+        let order = self.sidebar.read(cx).leaf_order();
+        self.workspace.cycle_tab_in(&order, delta);
         self.focus_current(window, cx);
         self.save(cx);
     }
