@@ -8,7 +8,7 @@ cargo build --release -p gantry
 stage=$root/dist/gantry-$version
 rm -rf "$stage"
 mkdir -p "$stage"
-install -m0755 target/release/gantry packaging/linux/install.sh "$stage/"
+install -m0755 "${CARGO_TARGET_DIR:-target}/release/gantry" packaging/linux/install.sh "$stage/"
 install -m0644 packaging/linux/io.github.idogrf.Gantry.desktop packaging/linux/io.github.idogrf.Gantry.svg \
   LICENSE-MIT LICENSE-APACHE "$stage/"
 # The embedded interface font's licence.
