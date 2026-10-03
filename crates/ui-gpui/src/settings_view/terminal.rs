@@ -60,7 +60,13 @@ pub(super) fn installed_monospace(cx: &App) -> Vec<String> {
 }
 
 impl SettingsView {
-    pub(super) fn terminal(&mut self, theme: &Theme, settings: &Settings, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn terminal(
+        &mut self,
+        theme: &Theme,
+        settings: &Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let font = self.font_group(theme, settings, window, cx);
         let text = self.text_group(theme, settings, window, cx);
         let shell = self.shell_group(theme, settings, window, cx);
@@ -80,21 +86,51 @@ impl SettingsView {
         )];
         options.extend(self.families.iter().filter(|family| *family != FONT_FAMILY).map(|family| {
             let name = family.clone();
-            (family.clone(), font.family.as_deref() == Some(family.as_str()), change(move |settings| settings.terminal_font.family = Some(name.clone())))
+            (
+                family.clone(),
+                font.family.as_deref() == Some(family.as_str()),
+                change(move |settings| settings.terminal_font.family = Some(name.clone())),
+            )
         }));
         let family_control = self.dropdown("font-family", 0, Popover::Font, label, theme.ui(210.), options, window, cx);
-        let family_reset = self.reset_slot("reset-font-family", 0, settings, |s| s.terminal_font.family.clone(), |s, v| s.terminal_font.family = v, window, cx);
+        let family_reset = self.reset_slot(
+            "reset-font-family",
+            0,
+            settings,
+            |s| s.terminal_font.family.clone(),
+            |s, v| s.terminal_font.family = v,
+            window,
+            cx,
+        );
         let size_control = self.stepper(&TERMINAL_SIZE, settings, window, cx);
-        let size_reset = self.reset_slot("reset-terminal-size", 0, settings, |s| s.terminal_font.size, |s, v| s.terminal_font.size = v, window, cx);
+        let size_reset = self.reset_slot(
+            "reset-terminal-size",
+            0,
+            settings,
+            |s| s.terminal_font.size,
+            |s, v| s.terminal_font.size = v,
+            window,
+            cx,
+        );
         let height_control = self.stepper(&LINE_HEIGHT, settings, window, cx);
-        let height_reset = self.reset_slot("reset-line-height", 0, settings, |s| s.terminal_font.line_height, |s, v| s.terminal_font.line_height = v, window, cx);
+        let height_reset = self.reset_slot(
+            "reset-line-height",
+            0,
+            settings,
+            |s| s.terminal_font.line_height,
+            |s, v| s.terminal_font.line_height = v,
+            window,
+            cx,
+        );
 
         let palette = terminal_palette(theme.preset);
         let ok = color(palette.ansi[2]);
         let line = |parts: Vec<(String, Option<u32>)>| {
-            div().flex().flex_row().whitespace_nowrap().children(parts.into_iter().map(move |(text, ink)| {
-                div().when_some(ink, |part, ink| part.text_color(rgb(ink))).child(text)
-            }))
+            div().flex().flex_row().whitespace_nowrap().children(
+                parts
+                    .into_iter()
+                    .map(move |(text, ink)| div().when_some(ink, |part, ink| part.text_color(rgb(ink))).child(text)),
+            )
         };
         let family = font.family.clone().unwrap_or_else(|| FONT_FAMILY.to_string());
         let sample = div()
@@ -110,16 +146,26 @@ impl SettingsView {
             .text_size(px(font.size))
             .line_height(px(font.size * font.line_height))
             .text_color(rgb(color(palette.foreground)))
-            .child(line(vec![("~/rust_terminal".into(), Some(theme.tokens.accent)), (" $ cargo test -p app-core settings".into(), None)]))
+            .child(line(vec![
+                ("~/rust_terminal".into(), Some(theme.tokens.accent)),
+                (" $ cargo test -p app-core settings".into(), None),
+            ]))
             .child(line(vec![("running 12 tests".into(), None)]))
             .child(line(vec![("test settings::missing_keys_use_defaults ... ".into(), None), ("ok".into(), Some(ok))]))
-            .child(line(vec![("test settings::low_contrast_fill_is_refused ... ".into(), None), ("ok".into(), Some(ok))]))
+            .child(line(vec![
+                ("test settings::low_contrast_fill_is_refused ... ".into(), None),
+                ("ok".into(), Some(ok)),
+            ]))
             .child(line(vec![
                 ("test result: ".into(), None),
                 ("ok".into(), Some(ok)),
                 (". 12 passed; 0 failed".into(), None),
             ]));
-        let size_hint = format!("{} and {} also change this.", shortcut_label(settings, "zoomIn"), shortcut_label(settings, "zoomOut"));
+        let size_hint = format!(
+            "{} and {} also change this.",
+            shortcut_label(settings, "zoomIn"),
+            shortcut_label(settings, "zoomOut")
+        );
         group(
             theme,
             "Font",
@@ -135,16 +181,45 @@ impl SettingsView {
 
     fn text_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let scrollback_control = self.stepper(&SCROLLBACK, settings, window, cx);
-        let scrollback_reset = self.reset_slot("reset-scrollback", 0, settings, |s| s.window.scrollback, |s, v| s.window.scrollback = v, window, cx);
+        let scrollback_reset = self.reset_slot(
+            "reset-scrollback",
+            0,
+            settings,
+            |s| s.window.scrollback,
+            |s, v| s.window.scrollback = v,
+            window,
+            cx,
+        );
         let rtl = settings.window.right_to_left;
-        let rtl_control = self.switch("right-to-left", 0, rtl, window, cx, change(move |settings| settings.window.right_to_left = !rtl));
-        let rtl_reset = self.reset_slot("reset-right-to-left", 0, settings, |s| s.window.right_to_left, |s, v| s.window.right_to_left = v, window, cx);
+        let rtl_control = self.switch(
+            "right-to-left",
+            0,
+            rtl,
+            window,
+            cx,
+            change(move |settings| settings.window.right_to_left = !rtl),
+        );
+        let rtl_reset = self.reset_slot(
+            "reset-right-to-left",
+            0,
+            settings,
+            |s| s.window.right_to_left,
+            |s, v| s.window.right_to_left = v,
+            window,
+            cx,
+        );
         group(
             theme,
             "Text",
             None,
             vec![
-                row(theme, "Scrollback", "For new panes. Open panes keep theirs until restarted.", scrollback_control, scrollback_reset),
+                row(
+                    theme,
+                    "Scrollback",
+                    "For new panes. Open panes keep theirs until restarted.",
+                    scrollback_control,
+                    scrollback_reset,
+                ),
                 row(
                     theme,
                     "Right-to-left display",
@@ -157,10 +232,30 @@ impl SettingsView {
     }
 
     fn shell_group(&mut self, theme: &Theme, settings: &Settings, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let program = self.text_field((SHELL_PROGRAM, 0), &settings.shell.program, "$SHELL", true, theme, window, cx).w(theme.ui(260.));
-        let program_reset = self.reset_slot("reset-shell-program", 0, settings, |s| s.shell.program.clone(), |s, v| s.shell.program = v, window, cx);
-        let args = self.text_field((SHELL_ARGS, 0), &join_args(&settings.shell.args), "none", true, theme, window, cx).w(theme.ui(260.));
-        let args_reset = self.reset_slot("reset-shell-args", 0, settings, |s| s.shell.args.clone(), |s, v| s.shell.args = v, window, cx);
+        let program = self
+            .text_field((SHELL_PROGRAM, 0), &settings.shell.program, "$SHELL", true, theme, window, cx)
+            .w(theme.ui(260.));
+        let program_reset = self.reset_slot(
+            "reset-shell-program",
+            0,
+            settings,
+            |s| s.shell.program.clone(),
+            |s, v| s.shell.program = v,
+            window,
+            cx,
+        );
+        let args = self
+            .text_field((SHELL_ARGS, 0), &join_args(&settings.shell.args), "none", true, theme, window, cx)
+            .w(theme.ui(260.));
+        let args_reset = self.reset_slot(
+            "reset-shell-args",
+            0,
+            settings,
+            |s| s.shell.args.clone(),
+            |s, v| s.shell.args = v,
+            window,
+            cx,
+        );
         group(
             theme,
             "Shell",

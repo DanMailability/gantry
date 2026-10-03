@@ -9,8 +9,8 @@ use app_core::session_tree::display_path;
 use app_core::text_field::TextField;
 use app_core::workspace::ClaudeDirs;
 use gpui::{
-    App, ClickEvent, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, Render, ScrollStrategy,
-    Stateful, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
+    App, ClickEvent, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, Render,
+    ScrollStrategy, Stateful, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
 };
 use protocol::message::SessionInfo;
 
@@ -206,11 +206,17 @@ impl LauncherView {
                     .when(selected, |el| el.bg(rgb(theme.tokens.raised)))
                     .when(!selected || muted, |el| el.text_color(rgb(theme.tokens.muted)))
                     .when(!selected && !muted, |el| el.hover(|style| style.text_color(rgb(theme.tokens.text))))
-                    .child(div().flex_none().w(theme.ui(14.)).text_color(rgb(theme.tokens.accent)).child(if star { "★" } else { "" }))
+                    .child(div().flex_none().w(theme.ui(14.)).text_color(rgb(theme.tokens.accent)).child(if star {
+                        "★"
+                    } else {
+                        ""
+                    }))
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(note)),
             )
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, !event.modifiers().alt, cx)))
+            .on_click(
+                cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, !event.modifiers().alt, cx)),
+            )
     }
 
     /// "Claude: <name> ▾" and where the choice comes from; with a list of the dirs under it while open.
@@ -267,7 +273,11 @@ impl LauncherView {
                     .hover(|style| style.bg(rgb(theme.tokens.line)))
                     .child(div().flex_1().child(dir.name.clone()))
                     .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(tag))
-                    .child(div().w(theme.ui(14.)).text_color(rgb(theme.tokens.accent)).child(if position == current { "✓" } else { "" }))
+                    .child(div().w(theme.ui(14.)).text_color(rgb(theme.tokens.accent)).child(if position == current {
+                        "✓"
+                    } else {
+                        ""
+                    }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.pick = Some(position);
                         this.chip_open = false;
@@ -336,14 +346,25 @@ impl Render for LauncherView {
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(theme.tokens.line))
-                    .child(field::render(&self.query, "Open a directory…", true, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.query.press(offset, clicks); cx.notify(); }))),
+                    .child(field::render(
+                        &self.query,
+                        "Open a directory…",
+                        true,
+                        &theme,
+                        field::on_press(cx, |this, offset, clicks, _, cx| {
+                            this.query.press(offset, clicks);
+                            cx.notify();
+                        }),
+                    )),
             )
             .when(self.dirs.dirs.len() > 1, |launcher| launcher.child(self.render_chip(cx)))
             .child(
                 uniform_list(
                     "launcher-items",
                     self.items.len(),
-                    cx.processor(|this, range: Range<usize>, _window, cx| range.map(|index| this.render_item(index, cx)).collect::<Vec<_>>()),
+                    cx.processor(|this, range: Range<usize>, _window, cx| {
+                        range.map(|index| this.render_item(index, cx)).collect::<Vec<_>>()
+                    }),
                 )
                 .track_scroll(&self.scroll)
                 .h(theme.ui(320.)),
@@ -358,7 +379,11 @@ impl Render for LauncherView {
                     .text_color(rgb(theme.tokens.muted))
                     .border_t_1()
                     .border_color(rgb(theme.tokens.line))
-                    .child(if self.dirs.dirs.len() > 1 { "Enter: Claude · Alt+Enter: shell · Tab: config dir · Esc: close" } else { "Enter: Claude · Alt+Enter: shell · Esc: close" }),
+                    .child(if self.dirs.dirs.len() > 1 {
+                        "Enter: Claude · Alt+Enter: shell · Tab: config dir · Esc: close"
+                    } else {
+                        "Enter: Claude · Alt+Enter: shell · Esc: close"
+                    }),
             )
     }
 }

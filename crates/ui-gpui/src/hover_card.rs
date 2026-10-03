@@ -62,9 +62,27 @@ impl Render for HoverCard {
             .text_color(rgb(theme.tokens.text))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(self.title.clone()))
             .children(self.status.clone().map(|status| div().child(status)))
-            .children(self.dir.as_ref().map(|badge| div().flex().items_center().gap_2().child(dir_badge(badge, &theme)).child(format!("Config: {}", badge.name))))
-            .when(self.container, |card| card.child(div().flex().items_center().gap_2().child(container_icon(theme.tokens.text, &theme)).child("Dev container")))
-            .children(self.folder.clone().map(|folder| div().text_xs().text_color(rgb(theme.tokens.muted)).child(folder)))
+            .children(self.dir.as_ref().map(|badge| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(dir_badge(badge, &theme))
+                    .child(format!("Config: {}", badge.name))
+            }))
+            .when(self.container, |card| {
+                card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(container_icon(theme.tokens.text, &theme))
+                        .child("Dev container"),
+                )
+            })
+            .children(
+                self.folder.clone().map(|folder| div().text_xs().text_color(rgb(theme.tokens.muted)).child(folder)),
+            )
     }
 }
 

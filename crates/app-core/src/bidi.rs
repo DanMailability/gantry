@@ -81,10 +81,8 @@ fn order_segment(row: &[CellView], cols: Range<usize>, to_logical: &mut [usize],
         return;
     }
     // One char per unit; paragraph separators would split the paragraph, so they count as blanks.
-    let text: String = units
-        .iter()
-        .map(|&col| if bidi_class(row[col].ch) == BidiClass::B { ' ' } else { row[col].ch })
-        .collect();
+    let text: String =
+        units.iter().map(|&col| if bidi_class(row[col].ch) == BidiClass::B { ' ' } else { row[col].ch }).collect();
     let info = BidiInfo::new(&text, None);
     let paragraph = &info.paragraphs[0];
     let levels = info.reordered_levels_per_char(paragraph, paragraph.range.clone());
@@ -329,6 +327,10 @@ mod tests {
         assert_eq!(snapshot.rows, before);
         assert_eq!(displayed(&snapshot, 1), "שלום עולם   ");
         assert_eq!(logical_hit(&orders, 5, 1, true), (5, true), "the column map is the identity");
-        assert_eq!((snapshot.cursor.as_ref().unwrap().col, snapshot.cursor.as_ref().unwrap().ch), (9, ' '), "the cursor stays on its logical column");
+        assert_eq!(
+            (snapshot.cursor.as_ref().unwrap().col, snapshot.cursor.as_ref().unwrap().ch),
+            (9, ' '),
+            "the cursor stays on its logical column"
+        );
     }
 }

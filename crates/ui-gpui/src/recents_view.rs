@@ -74,7 +74,12 @@ impl Focusable for RecentsView {
 
 impl RecentsView {
     /// An overlay over `sessions`; `open` = sessions a leaf of the layout shows; `project` = the project to start on.
-    pub fn new(sessions: Vec<SessionInfo>, open: HashSet<String>, project: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        sessions: Vec<SessionInfo>,
+        open: HashSet<String>,
+        project: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let home = std::env::home_dir();
         let recents = cx.global::<SettingsStore>().settings().recents;
         let mut view = RecentsView {
@@ -116,7 +121,11 @@ impl RecentsView {
             per_project: self.per_project,
             chips: self.chip_count,
         };
-        self.list = if self.choosing { List::Projects(recents::projects(&input)) } else { List::Sessions(recents::items(&input)) };
+        self.list = if self.choosing {
+            List::Projects(recents::projects(&input))
+        } else {
+            List::Sessions(recents::items(&input))
+        };
         self.chips = recents::chips(&input);
         self.counts = recents::counts(&input);
         let first = self.first_selectable();
@@ -261,7 +270,9 @@ impl RecentsView {
                             .items_end()
                             .gap_2()
                             .pb(theme.ui(4.))
-                            .children(color.map(|color| div().flex_none().mb(theme.ui(5.)).size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))))
+                            .children(color.map(|color| {
+                                div().flex_none().mb(theme.ui(5.)).size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))
+                            }))
                             .child(
                                 div()
                                     .flex_none()
@@ -269,27 +280,68 @@ impl RecentsView {
                                     .when_some(color, |label, color| label.text_color(rgb(color)))
                                     .child(label.clone()),
                             )
-                            .child(div().min_w_0().truncate().text_xs().text_color(rgb(theme.tokens.muted)).child(display.clone())),
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(theme.tokens.muted))
+                                    .child(display.clone()),
+                            ),
                     );
                 }
                 RecentItem::Session { session, age, project } => row.child(
                     pill()
-                        .when_some(theme.project(project), |pill, color| pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme)))
-                        .child(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(theme.tokens.muted)))
+                        .when_some(theme.project(project), |pill, color| {
+                            pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme))
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(theme.ui(8.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgb(theme.tokens.muted)),
+                        )
                         .child(div().flex_1().min_w_0().truncate().child(session_title(session).to_string()))
                         .when(session.container.is_some(), |pill| pill.child(container_icon(theme.tokens.text, &theme)))
-                        .children(dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|badge| dir_badge(&badge, &theme)))
-                        .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(if session.cwd_exists { age.clone() } else { "Folder missing".into() })),
+                        .children(
+                            dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
+                                .map(|badge| dir_badge(&badge, &theme)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(rgb(theme.tokens.muted))
+                                .child(if session.cwd_exists { age.clone() } else { "Folder missing".into() }),
+                        ),
                 ),
-                RecentItem::More { hidden, .. } => row.child(pill().pl(theme.ui(30.)).text_color(rgb(theme.tokens.accent)).child(format!("Show {hidden} more"))),
+                RecentItem::More { hidden, .. } => row.child(
+                    pill().pl(theme.ui(30.)).text_color(rgb(theme.tokens.accent)).child(format!("Show {hidden} more")),
+                ),
             },
             List::Projects(projects) => {
                 let project = &projects[index];
                 row.child(
                     pill()
                         .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).child(project.label.clone()))
-                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(rgb(theme.tokens.muted)).child(project.display.clone()))
-                        .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(project.count.to_string())),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgb(theme.tokens.muted))
+                                .child(project.display.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(rgb(theme.tokens.muted))
+                                .child(project.count.to_string()),
+                        ),
                 )
             }
         };
@@ -320,14 +372,27 @@ impl RecentsView {
             .gap(px(6.))
             .rounded_full()
             .border_1()
-            .border_color(if on { rgb(color) } else if coloured { gpui::rgba((color << 8) | 0x80) } else { rgb(theme.tokens.line) })
-            .when(on, |chip| chip.bg(rgb(color)).text_color(rgb(if coloured { theme.tokens.ground } else { theme.tokens.on_accent })).font_weight(FontWeight::SEMIBOLD))
+            .border_color(if on {
+                rgb(color)
+            } else if coloured {
+                gpui::rgba((color << 8) | 0x80)
+            } else {
+                rgb(theme.tokens.line)
+            })
+            .when(on, |chip| {
+                chip.bg(rgb(color))
+                    .text_color(rgb(if coloured { theme.tokens.ground } else { theme.tokens.on_accent }))
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
             .when(!on, |chip| {
-                chip.text_color(rgb(if coloured { color } else { theme.tokens.text })).hover(|style| style.bg(rgb(theme.tokens.raised)))
+                chip.text_color(rgb(if coloured { color } else { theme.tokens.text }))
+                    .hover(|style| style.bg(rgb(theme.tokens.raised)))
             })
             .cursor_pointer()
             .child(chip.label.clone())
-            .when(chip.target != ChipTarget::More, |el| el.child(div().text_xs().opacity(0.8).child(chip.count.to_string())))
+            .when(chip.target != ChipTarget::More, |el| {
+                el.child(div().text_xs().opacity(0.8).child(chip.count.to_string()))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.pick(target.clone());
                 cx.notify();
@@ -339,10 +404,24 @@ impl Render for RecentsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
         let (matching, total) = self.counts;
-        let count = if self.query.text().is_empty() { format!("{total} closed sessions") } else { format!("{matching} of {total}") };
-        let chips: Vec<_> = self.chips.clone().iter().enumerate().map(|(index, chip)| self.render_chip(index, chip, cx).into_any_element()).collect();
+        let count = if self.query.text().is_empty() {
+            format!("{total} closed sessions")
+        } else {
+            format!("{matching} of {total}")
+        };
+        let chips: Vec<_> = self
+            .chips
+            .clone()
+            .iter()
+            .enumerate()
+            .map(|(index, chip)| self.render_chip(index, chip, cx).into_any_element())
+            .collect();
         let hint = |key: &'static str, what: &'static str| {
-            div().flex().gap_1().child(div().text_color(rgb(theme.tokens.text)).font_weight(FontWeight::SEMIBOLD).child(key)).child(what)
+            div()
+                .flex()
+                .gap_1()
+                .child(div().text_color(rgb(theme.tokens.text)).font_weight(FontWeight::SEMIBOLD).child(key))
+                .child(what)
         };
         div()
             .key_context("Recents")
@@ -370,7 +449,11 @@ impl Render for RecentsView {
                         div()
                             .flex()
                             .items_center()
-                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(if self.choosing { "Choose a project" } else { "Recent sessions" }))
+                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(if self.choosing {
+                                "Choose a project"
+                            } else {
+                                "Recent sessions"
+                            }))
                             .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(count)),
                     )
                     .child(
@@ -383,7 +466,16 @@ impl Render for RecentsView {
                             .bg(rgb(theme.tokens.raised))
                             .border_1()
                             .border_color(rgb(theme.tokens.accent))
-                            .child(field::render(&self.query, if self.choosing { "Search projects" } else { "Search recent sessions" }, true, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.query.press(offset, clicks); cx.notify(); }))),
+                            .child(field::render(
+                                &self.query,
+                                if self.choosing { "Search projects" } else { "Search recent sessions" },
+                                true,
+                                &theme,
+                                field::on_press(cx, |this, offset, clicks, _, cx| {
+                                    this.query.press(offset, clicks);
+                                    cx.notify();
+                                }),
+                            )),
                     )
                     .child(div().flex().flex_wrap().gap(px(6.)).children(chips)),
             )
@@ -391,7 +483,9 @@ impl Render for RecentsView {
                 uniform_list(
                     "recent-items",
                     self.len(),
-                    cx.processor(|this, range: Range<usize>, _window, cx| range.map(|index| this.render_item(index, cx)).collect::<Vec<_>>()),
+                    cx.processor(|this, range: Range<usize>, _window, cx| {
+                        range.map(|index| this.render_item(index, cx)).collect::<Vec<_>>()
+                    }),
                 )
                 .track_scroll(&self.scroll)
                 .h(theme.ui(380.)),

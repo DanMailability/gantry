@@ -12,7 +12,8 @@ pub(crate) struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok((path == CONTAINER_ICON).then_some(Cow::Borrowed(include_bytes!("../assets/icons/container.svg").as_slice())))
+        Ok((path == CONTAINER_ICON)
+            .then_some(Cow::Borrowed(include_bytes!("../assets/icons/container.svg").as_slice())))
     }
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {

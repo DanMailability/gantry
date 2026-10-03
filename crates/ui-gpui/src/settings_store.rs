@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use app_core::settings::{self, Loaded, Problem, Settings};
 use app_core::shortcuts::{self, Check, Platform};
-use app_core::workspace::{ClaudeDirs, DirBadge, ResolvedDir};
 use app_core::theme_colors::{readable_fill, resolve, tokens};
+use app_core::workspace::{ClaudeDirs, DirBadge, ResolvedDir};
 use gpui::{App, Global, Task, WindowAppearance};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{Map, Value};
@@ -189,11 +189,11 @@ fn shortcut_problems(overrides: &BTreeMap<String, Option<String>>) -> Vec<Proble
     overrides
         .iter()
         .filter(|(id, _)| shortcuts::ACTIONS.iter().any(|action| action.id == id.as_str()))
-        .filter_map(|(id, keystroke)| {
-            match shortcuts::check(keystroke.as_deref()?, id, &[]) {
-                Check::Invalid => Some(Problem { key: format!("shortcuts.{id}"), message: "not a keystroke; the default is used".into() }),
-                Check::Ok | Check::Reserved(_) | Check::Conflict(_) => None,
+        .filter_map(|(id, keystroke)| match shortcuts::check(keystroke.as_deref()?, id, &[]) {
+            Check::Invalid => {
+                Some(Problem { key: format!("shortcuts.{id}"), message: "not a keystroke; the default is used".into() })
             }
+            Check::Ok | Check::Reserved(_) | Check::Conflict(_) => None,
         })
         .collect()
 }
@@ -311,7 +311,10 @@ mod tests {
     fn changed_file_applies() {
         let mut changed = Settings::default();
         changed.terminal_font.size = 18.0;
-        assert_eq!(reload_decision(&Settings::default(), &loaded(Some(changed.clone()), Vec::new())), Reload::Apply(Box::new(changed)));
+        assert_eq!(
+            reload_decision(&Settings::default(), &loaded(Some(changed.clone()), Vec::new())),
+            Reload::Apply(Box::new(changed))
+        );
     }
 
     #[test]
@@ -333,7 +336,13 @@ mod tests {
     #[test]
     fn the_dir_badge_is_shown_only_with_two_or_more_dirs() {
         use app_core::settings::ClaudeDir;
-        let dir = |name: &str, path: &str| ClaudeDir { name: name.into(), path: path.into(), command: "claude".into(), args: vec![], color: None };
+        let dir = |name: &str, path: &str| ClaudeDir {
+            name: name.into(),
+            path: path.into(),
+            command: "claude".into(),
+            args: vec![],
+            color: None,
+        };
         let mut settings = Settings { claude_dirs: vec![dir("Personal", "/c/one")], ..Settings::default() };
         assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/one"))), None);
         settings.claude_dirs.push(dir("Work", "/c/two"));

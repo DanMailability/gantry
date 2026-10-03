@@ -59,7 +59,8 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
-            container: None, claude_dir: None,
+            container: None,
+            claude_dir: None,
         }
     }
 

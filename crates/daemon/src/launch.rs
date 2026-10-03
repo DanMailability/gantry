@@ -69,7 +69,18 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
         };
         let claude_dir = claude_dir.or_else(|| claude_index::config::config_dir(&base_env));
         let containers_file = Some(paths.containers_file.clone());
-        serve(listener, ServerOptions { base_env, owner_uid, idle_timeout: options.idle_timeout, claude_dir, containers_file, docker }).await
+        serve(
+            listener,
+            ServerOptions {
+                base_env,
+                owner_uid,
+                idle_timeout: options.idle_timeout,
+                claude_dir,
+                containers_file,
+                docker,
+            },
+        )
+        .await
     })?;
     drop(lock);
     Ok(DaemonOutcome::Stopped)
@@ -107,7 +118,11 @@ fn login_env_or_current() -> Vec<(String, String)> {
 /// Start `<this executable> daemon` fully detached from the caller.
 pub fn spawn_detached_daemon() -> std::io::Result<()> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
-    command.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    command
+        .arg("daemon")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -189,7 +204,13 @@ mod tests {
     }
 
     fn options(dir: &std::path::Path, idle: Duration) -> DaemonOptions {
-        DaemonOptions { paths: Paths::in_dir(dir, "t"), base_env: Some(std::env::vars().collect()), idle_timeout: idle, claude_dir: Some(dir.join("claude")), docker: None }
+        DaemonOptions {
+            paths: Paths::in_dir(dir, "t"),
+            base_env: Some(std::env::vars().collect()),
+            idle_timeout: idle,
+            claude_dir: Some(dir.join("claude")),
+            docker: None,
+        }
     }
 
     #[test]
@@ -200,7 +221,10 @@ mod tests {
             std::thread::spawn(move || run_daemon(options).unwrap())
         };
         std::thread::sleep(Duration::from_millis(500));
-        assert!(matches!(run_daemon(options(dir.path(), Duration::from_secs(1))).unwrap(), DaemonOutcome::AlreadyRunning));
+        assert!(matches!(
+            run_daemon(options(dir.path(), Duration::from_secs(1))).unwrap(),
+            DaemonOutcome::AlreadyRunning
+        ));
         assert!(matches!(first.join().unwrap(), DaemonOutcome::Stopped));
     }
 

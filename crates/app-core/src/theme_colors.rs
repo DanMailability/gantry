@@ -307,7 +307,10 @@ mod tests {
         let ops = Path::new("/home/u/work/ops-agent");
         assert_eq!(ProjectColor::auto(ops), ProjectColor::Rose);
         let distinct: std::collections::HashSet<ProjectColor> =
-            ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i", "/j"].iter().map(|p| ProjectColor::auto(Path::new(p))).collect();
+            ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i", "/j"]
+                .iter()
+                .map(|p| ProjectColor::auto(Path::new(p)))
+                .collect();
         assert!(distinct.len() >= 4, "ten paths should spread over several colours");
     }
 
@@ -318,7 +321,10 @@ mod tests {
         let odd = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe"));
         assert_eq!(ProjectColor::auto(odd), ProjectColor::auto(odd));
         assert_ne!(
-            (0..=255u8).map(|b| ProjectColor::auto(Path::new(std::ffi::OsStr::from_bytes(&[b'/', b])))).collect::<std::collections::HashSet<_>>().len(),
+            (0..=255u8)
+                .map(|b| ProjectColor::auto(Path::new(std::ffi::OsStr::from_bytes(&[b'/', b]))))
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             1,
             "distinct byte values (including non-UTF-8) hash differently"
         );

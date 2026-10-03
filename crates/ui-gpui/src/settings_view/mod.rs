@@ -13,9 +13,9 @@ use app_core::settings::{Problem, Settings, hex};
 use app_core::snapshot::Rgb;
 use app_core::text_field::TextField;
 use gpui::{
-    App, Bounds, Context, DispatchPhase, Div, ElementId, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString, Stateful, Subscription, Window, canvas, deferred, div, point, prelude::*, px,
-    relative, rgb, rgba,
+    App, Bounds, Context, DispatchPhase, Div, ElementId, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString, Stateful,
+    Subscription, Window, canvas, deferred, div, point, prelude::*, px, relative, rgb, rgba,
 };
 
 use crate::field;
@@ -51,8 +51,14 @@ pub(crate) enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 6] =
-        [Section::Appearance, Section::Terminal, Section::Alerts, Section::Shortcuts, Section::Sessions, Section::Window];
+    const ALL: [Section; 6] = [
+        Section::Appearance,
+        Section::Terminal,
+        Section::Alerts,
+        Section::Shortcuts,
+        Section::Sessions,
+        Section::Window,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -306,7 +312,11 @@ impl SettingsView {
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let modifiers = &event.keystroke.modifiers;
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") && !modifiers.control && !modifiers.alt && !modifiers.platform {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                {
                     on_key(this, window, cx);
                     cx.stop_propagation();
                 }
@@ -359,11 +369,19 @@ impl SettingsView {
             .child(div().size(theme.ui(18.)).rounded_full().bg(rgb(knob)))
     }
 
-    fn stepper(&mut self, stepped: &'static Stepped, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn stepper(
+        &mut self,
+        stepped: &'static Stepped,
+        settings: &Settings,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = theme(cx).clone();
         let value = (stepped.get)(settings);
         let by = |sign: f32| {
-            change(move |settings| (stepped.set)(settings, step((stepped.get)(settings), sign * stepped.delta, stepped.min, stepped.max)))
+            change(move |settings| {
+                (stepped.set)(settings, step((stepped.get)(settings), sign * stepped.delta, stepped.min, stepped.max))
+            })
         };
         let (less, more) = (by(-1.0), by(1.0));
         let (key_less, key_more) = (less.clone(), more.clone());
@@ -392,7 +410,16 @@ impl SettingsView {
                 cx.stop_propagation();
             }))
             .child(square(self, 0, "−", less, cx))
-            .child(div().min_w(theme.ui(56.)).px(theme.ui(4.)).flex().justify_center().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(with_unit(value, stepped.unit)))
+            .child(
+                div()
+                    .min_w(theme.ui(56.))
+                    .px(theme.ui(4.))
+                    .flex()
+                    .justify_center()
+                    .whitespace_nowrap()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(with_unit(value, stepped.unit)),
+            )
             .child(square(self, 1, "+", more, cx))
     }
 
@@ -415,7 +442,14 @@ impl SettingsView {
             cx.notify();
         });
         let button = self
-            .pressable(name, index, Some(if self.popover == Some(popover) { theme.tokens.accent } else { theme.tokens.line }), window, cx, open)
+            .pressable(
+                name,
+                index,
+                Some(if self.popover == Some(popover) { theme.tokens.accent } else { theme.tokens.line }),
+                window,
+                cx,
+                open,
+            )
             .h(theme.ui(34.))
             .w(width)
             .px(theme.ui(10.))
@@ -448,7 +482,9 @@ impl SettingsView {
                         .rounded(px(RADIUS_SMALL))
                         .whitespace_nowrap()
                         .hover(|style| style.bg(rgb(theme.tokens.line)))
-                        .when(selected, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
+                        .when(selected, |item| {
+                            item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD)
+                        })
                         .child(text)
                 })
                 .collect();
@@ -489,7 +525,15 @@ impl SettingsView {
     }
 
     /// The trailing slot with a "Reset" text button when `show`, empty otherwise.
-    fn reset_button(&mut self, name: &'static str, index: usize, show: bool, reset: Handler, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn reset_button(
+        &mut self,
+        name: &'static str,
+        index: usize,
+        show: bool,
+        reset: Handler,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = theme(cx).clone();
         let slot = div().flex_none().w(theme.ui(SLOT_WIDTH)).flex().justify_end();
         if !show {
@@ -521,7 +565,14 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Div {
         let show = differs(settings, get);
-        self.reset_button(name, index, show, change(move |settings| set(settings, get(&Settings::default()))), window, cx)
+        self.reset_button(
+            name,
+            index,
+            show,
+            change(move |settings| set(settings, get(&Settings::default()))),
+            window,
+            cx,
+        )
     }
 
     /// A segmented bar: one button per label, the `chosen` one filled; `pick(i)` is the handler for button `i`.
@@ -547,7 +598,12 @@ impl SettingsView {
                     .rounded(px(RADIUS_SMALL))
                     .text_sm()
                     .whitespace_nowrap()
-                    .when(index == chosen, |segment| segment.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)).font_weight(FontWeight::SEMIBOLD))
+                    .when(index == chosen, |segment| {
+                        segment
+                            .bg(rgb(theme.tokens.accent))
+                            .text_color(rgb(theme.tokens.on_accent))
+                            .font_weight(FontWeight::SEMIBOLD)
+                    })
                     .when(index != chosen, |segment| segment.text_color(rgb(theme.tokens.text)))
                     .child(*label)
             })
@@ -570,7 +626,9 @@ impl SettingsView {
             open_settings_file(&path, cx);
         });
         let ink = theme(cx).tokens.text;
-        self.button("open-settings-json", index, "Open settings.json", window, cx, open).flex_none().text_color(rgb(ink))
+        self.button("open-settings-json", index, "Open settings.json", window, cx, open)
+            .flex_none()
+            .text_color(rgb(ink))
     }
 }
 
@@ -606,7 +664,9 @@ fn group(theme: &Theme, title: &'static str, description: Option<&'static str>, 
                 .bg(rgb(theme.tokens.surface))
                 .border_1()
                 .border_color(rgb(theme.tokens.line))
-                .children(rows.into_iter().enumerate().map(|(index, row)| row.when(index > 0, |row| row.border_t_1().border_color(rgb(theme.tokens.line))))),
+                .children(rows.into_iter().enumerate().map(|(index, row)| {
+                    row.when(index > 0, |row| row.border_t_1().border_color(rgb(theme.tokens.line)))
+                })),
         )
 }
 
@@ -632,7 +692,13 @@ fn row_shell(theme: &Theme, label: Div, control: impl IntoElement, trailing: Div
 }
 
 /// A setting as a row: title, one line of description, the control and the trailing slot.
-fn row(theme: &Theme, title: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, trailing: Div) -> Div {
+fn row(
+    theme: &Theme,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+    trailing: Div,
+) -> Div {
     row_shell(theme, row_label(title, muted(theme, description)), control, trailing)
 }
 
@@ -688,7 +754,9 @@ impl Render for SettingsView {
                 .rounded(px(RADIUS_SMALL))
                 .text_color(rgb(if active { theme.tokens.text } else { theme.tokens.muted }))
                 // The fill already shows the active item, so it draws no focus ring.
-                .when(active, |el| el.bg(rgb(theme.tokens.raised)).font_weight(FontWeight::SEMIBOLD).border_color(rgba(0)))
+                .when(active, |el| {
+                    el.bg(rgb(theme.tokens.raised)).font_weight(FontWeight::SEMIBOLD).border_color(rgba(0))
+                })
                 .when(!active, |el| el.hover(|style| style.bg(rgb(theme.tokens.raised))))
                 .child(item.label())
         });
@@ -754,12 +822,13 @@ impl Render for SettingsView {
             Section::Window => self.window_page(&theme, &settings, window, cx),
         };
 
-        let backdrop = self.popover.is_some().then(|| {
-            deferred(div().absolute().top_0().left_0().size_full().occlude().on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.close_popover(window, cx)),
-            ))
-        });
+        let backdrop =
+            self.popover.is_some().then(|| {
+                deferred(div().absolute().top_0().left_0().size_full().occlude().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_popover(window, cx)),
+                ))
+            });
 
         div()
             .id("settings-page")

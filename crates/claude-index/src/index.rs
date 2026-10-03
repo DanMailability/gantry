@@ -236,7 +236,8 @@ mod tests {
     fn pid_file(config: &Path, pid: u32, id: &str, cwd: &str, start: &str, domain: Option<&str>) {
         let dir = config.join("sessions");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut json = serde_json::json!({"pid": pid, "sessionId": id, "cwd": cwd, "procStart": start, "updatedAt": 1000});
+        let mut json =
+            serde_json::json!({"pid": pid, "sessionId": id, "cwd": cwd, "procStart": start, "updatedAt": 1000});
         if let Some(domain) = domain {
             json["pidDomain"] = domain.into();
         }
@@ -254,7 +255,10 @@ mod tests {
         transcript(dir.path(), "-b", "new", "/b", "second", 10);
         let records = Index::new(dir.path().into(), FakeHost::default()).scan();
         assert_eq!(ids(&records), vec!["new", "old"]);
-        assert_eq!((records[0].title.as_str(), records[0].cwd.as_path(), records[0].state), ("second", Path::new("/b"), IndexState::Closed));
+        assert_eq!(
+            (records[0].title.as_str(), records[0].cwd.as_path(), records[0].state),
+            ("second", Path::new("/b"), IndexState::Closed)
+        );
         assert!(records[0].cwd_exists);
     }
 
@@ -324,7 +328,11 @@ mod tests {
     fn a_container_pid_file_counts_as_running_where_processes_cannot_be_checked() {
         let dir = tempfile::tempdir().unwrap();
         pid_file(dir.path(), 7, "box", "/workspaces/x", "5", Some("linux::pid:[4026533220]"));
-        let host = FakeHost { domain: Some("linux:abc:pid:[4026531836]".into()), cannot_check_namespaces: true, ..FakeHost::default() };
+        let host = FakeHost {
+            domain: Some("linux:abc:pid:[4026531836]".into()),
+            cannot_check_namespaces: true,
+            ..FakeHost::default()
+        };
         assert_eq!(Index::new(dir.path().into(), host).scan()[0].state, IndexState::InContainer { pid: None });
     }
 
@@ -371,7 +379,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("projects/-a/s1/subagents");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("agent-x.jsonl"), r#"{"type":"user","cwd":"/a","message":{"content":"hi"}}"#).unwrap();
+        std::fs::write(nested.join("agent-x.jsonl"), r#"{"type":"user","cwd":"/a","message":{"content":"hi"}}"#)
+            .unwrap();
         assert!(Index::new(dir.path().into(), FakeHost::default()).scan().is_empty());
         assert!(Index::new(dir.path().join("nope"), FakeHost::default()).scan().is_empty());
     }

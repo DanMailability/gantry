@@ -2,7 +2,8 @@
 
 use app_core::text_field::TextField;
 use gpui::{
-    App, ClipboardItem, Context, Div, DispatchPhase, Keystroke, MouseButton, MouseDownEvent, Window, canvas, div, prelude::*, px, rgb, rgba,
+    App, ClipboardItem, Context, DispatchPhase, Div, Keystroke, MouseButton, MouseDownEvent, Window, canvas, div,
+    prelude::*, px, rgb, rgba,
 };
 
 use crate::theme::Theme;
@@ -11,7 +12,10 @@ use crate::theme::Theme;
 pub(crate) type Press = Box<dyn Fn(usize, usize, &mut Window, &mut App)>;
 
 /// A `Press` that runs `handler` on the view `cx` belongs to.
-pub(crate) fn on_press<V: 'static>(cx: &mut Context<V>, handler: impl Fn(&mut V, usize, usize, &mut Window, &mut Context<V>) + 'static) -> Press {
+pub(crate) fn on_press<V: 'static>(
+    cx: &mut Context<V>,
+    handler: impl Fn(&mut V, usize, usize, &mut Window, &mut Context<V>) + 'static,
+) -> Press {
     let entity = cx.entity().downgrade();
     let handler = std::rc::Rc::new(handler);
     Box::new(move |offset, clicks, window, cx| {
@@ -90,16 +94,28 @@ fn edit_keys(field: &mut TextField, keystroke: &Keystroke) -> bool {
 /// `press` runs on a left press inside the field.
 pub(crate) fn render(field: &TextField, placeholder: &'static str, focused: bool, theme: &Theme, press: Press) -> Div {
     let caret = || div().flex_none().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.accent));
-    let row = div().relative().flex().flex_row().items_center().min_w_0().overflow_hidden().whitespace_nowrap().child(press_area(field.text(), press));
+    let row = div()
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .child(press_area(field.text(), press));
     if field.text().is_empty() {
-        return row.when(focused, |row| row.child(caret())).child(div().text_color(rgb(theme.tokens.muted)).child(placeholder));
+        return row
+            .when(focused, |row| row.child(caret()))
+            .child(div().text_color(rgb(theme.tokens.muted)).child(placeholder));
     }
     let text = field.text();
     let range = field.selection().unwrap_or(field.cursor()..field.cursor());
     let (start, end) = (range.start, range.end);
     row.child(text[..start].to_string())
         .when(focused && field.cursor() == start, |row| row.child(caret()))
-        .when(start < end, |row| row.child(div().bg(rgba((theme.tokens.accent << 8) | 0x55)).child(text[start..end].to_string())))
+        .when(start < end, |row| {
+            row.child(div().bg(rgba((theme.tokens.accent << 8) | 0x55)).child(text[start..end].to_string()))
+        })
         .when(focused && start < end && field.cursor() == end, |row| row.child(caret()))
         .child(text[end..].to_string())
 }
@@ -113,10 +129,14 @@ fn press_area(text: &str, press: Press) -> impl IntoElement {
             let style = window.text_style();
             let size = style.font_size.to_pixels(window.rem_size());
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !bounds.contains(&event.position)
+                {
                     return;
                 }
-                let line = window.text_system().shape_line(text.clone().into(), size, &[style.to_run(text.len())], None);
+                let line =
+                    window.text_system().shape_line(text.clone().into(), size, &[style.to_run(text.len())], None);
                 press(line.closest_index_for_x(event.position.x - bounds.left()), event.click_count, window, cx);
             });
         },
@@ -135,11 +155,19 @@ mod tests {
     }
 
     fn ctrl() -> Modifiers {
-        if cfg!(target_os = "macos") { Modifiers { alt: true, ..Default::default() } } else { Modifiers { control: true, ..Default::default() } }
+        if cfg!(target_os = "macos") {
+            Modifiers { alt: true, ..Default::default() }
+        } else {
+            Modifiers { control: true, ..Default::default() }
+        }
     }
 
     fn command() -> Modifiers {
-        if cfg!(target_os = "macos") { Modifiers { platform: true, ..Default::default() } } else { Modifiers { control: true, ..Default::default() } }
+        if cfg!(target_os = "macos") {
+            Modifiers { platform: true, ..Default::default() }
+        } else {
+            Modifiers { control: true, ..Default::default() }
+        }
     }
 
     #[test]
@@ -147,7 +175,12 @@ mod tests {
         let mut field = TextField::default();
         let plain = Modifiers::default();
         let shift = Modifiers { shift: true, ..Default::default() };
-        for keystroke in [key("a", Some("a"), plain), key("b", Some("B"), shift), key("ש", Some("ש"), plain), key("space", Some(" "), plain)] {
+        for keystroke in [
+            key("a", Some("a"), plain),
+            key("b", Some("B"), shift),
+            key("ש", Some("ש"), plain),
+            key("space", Some(" "), plain),
+        ] {
             assert!(edit_keys(&mut field, &keystroke));
         }
         assert_eq!(field.text(), "aBש ");

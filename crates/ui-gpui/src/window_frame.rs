@@ -95,7 +95,10 @@ pub fn frame(window: &mut Window, line: u32, content: impl IntoElement) -> impl 
                         .when(!tiling.left, |inner| inner.border_l_1())
                         .when(!tiling.right, |inner| inner.border_r_1())
                         .when(!tiling.is_tiled(), |inner| {
-                            inner.shadow(vec![gpui::BoxShadow::new(px(0.), px(0.), Hsla { h: 0., s: 0., l: 0., a: 0.4 }).blur_radius(INSET / 2.)])
+                            inner.shadow(vec![
+                                gpui::BoxShadow::new(px(0.), px(0.), Hsla { h: 0., s: 0., l: 0., a: 0.4 })
+                                    .blur_radius(INSET / 2.),
+                            ])
                         }),
                 })
                 .on_mouse_move(|_, _, cx| cx.stop_propagation())
@@ -104,7 +107,11 @@ pub fn frame(window: &mut Window, line: u32, content: impl IntoElement) -> impl 
 }
 
 /// Minimize / maximize / close buttons, as the platform supports them.
-pub fn window_controls(window: &Window, theme: &Theme, on_close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+pub fn window_controls(
+    window: &Window,
+    theme: &Theme,
+    on_close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     let controls = window.window_controls();
     let button = |id: &'static str, glyph: &'static str| {
         div()
@@ -128,7 +135,9 @@ pub fn window_controls(window: &Window, theme: &Theme, on_close: impl Fn(&gpui::
         .flex_row()
         .items_center()
         .gap_2()
-        .when(controls.minimize, |row| row.child(button("minimize", "–").on_click(|_, window, _| window.minimize_window())))
+        .when(controls.minimize, |row| {
+            row.child(button("minimize", "–").on_click(|_, window, _| window.minimize_window()))
+        })
         .when(controls.maximize, |row| row.child(button("maximize", "□").on_click(|_, window, _| window.zoom_window())))
         .child(button("close", "×").on_click(on_close))
 }

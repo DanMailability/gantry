@@ -56,7 +56,11 @@ pub fn items(sessions: &[&SessionInfo], query: &str, home: Option<&Path>, favori
         })
         .collect();
     ranked.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)).then_with(|| a.0.cmp(b.0)));
-    let recent = ranked.into_iter().map(|(dir, ..)| LauncherItem::Dir { path: dir.to_path_buf(), favorite: false, exists: true });
+    let recent = ranked.into_iter().map(|(dir, ..)| LauncherItem::Dir {
+        path: dir.to_path_buf(),
+        favorite: false,
+        exists: true,
+    });
     pinned.into_iter().chain(recent).chain([LauncherItem::Browse]).collect()
 }
 
@@ -75,15 +79,19 @@ mod tests {
             cwd_exists,
             status: None,
             status_since_ms: 0,
-            container: None, claude_dir: None,
+            container: None,
+            claude_dir: None,
         }
     }
 
     fn dirs(items: &[LauncherItem]) -> Vec<String> {
-        items.iter().map(|item| match item {
-            LauncherItem::Dir { path, .. } => path.display().to_string(),
-            LauncherItem::Browse => "Browse".into(),
-        }).collect()
+        items
+            .iter()
+            .map(|item| match item {
+                LauncherItem::Dir { path, .. } => path.display().to_string(),
+                LauncherItem::Browse => "Browse".into(),
+            })
+            .collect()
     }
 
     #[test]
@@ -123,7 +131,11 @@ mod tests {
         let list = items(&refs, "", None, &favorites);
         assert_eq!(
             favs(&list),
-            vec![("/b".to_string(), true, false), (here.display().to_string(), true, true), ("/a".to_string(), false, true)]
+            vec![
+                ("/b".to_string(), true, false),
+                (here.display().to_string(), true, true),
+                ("/a".to_string(), false, true)
+            ]
         );
         assert_eq!(list.last(), Some(&LauncherItem::Browse));
     }
@@ -134,7 +146,10 @@ mod tests {
         let refs: Vec<&SessionInfo> = sessions.iter().collect();
         let home = Some(Path::new("/home/me"));
         let favorites = [PathBuf::from("/home/me/Private/rust_terminal"), PathBuf::from("/home/me/work/ops")];
-        assert_eq!(favs(&items(&refs, "rust", home, &favorites)), vec![("/home/me/Private/rust_terminal".to_string(), true, false)]);
+        assert_eq!(
+            favs(&items(&refs, "rust", home, &favorites)),
+            vec![("/home/me/Private/rust_terminal".to_string(), true, false)]
+        );
         assert_eq!(favs(&items(&refs, "", home, &favorites)).len(), 3);
         assert_eq!(favs(&items(&refs, "zzz", home, &favorites)), vec![]);
     }

@@ -1,21 +1,22 @@
 //! The daemon server: owns panes (PTY + terminal state) and serves one GUI client at a time.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use app_core::palette::Palette;
 use app_core::term_state::TermState;
 use claude_index::containers::{Docker, DockerCli, to_container};
+use claude_index::host::LocalHost;
 use claude_index::host::{Marked, in_container, processes_with_env};
 use claude_index::index::{IndexState, SessionRecord};
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
-use claude_index::host::LocalHost;
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest, TakeOverOutcome, claude_session,
+    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest,
+    TakeOverOutcome, claude_session,
 };
 use tokio::sync::Notify;
 
@@ -196,7 +197,8 @@ impl State {
             .iter()
             .map(|(id, pane)| PaneSession { pane: *id, pid: pane.pty.pid(), session_arg: pane.session_arg.clone() })
             .collect();
-        let view = ContainerView { registry: &self.registry, marked: &self.marked, dir_exists: &|dir: &Path| dir.is_dir() };
+        let view =
+            ContainerView { registry: &self.registry, marked: &self.marked, dir_exists: &|dir: &Path| dir.is_dir() };
         let sessions = resolve(&records, &panes, &self.gone, &view);
         if full {
             self.control(&DaemonMessage::Sessions { sessions: sessions.clone() });
@@ -222,8 +224,11 @@ impl State {
         let panes = &self.panes;
         self.marked.retain(|pid, pane| live.contains(pid) && panes.contains_key(pane));
         self.unmarked.retain(|pid| live.contains(pid));
-        let container_panes: Vec<PaneId> = panes.iter().filter(|(_, p)| p.container.is_some()).map(|(id, _)| *id).collect();
-        if container_panes.is_empty() || live.iter().all(|pid| self.marked.contains_key(pid) || self.unmarked.contains(pid)) {
+        let container_panes: Vec<PaneId> =
+            panes.iter().filter(|(_, p)| p.container.is_some()).map(|(id, _)| *id).collect();
+        if container_panes.is_empty()
+            || live.iter().all(|pid| self.marked.contains_key(pid) || self.unmarked.contains(pid))
+        {
             return;
         }
         let found = pane_marks(&processes_with_env(Path::new("/proc"), PANE_MARKER), &self.instance, &container_panes);
@@ -237,8 +242,16 @@ impl State {
                     if !self.marked.contains_key(&pid) && self.unmarked.insert(pid) {
                         // Not readable here (another user's process): look inside its container, if one of our panes
                         // runs there.
-                        let container = records.iter().find(|r| r.state == IndexState::InContainer { pid: Some(pid) }).and_then(|r| r.container_id.clone());
-                        let ours = |id: &str| panes.values().filter_map(|p| p.container_id.as_deref()).any(|c| c.starts_with(id) || id.starts_with(c));
+                        let container = records
+                            .iter()
+                            .find(|r| r.state == IndexState::InContainer { pid: Some(pid) })
+                            .and_then(|r| r.container_id.clone());
+                        let ours = |id: &str| {
+                            panes
+                                .values()
+                                .filter_map(|p| p.container_id.as_deref())
+                                .any(|c| c.starts_with(id) || id.starts_with(c))
+                        };
                         probe.extend(container.filter(|id| ours(id)));
                     }
                 }
@@ -362,7 +375,11 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
     let Ok(Some(first)) = read_frame(&mut recv).await else { return };
     let Some(Ok(ClientMessage::Hello { protocol })) = first.parse::<ClientMessage>() else { return };
     if protocol != PROTOCOL_VERSION {
-        let _ = write_frame(&mut send, &Frame::control(&DaemonMessage::VersionMismatch { daemon_protocol: PROTOCOL_VERSION })).await;
+        let _ = write_frame(
+            &mut send,
+            &Frame::control(&DaemonMessage::VersionMismatch { daemon_protocol: PROTOCOL_VERSION }),
+        )
+        .await;
         while let Ok(Some(frame)) = read_frame(&mut recv).await {
             if let Some(Ok(ClientMessage::StopAll)) = frame.parse::<ClientMessage>() {
                 stop_all(&shared);
@@ -383,7 +400,11 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             old.outbox.close();
             old.kicked.notify_one();
         }
-        outbox.push_control(Frame::control(&DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: shared.instance.clone(), claude_dir: shared.claude_dir.clone() }));
+        outbox.push_control(Frame::control(&DaemonMessage::Welcome {
+            protocol: PROTOCOL_VERSION,
+            instance: shared.instance.clone(),
+            claude_dir: shared.claude_dir.clone(),
+        }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id
     };
@@ -630,7 +651,11 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         ClientMessage::FindContainer { request, dir } => find_container(shared, request, dir),
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
-            let inside = state.panes.get(&pane).filter(|p| p.container.is_some()).and_then(|p| stop_container_processes(shared, pane, p));
+            let inside = state
+                .panes
+                .get(&pane)
+                .filter(|p| p.container.is_some())
+                .and_then(|p| stop_container_processes(shared, pane, p));
             if let Some((container, marker)) = inside {
                 let shared = shared.clone();
                 tokio::task::spawn_blocking(move || stop_inside(&shared, &container, &marker));
@@ -718,9 +743,18 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
 
 /// The answer to `FindContainer` without asking Docker, when there is one: the container the last lookup found for
 /// `dir` (a launch looks it up again anyway), or none for a while after Docker failed. `None` = ask Docker.
-fn cached_answer(registry: &Registry, dir: &Path, failed_at: Option<Instant>, now: Instant) -> Option<Option<ContainerChoice>> {
+fn cached_answer(
+    registry: &Registry,
+    dir: &Path,
+    failed_at: Option<Instant>,
+    now: Instant,
+) -> Option<Option<ContainerChoice>> {
     if let Some(c) = containers::for_dir(registry.containers(), dir) {
-        return Some(Some(ContainerChoice { host_folder: c.host_folder.clone(), name: c.name.clone(), running: c.running }));
+        return Some(Some(ContainerChoice {
+            host_folder: c.host_folder.clone(),
+            name: c.name.clone(),
+            running: c.running,
+        }));
     }
     failed_at.filter(|at| now.duration_since(*at) < DOCKER_RETRY).map(|_| None)
 }
@@ -748,11 +782,10 @@ fn find_container(shared: &Arc<Shared>, request: u64, dir: PathBuf) {
             Ok(()) => state.registry = registry,
             Err(_) => state.docker_failed_at = Some(Instant::now()),
         }
-        let container = refreshed.ok().and_then(|()| containers::for_dir(state.registry.containers(), &dir)).map(|c| ContainerChoice {
-            host_folder: c.host_folder.clone(),
-            name: c.name.clone(),
-            running: c.running,
-        });
+        let container = refreshed
+            .ok()
+            .and_then(|()| containers::for_dir(state.registry.containers(), &dir))
+            .map(|c| ContainerChoice { host_folder: c.host_folder.clone(), name: c.name.clone(), running: c.running });
         state.control(&DaemonMessage::ContainerFound { request, container });
     });
 }
@@ -761,7 +794,8 @@ fn find_container(shared: &Arc<Shared>, request: u64, dir: PathBuf) {
 /// through `docker exec` with this pane's marker.
 fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: SpawnRequest, folder: PathBuf) {
     tokio::spawn(async move {
-        let fail = |shared: &Shared, error: String| shared.lock().control(&DaemonMessage::SpawnFailed { request, error });
+        let fail =
+            |shared: &Shared, error: String| shared.lock().control(&DaemonMessage::SpawnFailed { request, error });
         let Some(program) = shared.docker.clone() else {
             return fail(&shared, "Dev containers are not available: Docker is turned off".into());
         };
@@ -771,7 +805,9 @@ fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: S
             (registry, ready, folder)
         })
         .await;
-        let Ok((mut registry, ready, folder)) = looked_up else { return fail(&shared, "the Docker lookup failed".into()) };
+        let Ok((mut registry, ready, folder)) = looked_up else {
+            return fail(&shared, "the Docker lookup failed".into());
+        };
         if let (Ok(container), Some(session)) = (&ready, claude_session(spec.claude, &spec.program, &spec.args)) {
             registry.remember_session(session, &container.id);
         }
@@ -925,7 +961,8 @@ mod tests {
         use claude_index::index::IndexState;
         let outbox = Outbox::new(1 << 20);
         let mut state = State { sessions_enabled: true, ..State::default() };
-        state.client = Some(Client { id: 1, outbox: outbox.clone(), attached: HashSet::new(), kicked: Arc::new(Notify::new()) });
+        state.client =
+            Some(Client { id: 1, outbox: outbox.clone(), attached: HashSet::new(), kicked: Arc::new(Notify::new()) });
         // A client connects (ListPanes) before the index has scanned: an empty list would claim no
         // session exists, so nothing is sent yet.
         state.publish_sessions(true);
@@ -964,7 +1001,18 @@ mod tests {
             docker: None,
             claude_dir: None,
         });
-        let spec = || SpawnRequest { program: "sleep".into(), args: vec!["30".into()], cwd: "/".into(), cols: 80, rows: 24, cwd_from: None, container: None, claude: false, env: Vec::new(), scrollback: None };
+        let spec = || SpawnRequest {
+            program: "sleep".into(),
+            args: vec!["30".into()],
+            cwd: "/".into(),
+            cols: 80,
+            rows: 24,
+            cwd_from: None,
+            container: None,
+            claude: false,
+            env: Vec::new(),
+            scrollback: None,
+        };
         handle_message(&shared, 1, ClientMessage::Spawn { request: 1, spec: spec() });
         handle_message(&shared, 1, ClientMessage::SetPalette(LIGHT.into()));
         handle_message(&shared, 1, ClientMessage::Spawn { request: 2, spec: spec() });
@@ -1101,7 +1149,10 @@ mod tests {
         assert_eq!((hit.name.as_str(), hit.host_folder.as_path(), hit.running), ("box", Path::new("/h/app"), true));
         // A folder no known container mounts: ask Docker, unless it just failed.
         assert_eq!(cached_answer(&registry, Path::new("/elsewhere"), None, now), None);
-        assert_eq!(cached_answer(&registry, Path::new("/elsewhere"), Some(now), now + Duration::from_secs(5)), Some(None));
+        assert_eq!(
+            cached_answer(&registry, Path::new("/elsewhere"), Some(now), now + Duration::from_secs(5)),
+            Some(None)
+        );
         assert_eq!(cached_answer(&registry, Path::new("/elsewhere"), Some(now), now + Duration::from_secs(60)), None);
     }
 }

@@ -83,7 +83,9 @@ impl AttentionTracker {
     fn observe(&mut self, session: &SessionInfo) {
         let still_busy = self.seen.get(&session.id).filter(|seen| seen.status == Some(SessionStatus::Busy));
         let busy_since_ms = match session.status {
-            Some(SessionStatus::Busy) => Some(still_busy.and_then(|seen| seen.busy_since_ms).unwrap_or(session.status_since_ms)),
+            Some(SessionStatus::Busy) => {
+                Some(still_busy.and_then(|seen| seen.busy_since_ms).unwrap_or(session.status_since_ms))
+            }
             _ => None,
         };
         self.seen.insert(session.id.clone(), Seen { status: session.status.clone(), busy_since_ms });
@@ -157,7 +159,9 @@ pub fn without_claude_glyph(title: &str) -> &str {
 /// Notification summary and body for `kind` on the session titled `title` in `dir` (already shortened for display).
 pub fn describe(kind: &AlertKind, title: &str, dir: &str) -> (String, String) {
     match kind {
-        AlertKind::NeedsInput { reason: Some(reason) } => (format!("Needs input: {title}"), format!("{reason} · {dir}")),
+        AlertKind::NeedsInput { reason: Some(reason) } => {
+            (format!("Needs input: {title}"), format!("{reason} · {dir}"))
+        }
         AlertKind::NeedsInput { reason: None } => (format!("Needs input: {title}"), dir.to_string()),
         AlertKind::Finished => (format!("Finished: {title}"), dir.to_string()),
     }
@@ -179,7 +183,8 @@ mod tests {
             cwd_exists: true,
             status,
             status_since_ms: since,
-            container: None, claude_dir: None,
+            container: None,
+            claude_dir: None,
         }
     }
 
@@ -200,7 +205,14 @@ mod tests {
         let mut tracker = AttentionTracker::default();
         tracker.reset(&[mine(Some(SessionStatus::Busy), 1)]);
         let alerts = tracker.update(&[mine(asks(), 2)], &[]);
-        assert_eq!(alerts, vec![Alert { session: "s".into(), pane: 7, kind: AlertKind::NeedsInput { reason: Some("dialog open".into()) } }]);
+        assert_eq!(
+            alerts,
+            vec![Alert {
+                session: "s".into(),
+                pane: 7,
+                kind: AlertKind::NeedsInput { reason: Some("dialog open".into()) }
+            }]
+        );
         // Claude rewrites the file while still waiting: no second alert.
         assert!(tracker.update(&[mine(asks(), 3)], &[]).is_empty());
         // Answered, then asks again: a new episode.
@@ -259,7 +271,8 @@ mod tests {
 
     #[test]
     fn needs_input_outranks_busy_outranks_idle() {
-        let (idle, busy, needs) = (SessionStatus::Idle, SessionStatus::Busy, SessionStatus::NeedsInput { reason: None });
+        let (idle, busy, needs) =
+            (SessionStatus::Idle, SessionStatus::Busy, SessionStatus::NeedsInput { reason: None });
         assert_eq!(most_urgent([&idle, &needs, &busy]), Some(&needs));
         assert_eq!(most_urgent([&idle, &busy]), Some(&busy));
         assert_eq!(most_urgent([]), None);
@@ -323,13 +336,19 @@ mod tests {
     #[test]
     fn when_visible_alerts_a_visible_pane() {
         let alerts = AlertSettings { when_visible: true, ..settings() };
-        assert_eq!(alert_channels(&alerts, &finished(), true, true), Channels { badge: true, notification: true, sound: Some(AlertTone::FallingBlip) });
+        assert_eq!(
+            alert_channels(&alerts, &finished(), true, true),
+            Channels { badge: true, notification: true, sound: Some(AlertTone::FallingBlip) }
+        );
     }
 
     #[test]
     fn only_when_unfocused_drops_notification_but_keeps_badge_and_sound() {
         let alerts = AlertSettings { only_when_unfocused: true, ..settings() };
-        assert_eq!(alert_channels(&alerts, &finished(), false, true), Channels { badge: true, notification: false, sound: Some(AlertTone::FallingBlip) });
+        assert_eq!(
+            alert_channels(&alerts, &finished(), false, true),
+            Channels { badge: true, notification: false, sound: Some(AlertTone::FallingBlip) }
+        );
         assert!(alert_channels(&alerts, &finished(), false, false).notification);
     }
 
@@ -351,6 +370,9 @@ mod tests {
             alert_channels(&alerts, &AlertKind::NeedsInput { reason: None }, false, false),
             Channels { badge: false, notification: false, sound: Some(AlertTone::FallingBlip) }
         );
-        assert_eq!(alert_channels(&alerts, &finished(), false, false), Channels { badge: false, notification: true, sound: None });
+        assert_eq!(
+            alert_channels(&alerts, &finished(), false, false),
+            Channels { badge: false, notification: true, sound: None }
+        );
     }
 }

@@ -166,7 +166,9 @@ pub fn claude_session<'a>(claude: bool, program: &str, args: &'a [String]) -> Op
     if !claude && std::path::Path::new(program).file_stem().is_none_or(|stem| stem != "claude") {
         return None;
     }
-    args.windows(2).find(|pair| matches!(pair[0].as_str(), "--session-id" | "--resume" | "-r")).map(|pair| pair[1].as_str())
+    args.windows(2)
+        .find(|pair| matches!(pair[0].as_str(), "--session-id" | "--resume" | "-r"))
+        .map(|pair| pair[1].as_str())
 }
 
 /// Terminal colours the GUI draws with, 0xRRGGBB (the daemon answers colour queries from them).
@@ -352,7 +354,10 @@ mod tests {
 
     #[test]
     fn frozen_messages_keep_their_wire_shape() {
-        assert_eq!(serde_json::to_string(&ClientMessage::Hello { protocol: 7 }).unwrap(), r#"{"type":"hello","protocol":7}"#);
+        assert_eq!(
+            serde_json::to_string(&ClientMessage::Hello { protocol: 7 }).unwrap(),
+            r#"{"type":"hello","protocol":7}"#
+        );
         assert_eq!(serde_json::to_string(&ClientMessage::StopAll).unwrap(), r#"{"type":"stop_all"}"#);
     }
 
@@ -360,13 +365,28 @@ mod tests {
     fn messages_round_trip() {
         let msg = ClientMessage::Spawn {
             request: 3,
-            spec: SpawnRequest { program: "claude".into(), args: vec!["--resume".into()], cwd: "/tmp".into(), cols: 80, rows: 24, cwd_from: Some(4), container: None, claude: true, env: vec![("A".into(), "b".into())], scrollback: Some(5000) },
+            spec: SpawnRequest {
+                program: "claude".into(),
+                args: vec!["--resume".into()],
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                cwd_from: Some(4),
+                container: None,
+                claude: true,
+                env: vec![("A".into(), "b".into())],
+                scrollback: Some(5000),
+            },
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
         for reply in [
             DaemonMessage::Resync { pane: 9, cols: 100, rows: 30 },
-            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "123-456".into(), claude_dir: Some("/home/u/.claude".into()) },
+            DaemonMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                instance: "123-456".into(),
+                claude_dir: Some("/home/u/.claude".into()),
+            },
             DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "1".into(), claude_dir: None },
             DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
         ] {
@@ -377,7 +397,13 @@ mod tests {
 
     #[test]
     fn set_palette_round_trips() {
-        let msg = ClientMessage::SetPalette(PaletteColors { foreground: 0xd8dde8, background: 0x141821, cursor: 0x9ecbff, selection: 0x2f4a6e, ansi: [7; 16] });
+        let msg = ClientMessage::SetPalette(PaletteColors {
+            foreground: 0xd8dde8,
+            background: 0x141821,
+            cursor: 0x9ecbff,
+            selection: 0x2f4a6e,
+            ansi: [7; 16],
+        });
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.starts_with(r#"{"type":"set_palette","#), "{json}");
         assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
@@ -409,7 +435,11 @@ mod tests {
         for message in [
             DaemonMessage::Sessions { sessions: vec![session.clone()] },
             DaemonMessage::SessionsChanged {
-                upserted: vec![SessionInfo { state: SessionState::External { pid: None }, status: None, ..session.clone() }],
+                upserted: vec![SessionInfo {
+                    state: SessionState::External { pid: None },
+                    status: None,
+                    ..session.clone()
+                }],
                 removed: vec!["gone".into()],
             },
         ] {
@@ -422,7 +452,9 @@ mod tests {
     fn take_over_messages_round_trip() {
         let request = ClientMessage::TakeOver { session: "s".into(), force: true };
         assert_eq!(serde_json::to_string(&request).unwrap(), r#"{"type":"take_over","session":"s","force":true}"#);
-        for outcome in [TakeOverOutcome::Exited, TakeOverOutcome::StillRunning, TakeOverOutcome::Failed { error: "no".into() }] {
+        for outcome in
+            [TakeOverOutcome::Exited, TakeOverOutcome::StillRunning, TakeOverOutcome::Failed { error: "no".into() }]
+        {
             let reply = DaemonMessage::TakeOverResult { session: "s".into(), outcome };
             let json = serde_json::to_string(&reply).unwrap();
             assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
@@ -443,7 +475,10 @@ mod tests {
     #[test]
     fn claude_session_with_the_flag_ignores_the_program_name() {
         let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-        assert_eq!(claude_session(true, "/opt/wrap/claude-work", &args(&["--model", "x", "--session-id", "abc"])), Some("abc"));
+        assert_eq!(
+            claude_session(true, "/opt/wrap/claude-work", &args(&["--model", "x", "--session-id", "abc"])),
+            Some("abc")
+        );
         assert_eq!(claude_session(true, "sh", &args(&["--continue"])), None);
         assert_eq!(claude_session(false, "/opt/wrap/claude-work", &args(&["--session-id", "abc"])), None);
     }

@@ -74,10 +74,12 @@ impl AlertTone {
     ];
 
     /// The tones offered for a finished session, in the order the Settings list shows them.
-    pub const FINISHED: [AlertTone; 4] = [AlertTone::ClassicBlip, AlertTone::GentleRise, AlertTone::SoftBloop, AlertTone::SoftDrop];
+    pub const FINISHED: [AlertTone; 4] =
+        [AlertTone::ClassicBlip, AlertTone::GentleRise, AlertTone::SoftBloop, AlertTone::SoftDrop];
 
     /// The tones offered for a session that needs input, in the order the Settings list shows them.
-    pub const NEEDS_INPUT: [AlertTone; 4] = [AlertTone::FallingBlip, AlertTone::SoftFall, AlertTone::SoftFlutter, AlertTone::WarmHum];
+    pub const NEEDS_INPUT: [AlertTone; 4] =
+        [AlertTone::FallingBlip, AlertTone::SoftFall, AlertTone::SoftFlutter, AlertTone::WarmHum];
 
     fn name(self) -> &'static str {
         match self {
@@ -335,7 +337,12 @@ impl Default for Settings {
             shell: ShellSettings::default(),
             recents: RecentsSettings { per_project: 5, chips: 6 },
             favorites: Vec::new(),
-            window: WindowSettings { restore_layout: true, sidebar_at_start: SidebarAtStart::Remember, scrollback: 10_000, right_to_left: true },
+            window: WindowSettings {
+                restore_layout: true,
+                sidebar_at_start: SidebarAtStart::Remember,
+                scrollback: 10_000,
+                right_to_left: true,
+            },
             project_colors: ProjectColors::default(),
             animate_working: true,
         }
@@ -445,7 +452,10 @@ impl Reader {
             Some(Value::Number(number)) => {
                 let value = number.as_f64().unwrap_or(default);
                 if value < range.0 || value > range.1 {
-                    self.problem(&format!("{prefix}{key}"), format!("{value} is outside {} to {}; clamped", range.0, range.1));
+                    self.problem(
+                        &format!("{prefix}{key}"),
+                        format!("{value} is outside {} to {}; clamped", range.0, range.1),
+                    );
                 }
                 value.clamp(range.0, range.1)
             }
@@ -558,7 +568,10 @@ impl Reader {
                 None => None,
                 Some(Value::String(name)) if ProjectColor::from_name(name).is_some() => ProjectColor::from_name(name),
                 Some(_) => {
-                    self.problem(&format!("{key}.color"), "expected a colour name; the automatic colour is used".into());
+                    self.problem(
+                        &format!("{key}.color"),
+                        "expected a colour name; the automatic colour is used".into(),
+                    );
                     None
                 }
             };
@@ -584,7 +597,10 @@ impl Reader {
                 continue;
             };
             if !names.contains(name.as_str()) {
-                self.problem(&format!("folderClaudeDirs.{folder}"), format!("no config dir named \"{name}\"; the default is used"));
+                self.problem(
+                    &format!("folderClaudeDirs.{folder}"),
+                    format!("no config dir named \"{name}\"; the default is used"),
+                );
             }
             out.insert(PathBuf::from(folder), name);
         }
@@ -661,7 +677,8 @@ impl Reader {
         let alerts = AlertSettings {
             needs_input: self.event(&map, "needsInput", default.needs_input),
             finished: self.event(&map, "finished", default.finished),
-            finished_after_seconds: self.number(&map, "alerts.", "finishedAfterSeconds", 3.0, (0.0, 600.0)).round() as u32,
+            finished_after_seconds: self.number(&map, "alerts.", "finishedAfterSeconds", 3.0, (0.0, 600.0)).round()
+                as u32,
             when_visible: self.bool(&map, "alerts.", "whenVisible", default.when_visible),
             only_when_unfocused: self.bool(&map, "alerts.", "onlyWhenUnfocused", default.only_when_unfocused),
             play_sounds: self.bool(&map, "alerts.", "playSounds", default.play_sounds),
@@ -671,12 +688,16 @@ impl Reader {
         let shortcuts = self.shortcuts(raw);
         let claude_dirs = self.claude_dirs(raw);
         let implicit = BTreeSet::from(["Default"]);
-        let names: BTreeSet<&str> = if claude_dirs.is_empty() { implicit } else { claude_dirs.iter().map(|dir| dir.name.as_str()).collect() };
+        let names: BTreeSet<&str> =
+            if claude_dirs.is_empty() { implicit } else { claude_dirs.iter().map(|dir| dir.name.as_str()).collect() };
         let default_claude_dir = match raw.get("defaultClaudeDir") {
             None => None,
             Some(Value::String(name)) => {
                 if !names.contains(name.as_str()) {
-                    self.problem("defaultClaudeDir", format!("no config dir named \"{name}\"; the first one is the default"));
+                    self.problem(
+                        "defaultClaudeDir",
+                        format!("no config dir named \"{name}\"; the first one is the default"),
+                    );
                 }
                 Some(name.clone())
             }
@@ -688,7 +709,10 @@ impl Reader {
         let folder_claude_dirs = self.folder_claude_dirs(raw, &names);
 
         let map = self.object(raw, "", "shell");
-        let shell = ShellSettings { program: self.string(&map, "shell.", "program"), args: self.strings(&map, "shell.", "args") };
+        let shell = ShellSettings {
+            program: self.string(&map, "shell.", "program"),
+            args: self.strings(&map, "shell.", "args"),
+        };
 
         let map = self.object(raw, "", "recents");
         let recents = RecentsSettings {
@@ -701,7 +725,13 @@ impl Reader {
         let map = self.object(raw, "", "window");
         let window = WindowSettings {
             restore_layout: self.bool(&map, "window.", "restoreLayout", defaults.window.restore_layout),
-            sidebar_at_start: self.choice(&map, "window.", "sidebarAtStart", defaults.window.sidebar_at_start, SidebarAtStart::from_name),
+            sidebar_at_start: self.choice(
+                &map,
+                "window.",
+                "sidebarAtStart",
+                defaults.window.sidebar_at_start,
+                SidebarAtStart::from_name,
+            ),
             scrollback: self.number(&map, "window.", "scrollback", 10_000.0, (1000.0, 100_000.0)).round() as u32,
             right_to_left: self.bool(&map, "window.", "rightToLeft", defaults.window.right_to_left),
         };
@@ -747,11 +777,7 @@ impl Reader {
 /// A float as JSON without f32 noise (0.4 stays 0.4); whole numbers are written as integers.
 fn number(value: f32) -> Value {
     let value: f64 = value.to_string().parse().unwrap_or(0.0);
-    if value.fract() == 0.0 && value.abs() < 1e9 {
-        Value::from(value as i64)
-    } else {
-        Value::from(value)
-    }
+    if value.fract() == 0.0 && value.abs() < 1e9 { Value::from(value as i64) } else { Value::from(value) }
 }
 
 /// Every known key of `settings` as (path, value, differs from the default).
@@ -769,22 +795,40 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     for (key, fill) in fills {
         add(&["statusColors", key], fill.map_or(Value::Null, |color| hex(color).into()), fill.is_some());
     }
-    add(&["selection"], settings.selection.map_or(Value::Null, |color| hex(color).into()), settings.selection.is_some());
+    add(
+        &["selection"],
+        settings.selection.map_or(Value::Null, |color| hex(color).into()),
+        settings.selection.is_some(),
+    );
     let font = &settings.terminal_font;
     add(&["terminalFont", "family"], font.family.clone().map_or(Value::Null, Value::from), font.family.is_some());
     add(&["terminalFont", "size"], number(font.size), font.size != default.terminal_font.size);
-    add(&["terminalFont", "lineHeight"], number(font.line_height), font.line_height != default.terminal_font.line_height);
+    add(
+        &["terminalFont", "lineHeight"],
+        number(font.line_height),
+        font.line_height != default.terminal_font.line_height,
+    );
     add(&["uiFontSize"], number(settings.ui_font_size), settings.ui_font_size != default.ui_font_size);
     let (alerts, base) = (&settings.alerts, &default.alerts);
-    for (key, event, base) in [("needsInput", alerts.needs_input, base.needs_input), ("finished", alerts.finished, base.finished)] {
+    for (key, event, base) in
+        [("needsInput", alerts.needs_input, base.needs_input), ("finished", alerts.finished, base.finished)]
+    {
         add(&["alerts", key, "badge"], event.badge.into(), event.badge != base.badge);
         add(&["alerts", key, "notification"], event.notification.into(), event.notification != base.notification);
         add(&["alerts", key, "sound"], event.sound.into(), event.sound != base.sound);
         add(&["alerts", key, "tone"], event.tone.name().into(), event.tone != base.tone);
     }
-    add(&["alerts", "finishedAfterSeconds"], alerts.finished_after_seconds.into(), alerts.finished_after_seconds != base.finished_after_seconds);
+    add(
+        &["alerts", "finishedAfterSeconds"],
+        alerts.finished_after_seconds.into(),
+        alerts.finished_after_seconds != base.finished_after_seconds,
+    );
     add(&["alerts", "whenVisible"], alerts.when_visible.into(), alerts.when_visible != base.when_visible);
-    add(&["alerts", "onlyWhenUnfocused"], alerts.only_when_unfocused.into(), alerts.only_when_unfocused != base.only_when_unfocused);
+    add(
+        &["alerts", "onlyWhenUnfocused"],
+        alerts.only_when_unfocused.into(),
+        alerts.only_when_unfocused != base.only_when_unfocused,
+    );
     add(&["alerts", "playSounds"], alerts.play_sounds.into(), alerts.play_sounds != base.play_sounds);
     add(&["alerts", "volume"], number(alerts.volume), alerts.volume != base.volume);
     let shortcuts: Map<String, Value> =
@@ -802,24 +846,48 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         })
         .collect();
     add(&["claudeDirs"], Value::Array(dirs), !settings.claude_dirs.is_empty());
-    add(&["defaultClaudeDir"], settings.default_claude_dir.clone().map_or(Value::Null, Value::from), settings.default_claude_dir.is_some());
-    let folders: Map<String, Value> =
-        settings.folder_claude_dirs.iter().map(|(folder, name)| (folder.to_string_lossy().into_owned(), name.clone().into())).collect();
+    add(
+        &["defaultClaudeDir"],
+        settings.default_claude_dir.clone().map_or(Value::Null, Value::from),
+        settings.default_claude_dir.is_some(),
+    );
+    let folders: Map<String, Value> = settings
+        .folder_claude_dirs
+        .iter()
+        .map(|(folder, name)| (folder.to_string_lossy().into_owned(), name.clone().into()))
+        .collect();
     add(&["folderClaudeDirs"], Value::Object(folders), !settings.folder_claude_dirs.is_empty());
     add(&["shell", "program"], settings.shell.program.clone().into(), settings.shell.program != default.shell.program);
     add(&["shell", "args"], settings.shell.args.clone().into(), settings.shell.args != default.shell.args);
-    add(&["recents", "perProject"], settings.recents.per_project.into(), settings.recents.per_project != default.recents.per_project);
+    add(
+        &["recents", "perProject"],
+        settings.recents.per_project.into(),
+        settings.recents.per_project != default.recents.per_project,
+    );
     add(&["recents", "chips"], settings.recents.chips.into(), settings.recents.chips != default.recents.chips);
-    let favorites: Vec<Value> = settings.favorites.iter().map(|path| path.to_string_lossy().into_owned().into()).collect();
+    let favorites: Vec<Value> =
+        settings.favorites.iter().map(|path| path.to_string_lossy().into_owned().into()).collect();
     add(&["favorites"], Value::Array(favorites), !settings.favorites.is_empty());
     let (window, base) = (&settings.window, &default.window);
     add(&["window", "restoreLayout"], window.restore_layout.into(), window.restore_layout != base.restore_layout);
-    add(&["window", "sidebarAtStart"], window.sidebar_at_start.name().into(), window.sidebar_at_start != base.sidebar_at_start);
+    add(
+        &["window", "sidebarAtStart"],
+        window.sidebar_at_start.name().into(),
+        window.sidebar_at_start != base.sidebar_at_start,
+    );
     add(&["window", "scrollback"], window.scrollback.into(), window.scrollback != base.scrollback);
     add(&["window", "rightToLeft"], window.right_to_left.into(), window.right_to_left != base.right_to_left);
-    add(&["projectColors", "enabled"], settings.project_colors.enabled.into(), settings.project_colors.enabled != default.project_colors.enabled);
-    let colors: Map<String, Value> =
-        settings.project_colors.folders.iter().map(|(folder, color)| (folder.to_string_lossy().into_owned(), color.name().into())).collect();
+    add(
+        &["projectColors", "enabled"],
+        settings.project_colors.enabled.into(),
+        settings.project_colors.enabled != default.project_colors.enabled,
+    );
+    let colors: Map<String, Value> = settings
+        .project_colors
+        .folders
+        .iter()
+        .map(|(folder, color)| (folder.to_string_lossy().into_owned(), color.name().into()))
+        .collect();
     add(&["projectColors", "folders"], Value::Object(colors), !settings.project_colors.folders.is_empty());
     add(&["animateWorking"], settings.animate_working.into(), settings.animate_working != default.animate_working);
     out
@@ -947,11 +1015,17 @@ mod tests {
     fn defaults_match_spec() {
         let s = Settings::default();
         assert_eq!(s.theme, ThemeChoice::Mist);
-        assert_eq!((s.terminal_font.size, s.terminal_font.line_height, s.terminal_font.family.clone()), (14.0, 1.3, None));
+        assert_eq!(
+            (s.terminal_font.size, s.terminal_font.line_height, s.terminal_font.family.clone()),
+            (14.0, 1.3, None)
+        );
         assert_eq!(s.ui_font_size, 14.0);
         assert_eq!(s.alerts.finished_after_seconds, 3);
         assert_eq!(s.alerts.volume, 0.4);
-        assert_eq!((s.alerts.needs_input.tone, s.alerts.finished.tone), (AlertTone::FallingBlip, AlertTone::ClassicBlip));
+        assert_eq!(
+            (s.alerts.needs_input.tone, s.alerts.finished.tone),
+            (AlertTone::FallingBlip, AlertTone::ClassicBlip)
+        );
         assert_eq!(s.status_fills, StatusFills::default());
         assert_eq!(s.selection, None);
         assert!(!s.alerts.when_visible && !s.alerts.only_when_unfocused && s.alerts.play_sounds);
@@ -973,7 +1047,10 @@ mod tests {
         settings.status_fills.done = Some(0xaabbcc);
         settings.alerts.volume = 0.7;
         save(&path, &settings, &Map::new()).unwrap();
-        assert_eq!(read_json(&path), serde_json::json!({"statusColors": {"done": "#aabbcc"}, "alerts": {"volume": 0.7}}));
+        assert_eq!(
+            read_json(&path),
+            serde_json::json!({"statusColors": {"done": "#aabbcc"}, "alerts": {"volume": 0.7}})
+        );
         assert!(std::fs::read_to_string(&path).unwrap().ends_with("}\n"));
         assert!(!path.with_file_name("settings.json.tmp").exists());
     }
@@ -998,7 +1075,9 @@ mod tests {
 
     #[test]
     fn bad_values_fall_back_per_key() {
-        let loaded = parse(r#"{"theme": "neon", "statusColors": {"done": "green"}, "alerts": {"volume": "loud"}, "uiFontSize": 16}"#);
+        let loaded = parse(
+            r#"{"theme": "neon", "statusColors": {"done": "green"}, "alerts": {"volume": "loud"}, "uiFontSize": 16}"#,
+        );
         let settings = loaded.settings.unwrap();
         let defaults = Settings::default();
         assert_eq!(settings.theme, defaults.theme);
@@ -1023,7 +1102,12 @@ mod tests {
     fn round_trip() {
         let settings = Settings {
             theme: ThemeChoice::MistLight,
-            status_fills: StatusFills { needs_input: Some(0x112233), working: Some(0x445566), done: Some(0x778899), idle: Some(0xaabbcc) },
+            status_fills: StatusFills {
+                needs_input: Some(0x112233),
+                working: Some(0x445566),
+                done: Some(0x778899),
+                idle: Some(0xaabbcc),
+            },
             selection: Some(0xff7eb6),
             terminal_font: TerminalFont { family: Some("Fira Code".into()), size: 17.5, line_height: 1.45 },
             ui_font_size: 16.0,
@@ -1051,15 +1135,32 @@ mod tests {
         settings.shortcuts.insert("toggleSidebar".into(), Some("ctrl-alt-s".into()));
         settings.shortcuts.insert("splitRightClaude".into(), None);
         settings.claude_dirs = vec![
-            ClaudeDir { name: "Personal".into(), path: "~/.claude".into(), command: "claude".into(), args: vec![], color: None },
-            ClaudeDir { name: "Work".into(), path: "~/.claude-work".into(), command: "claude-w".into(), args: vec!["--model".into(), "opus".into()], color: Some(ProjectColor::Rose) },
+            ClaudeDir {
+                name: "Personal".into(),
+                path: "~/.claude".into(),
+                command: "claude".into(),
+                args: vec![],
+                color: None,
+            },
+            ClaudeDir {
+                name: "Work".into(),
+                path: "~/.claude-work".into(),
+                command: "claude-w".into(),
+                args: vec!["--model".into(), "opus".into()],
+                color: Some(ProjectColor::Rose),
+            },
         ];
         settings.default_claude_dir = Some("Work".into());
         settings.folder_claude_dirs.insert("/home/me/work/ops".into(), "Work".into());
         settings.shell = ShellSettings { program: "/bin/zsh".into(), args: vec!["-l".into()] };
         settings.recents = RecentsSettings { per_project: 9, chips: 2 };
         settings.favorites = vec!["/a".into(), "/b".into()];
-        settings.window = WindowSettings { restore_layout: false, sidebar_at_start: SidebarAtStart::Hidden, scrollback: 50000, right_to_left: false };
+        settings.window = WindowSettings {
+            restore_layout: false,
+            sidebar_at_start: SidebarAtStart::Hidden,
+            scrollback: 50000,
+            right_to_left: false,
+        };
         settings.animate_working = false;
         settings
     }
@@ -1067,11 +1168,24 @@ mod tests {
     #[test]
     fn phase2_defaults() {
         let s = Settings::default();
-        assert!(s.shortcuts.is_empty() && s.claude_dirs.is_empty() && s.folder_claude_dirs.is_empty() && s.favorites.is_empty());
+        assert!(
+            s.shortcuts.is_empty()
+                && s.claude_dirs.is_empty()
+                && s.folder_claude_dirs.is_empty()
+                && s.favorites.is_empty()
+        );
         assert_eq!(s.default_claude_dir, None);
         assert_eq!(s.shell, ShellSettings { program: String::new(), args: vec![] });
         assert_eq!(s.recents, RecentsSettings { per_project: 5, chips: 6 });
-        assert_eq!(s.window, WindowSettings { restore_layout: true, sidebar_at_start: SidebarAtStart::Remember, scrollback: 10000, right_to_left: true });
+        assert_eq!(
+            s.window,
+            WindowSettings {
+                restore_layout: true,
+                sidebar_at_start: SidebarAtStart::Remember,
+                scrollback: 10000,
+                right_to_left: true
+            }
+        );
     }
 
     #[test]
@@ -1117,7 +1231,11 @@ mod tests {
         let path = dir.path().join("settings.json");
         save(&path, &settings, &loaded.raw).unwrap();
         let written = read_json(&path);
-        assert_eq!(written["claudeDirs"], serde_json::from_str::<Value>(text).unwrap()["claudeDirs"], "dropped entry and the unknown field stay");
+        assert_eq!(
+            written["claudeDirs"],
+            serde_json::from_str::<Value>(text).unwrap()["claudeDirs"],
+            "dropped entry and the unknown field stay"
+        );
         assert_eq!(written["alerts"]["volume"], 0.7);
     }
 
@@ -1157,7 +1275,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         save(&path, &settings, &loaded.raw).unwrap();
-        assert_eq!(read_json(&path), serde_json::json!({"shortcuts": {"splitRightClaude": null, "futureAction": "ctrl-x"}}));
+        assert_eq!(
+            read_json(&path),
+            serde_json::json!({"shortcuts": {"splitRightClaude": null, "futureAction": "ctrl-x"}})
+        );
     }
 
     #[test]
@@ -1174,7 +1295,10 @@ mod tests {
         );
         let dirs = loaded.settings.unwrap().claude_dirs;
         assert_eq!(dirs.len(), 2);
-        assert_eq!(dirs[0], ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![], color: None });
+        assert_eq!(
+            dirs[0],
+            ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![], color: None }
+        );
         assert_eq!(dirs[1].args, vec!["-y".to_string()]);
         let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
         assert_eq!(keys, ["claudeDirs[1]", "claudeDirs[2]", "claudeDirs[3]", "claudeDirs[4]"]);
@@ -1196,7 +1320,9 @@ mod tests {
 
     #[test]
     fn ranges_clamp() {
-        let loaded = parse(r#"{"recents": {"perProject": 99, "chips": -3}, "window": {"scrollback": 5, "sidebarAtStart": "sideways"}}"#);
+        let loaded = parse(
+            r#"{"recents": {"perProject": 99, "chips": -3}, "window": {"scrollback": 5, "sidebarAtStart": "sideways"}}"#,
+        );
         let settings = loaded.settings.unwrap();
         assert_eq!(settings.recents, RecentsSettings { per_project: 20, chips: 0 });
         assert_eq!(settings.window.scrollback, 1000);
@@ -1208,7 +1334,8 @@ mod tests {
 
     #[test]
     fn project_colors_load_tolerantly() {
-        let loaded = parse(r#"{"projectColors": {"enabled": false, "folders": {"/a": "amber", "/b": "mauve", "/c": 3}}}"#);
+        let loaded =
+            parse(r#"{"projectColors": {"enabled": false, "folders": {"/a": "amber", "/b": "mauve", "/c": 3}}}"#);
         let s = loaded.settings.unwrap();
         assert!(!s.project_colors.enabled);
         assert_eq!(s.project_colors.folders.get(Path::new("/a")), Some(&ProjectColor::Amber));

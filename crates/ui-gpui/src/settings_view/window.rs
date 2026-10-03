@@ -23,8 +23,15 @@ const SIDEBAR: [(SidebarAtStart, &str, &str); 3] = [
 ];
 
 impl SettingsView {
-    pub(super) fn window_page(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
-        let restore = RESTORE.iter().position(|(restore, _, _)| *restore == settings.window.restore_layout).unwrap_or(0);
+    pub(super) fn window_page(
+        &mut self,
+        theme: &Theme,
+        settings: &Settings,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let restore =
+            RESTORE.iter().position(|(restore, _, _)| *restore == settings.window.restore_layout).unwrap_or(0);
         let restore_labels = RESTORE.map(|(_, label, _)| label);
         let restore_bar = self.segmented(
             "restore-layout",
@@ -37,9 +44,18 @@ impl SettingsView {
             window,
             cx,
         );
-        let restore_reset = self.reset_slot("reset-restore-layout", 0, settings, |s| s.window.restore_layout, |s, v| s.window.restore_layout = v, window, cx);
+        let restore_reset = self.reset_slot(
+            "reset-restore-layout",
+            0,
+            settings,
+            |s| s.window.restore_layout,
+            |s, v| s.window.restore_layout = v,
+            window,
+            cx,
+        );
 
-        let sidebar = SIDEBAR.iter().position(|(choice, _, _)| *choice == settings.window.sidebar_at_start).unwrap_or(0);
+        let sidebar =
+            SIDEBAR.iter().position(|(choice, _, _)| *choice == settings.window.sidebar_at_start).unwrap_or(0);
         let sidebar_labels = SIDEBAR.map(|(_, label, _)| label);
         let sidebar_bar = self.segmented(
             "sidebar-at-start",
@@ -52,7 +68,15 @@ impl SettingsView {
             window,
             cx,
         );
-        let sidebar_reset = self.reset_slot("reset-sidebar-at-start", 0, settings, |s| s.window.sidebar_at_start, |s, v| s.window.sidebar_at_start = v, window, cx);
+        let sidebar_reset = self.reset_slot(
+            "reset-sidebar-at-start",
+            0,
+            settings,
+            |s| s.window.sidebar_at_start,
+            |s, v| s.window.sidebar_at_start = v,
+            window,
+            cx,
+        );
 
         div().flex().flex_col().gap(theme.ui(26.)).child(group(
             theme,

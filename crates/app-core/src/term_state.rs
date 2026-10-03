@@ -122,7 +122,14 @@ impl TermState {
         let title = Arc::new(Mutex::new(None));
         let listener = Listener { replies: replies.clone(), title: title.clone() };
         let size = GridSize { cols: cols as usize, rows: rows as usize };
-        TermState { term: Term::new(config, &size, listener), parser: Processor::new(), replies, title, palette: DARK, cell_size: (0, 0) }
+        TermState {
+            term: Term::new(config, &size, listener),
+            parser: Processor::new(),
+            replies,
+            title,
+            palette: DARK,
+            cell_size: (0, 0),
+        }
     }
 
     /// Use `palette` from now on, including for colour query answers.
@@ -300,8 +307,7 @@ impl TermState {
             let selected = selection.is_some_and(|range| range.contains(indexed.point));
             grid[row as usize][col] = self.cell_view(indexed.cell, content.colors, selected);
         }
-        let cursor = (content.mode.contains(TermMode::SHOW_CURSOR)
-            && content.cursor.shape != CursorShape::Hidden)
+        let cursor = (content.mode.contains(TermMode::SHOW_CURSOR) && content.cursor.shape != CursorShape::Hidden)
             .then(|| {
                 let row = content.cursor.point.line.0 + offset;
                 let col = content.cursor.point.column.0;
@@ -451,10 +457,7 @@ mod tests {
         let mut t = TermState::new(10, 3);
         t.feed(b"\x1b[6n\x1b]11;?\x07\x1b]10;?\x1b\\");
         let replies = String::from_utf8(t.take_pty_writes()).unwrap();
-        assert_eq!(
-            replies,
-            "\x1b[1;1R\x1b]11;rgb:1414/1818/2121\x07\x1b]10;rgb:d8d8/dddd/e8e8\x1b\\"
-        );
+        assert_eq!(replies, "\x1b[1;1R\x1b]11;rgb:1414/1818/2121\x07\x1b]10;rgb:d8d8/dddd/e8e8\x1b\\");
     }
 
     #[test]

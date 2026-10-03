@@ -7,13 +7,13 @@ mod field;
 mod hover_card;
 pub mod launcher_view;
 pub mod recents_view;
-pub mod sidebar_view;
-pub mod terminal_view;
 mod settings_store;
 mod settings_view;
+pub mod sidebar_view;
+pub mod terminal_view;
 mod theme;
-pub mod workspace_view;
 mod window_frame;
+pub mod workspace_view;
 
 use std::path::PathBuf;
 
@@ -76,10 +76,12 @@ pub fn run(launch: Launch) {
                     );
                     cx.spawn_in(window, async move |_, cx| {
                         let restarted = answer.await == Ok(0) && restart_daemon(&paths).is_ok();
-                        let connection = restarted.then(|| DaemonClient::connect(&paths, spawn_detached_daemon).ok()).flatten();
+                        let connection =
+                            restarted.then(|| DaemonClient::connect(&paths, spawn_detached_daemon).ok()).flatten();
                         let _ = cx.update(|window, cx| match connection {
                             Some(connection) => {
-                                let view = window.replace_root(cx, |window, cx| workspace(connection, &launch, &paths, window, cx));
+                                let view = window
+                                    .replace_root(cx, |window, cx| workspace(connection, &launch, &paths, window, cx));
                                 install_should_close(window, cx, view);
                             }
                             None => cx.quit(),
@@ -100,7 +102,13 @@ pub fn run(launch: Launch) {
 }
 
 /// The root view for a fresh connection: the saved layout reconciled with the daemon's panes.
-fn workspace(connection: Connection, launch: &Launch, paths: &Paths, window: &mut Window, cx: &mut Context<WorkspaceView>) -> WorkspaceView {
+fn workspace(
+    connection: Connection,
+    launch: &Launch,
+    paths: &Paths,
+    window: &mut Window,
+    cx: &mut Context<WorkspaceView>,
+) -> WorkspaceView {
     let saved = layout_store::load(&paths.layout_file).unwrap_or_else(|err| {
         tracing::warn!("ignoring the saved layout: {err}");
         None

@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
-    self, ActiveInput, Activation, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry, Tone,
-    display_path, session_title,
+    self, Activation, ActiveInput, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry,
+    Tone, display_path, session_title,
 };
 use app_core::sessions::SessionStore;
 use app_core::split_tree::NodeId;
@@ -17,8 +17,8 @@ use app_core::text_field::TextField;
 use app_core::theme_colors::ToneColors;
 use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window,
-    div, prelude::*, px, rgb, rgba, uniform_list,
+    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, div,
+    prelude::*, px, rgb, rgba, uniform_list,
 };
 use protocol::message::SessionInfo;
 
@@ -26,7 +26,9 @@ use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
-use crate::theme::{RADIUS, Theme, UI_FONT, group_tint, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
+use crate::theme::{
+    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, side_line, sweeping, theme, working_sweep,
+};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -226,7 +228,8 @@ impl SidebarView {
     /// The workspace's focused leaf: its row gets the selection ring.
     pub fn set_focused(&mut self, leaf: Option<NodeId>, cx: &mut Context<Self>) {
         self.focused_leaf = leaf;
-        self.selected = leaf.and_then(|leaf| session_tree::row_of_leaf(&self.rows, leaf)).map(|index| self.rows[index].key());
+        self.selected =
+            leaf.and_then(|leaf| session_tree::row_of_leaf(&self.rows, leaf)).map(|index| self.rows[index].key());
         cx.notify();
     }
 
@@ -245,7 +248,11 @@ impl SidebarView {
             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
             let roots = &self.roots;
             let project_of = |cwd: &Path| roots.of(cwd);
-            let build = |filter: &str, toggled: &HashSet<PathBuf>, details: Option<&str>, arrivals: &mut Arrivals, order: &mut ProjectOrder| {
+            let build = |filter: &str,
+                         toggled: &HashSet<PathBuf>,
+                         details: Option<&str>,
+                         arrivals: &mut Arrivals,
+                         order: &mut ProjectOrder| {
                 let input = ActiveInput {
                     sessions: &sessions,
                     panes: &self.panes,
@@ -263,17 +270,28 @@ impl SidebarView {
             // Until the session list arrives, number nothing: panes and sessions must get their arrival
             // numbers together, so that at startup leaves land above outside sessions.
             let mut unloaded = (Arrivals::default(), ProjectOrder::default());
-            let (arrivals, order) = if self.sessions.loaded() { (&mut self.arrivals, &mut self.order) } else { (&mut unloaded.0, &mut unloaded.1) };
+            let (arrivals, order) = if self.sessions.loaded() {
+                (&mut self.arrivals, &mut self.order)
+            } else {
+                (&mut unloaded.0, &mut unloaded.1)
+            };
             let all_rows = build("", &HashSet::new(), None, arrivals, order);
             let plain = self.filter.text().is_empty() && self.toggled.is_empty() && self.details.is_none();
-            let rows = if plain { all_rows.clone() } else { build(self.filter.text(), &self.toggled, self.details.as_deref(), arrivals, order) };
+            let rows = if plain {
+                all_rows.clone()
+            } else {
+                build(self.filter.text(), &self.toggled, self.details.as_deref(), arrivals, order)
+            };
             (all_rows, rows)
         };
         self.all_rows = all_rows;
         self.rows = rows;
         // A selection whose row is gone falls back to the focused pane's row.
         if self.selected_index().is_none() {
-            self.selected = self.focused_leaf.and_then(|leaf| session_tree::row_of_leaf(&self.rows, leaf)).map(|index| self.rows[index].key());
+            self.selected = self
+                .focused_leaf
+                .and_then(|leaf| session_tree::row_of_leaf(&self.rows, leaf))
+                .map(|index| self.rows[index].key());
         }
         cx.notify();
     }
@@ -335,10 +353,14 @@ impl SidebarView {
                 }
                 self.rebuild(cx);
                 // Enter right after typing opens the first matching session (not a directory row).
-                self.selected = self.rows.iter().position(|row| matches!(row.kind, RowKind::Session { .. } | RowKind::Pane { .. })).map(|index| {
-                    self.scroll.scroll_to_item(index, ScrollStrategy::Center);
-                    self.rows[index].key()
-                });
+                self.selected = self
+                    .rows
+                    .iter()
+                    .position(|row| matches!(row.kind, RowKind::Session { .. } | RowKind::Pane { .. }))
+                    .map(|index| {
+                        self.scroll.scroll_to_item(index, ScrollStrategy::Center);
+                        self.rows[index].key()
+                    });
             }
         }
         cx.stop_propagation();
@@ -373,7 +395,9 @@ impl SidebarView {
                     // Rows of another project listed under a tab heading are not this project's.
                     .filter(|row| row.project_label.is_none())
                     .find_map(|row| match &row.kind {
-                        RowKind::Session { session, .. } => session.container.as_ref().filter(|place| place.host_folder.is_some()),
+                        RowKind::Session { session, .. } => {
+                            session.container.as_ref().filter(|place| place.host_folder.is_some())
+                        }
                         _ => None,
                     });
                 Some(menus::project_menu(path, container, &context))
@@ -437,7 +461,9 @@ impl SidebarView {
             .when(edges.first, |row| row.pt(theme.ui(8.)))
             .child(group)
             .when(target.is_some(), |row| {
-                row.child(marker.group_drag_over::<DraggedProject>(group_name, |style| style.bg(rgb(theme.tokens.accent))))
+                row.child(
+                    marker.group_drag_over::<DraggedProject>(group_name, |style| style.bg(rgb(theme.tokens.accent))),
+                )
             })
             // Every row takes the drop, so that one that is no landing place does not pass it on to the list.
             .on_drop(cx.listener(move |this, dragged: &DraggedProject, _, cx| {
@@ -479,20 +505,27 @@ impl SidebarView {
                 }
             }))
             // A middle click closes the pane or tab the row stands for (press and release on the same row).
-            .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
-                this.middle_pressed = Some(Some(middle_down.clone()));
-                cx.stop_propagation();
-            }))
-            .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                if this.middle_pressed.take() != Some(Some(middle_up.clone())) {
-                    return;
-                }
-                let action = session_tree::find(&this.rows, &middle_up).and_then(|index| menus::middle_click(&this.rows[index]));
-                if let Some(action) = action {
-                    cx.emit(SidebarEvent::Menu(action));
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, _, cx| {
+                    this.middle_pressed = Some(Some(middle_down.clone()));
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if this.middle_pressed.take() != Some(Some(middle_up.clone())) {
+                        return;
+                    }
+                    let action = session_tree::find(&this.rows, &middle_up)
+                        .and_then(|index| menus::middle_click(&this.rows[index]));
+                    if let Some(action) = action {
+                        cx.emit(SidebarEvent::Menu(action));
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -528,19 +561,35 @@ impl SidebarView {
             None => pill,
         };
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
-        let aside = |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
-        let guide = row.in_tab.then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
+        let aside =
+            |text: String, ink: u32| div().flex_none().text_xs().text_color(rgba((ink << 8) | 0xcc)).child(text);
+        let guide = row
+            .in_tab
+            .then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
         let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32. + inset))).children(guide);
         // A row listed under another project's tab heading names its own project.
-        let project = || row.project_label.clone().map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label));
+        let project = || {
+            row.project_label
+                .clone()
+                .map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label))
+        };
         let content = match &row.kind {
             RowKind::Project { path, label, expanded } => {
                 let color = theme.project(path);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
-                base.on_drag(dragged, |dragged: &DraggedProject, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone())).child(
+                base.on_drag(dragged, |dragged: &DraggedProject, _offset, _window, cx: &mut App| {
+                    cx.new(|_| dragged.clone())
+                })
+                .child(
                     pill(None)
-                        .child(div().flex_none().text_color(rgb(theme.tokens.muted)).child(if *expanded { "▾" } else { "▸" }))
-                        .children(color.map(|color| div().flex_none().size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))))
+                        .child(div().flex_none().text_color(rgb(theme.tokens.muted)).child(if *expanded {
+                            "▾"
+                        } else {
+                            "▸"
+                        }))
+                        .children(
+                            color.map(|color| div().flex_none().size(theme.ui(8.)).rounded(px(3.)).bg(rgb(color))),
+                        )
                         .child(
                             title(label.clone())
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -559,30 +608,38 @@ impl SidebarView {
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
-                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme)))
+                        .when(sweeping(*tone, self.animate, true), |pill| {
+                            pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme))
+                        })
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
-                        .child(title(session_title(session).to_string()).when(*tone == Tone::NeedsInput, |title| {
-                            title.font_weight(FontWeight::SEMIBOLD)
-                        }))
+                        .child(
+                            title(session_title(session).to_string())
+                                .when(*tone == Tone::NeedsInput, |title| title.font_weight(FontWeight::SEMIBOLD)),
+                        )
                         .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
-                        .children(dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()).map(|badge| dir_badge(&badge, &theme)))
+                        .children(
+                            dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
+                                .map(|badge| dir_badge(&badge, &theme)),
+                        )
                         .children(project()),
                 )
             }
-            RowKind::Pane { entry, tone, note } if !entry.claude => base.tooltip(hover_card::tooltip(HoverCard {
-                title: entry.title.clone(),
-                status: Some(note.clone()),
-                dir: None,
-                container: false,
-                folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
-            })).child(
-                lined(pill(None))
-                    .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
-                    .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
-                    .child(title(entry.title.clone()))
-                    .children(project()),
-            ),
+            RowKind::Pane { entry, tone, note } if !entry.claude => base
+                .tooltip(hover_card::tooltip(HoverCard {
+                    title: entry.title.clone(),
+                    status: Some(note.clone()),
+                    dir: None,
+                    container: false,
+                    folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
+                }))
+                .child(
+                    lined(pill(None))
+                        .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
+                        .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
+                        .child(title(entry.title.clone()))
+                        .children(project()),
+                ),
             RowKind::Pane { entry, tone, note } => {
                 let colors = theme.tone(*tone);
                 let card = HoverCard {
@@ -594,7 +651,9 @@ impl SidebarView {
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
-                        .when(sweeping(*tone, self.animate, true), |pill| pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme)))
+                        .when(sweeping(*tone, self.animate, true), |pill| {
+                            pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme))
+                        })
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(title("New session".into()))
@@ -607,10 +666,12 @@ impl SidebarView {
                     .child(title(tab_title.clone()).font_weight(FontWeight::SEMIBOLD))
                     .child(aside(format!("{panes} panes"), theme.tokens.muted)),
             ),
-            RowKind::Detail { text, .. } => {
-                base.child(div().pl(theme.ui(34.)).text_xs().italic().text_color(rgb(theme.tokens.muted)).child(text.clone()))
+            RowKind::Detail { text, .. } => base.child(
+                div().pl(theme.ui(34.)).text_xs().italic().text_color(rgb(theme.tokens.muted)).child(text.clone()),
+            ),
+            RowKind::TakeOver { .. } => {
+                base.child(pill(None).pl(theme.ui(32.)).text_color(rgb(theme.tokens.accent)).child("Take over…"))
             }
-            RowKind::TakeOver { .. } => base.child(pill(None).pl(theme.ui(32.)).text_color(rgb(theme.tokens.accent)).child("Take over…")),
         };
         content.when(selected, |content| {
             let ring = div()
@@ -658,7 +719,9 @@ impl Render for DraggedProject {
 fn lead_mark(tone: Tone, colors: &ToneColors, theme: &Theme) -> Option<gpui::Div> {
     match lead(tone) {
         Lead::None => None,
-        Lead::Ring => Some(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot))),
+        Lead::Ring => {
+            Some(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot)))
+        }
         Lead::Arrow => Some(div().flex_none().w(theme.ui(10.)).text_color(rgb(colors.dot)).child("↗")),
     }
 }
@@ -699,7 +762,16 @@ impl Render for SidebarView {
                         this.focus_handle.focus(window, cx);
                         cx.notify();
                     }))
-                    .child(field::render(&self.filter, "Filter active sessions", focused, &theme, field::on_press(cx, |this, offset, clicks, _, cx| { this.filter.press(offset, clicks); cx.notify(); }))),
+                    .child(field::render(
+                        &self.filter,
+                        "Filter active sessions",
+                        focused,
+                        &theme,
+                        field::on_press(cx, |this, offset, clicks, _, cx| {
+                            this.filter.press(offset, clicks);
+                            cx.notify();
+                        }),
+                    )),
             )
             .when(self.settings_open, |this| {
                 let inset = if self.settings_active { RING + RING_GAP } else { 0. };
@@ -707,50 +779,64 @@ impl Render for SidebarView {
                     div().absolute().size_full().rounded(px(RADIUS)).border_2().border_color(rgb(theme.selection()))
                 });
                 this.child(
-                    div().relative().h(theme.ui(ROW_HEIGHT - 4.)).flex_none().mx_3().mb_1().p(theme.ui(inset)).children(ring).child(
                     div()
-                        .id("settings-row")
-                        .size_full()
-                        .px(theme.ui(12. - inset))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .rounded(px(RADIUS - inset))
-                        .bg(rgb(theme.tokens.text))
-                        .text_color(rgb(theme.tokens.ground))
-                        .cursor_pointer()
-                        .child("⚙")
-                        .child(div().flex_1().min_w_0().truncate().child("Settings"))
+                        .relative()
+                        .h(theme.ui(ROW_HEIGHT - 4.))
+                        .flex_none()
+                        .mx_3()
+                        .mb_1()
+                        .p(theme.ui(inset))
+                        .children(ring)
                         .child(
                             div()
-                                .id("close-settings")
-                                .flex_none()
-                                .size(theme.ui(20.))
+                                .id("settings-row")
+                                .size_full()
+                                .px(theme.ui(12. - inset))
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .text_xs()
-                                .hover(|style| style.bg(rgba(0x00000026)))
-                                .child("×")
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.emit(SidebarEvent::CloseSettings);
-                                })),
-                        )
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings)))
-                        .on_mouse_down(MouseButton::Middle, cx.listener(|this, _, _, cx| {
-                            this.middle_pressed = Some(None);
-                            cx.stop_propagation();
-                        }))
-                        .on_mouse_up(MouseButton::Middle, cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            if this.middle_pressed.take() == Some(None) {
-                                cx.emit(SidebarEvent::CloseSettings);
-                            }
-                        })),
-                    ),
+                                .gap_2()
+                                .text_sm()
+                                .rounded(px(RADIUS - inset))
+                                .bg(rgb(theme.tokens.text))
+                                .text_color(rgb(theme.tokens.ground))
+                                .cursor_pointer()
+                                .child("⚙")
+                                .child(div().flex_1().min_w_0().truncate().child("Settings"))
+                                .child(
+                                    div()
+                                        .id("close-settings")
+                                        .flex_none()
+                                        .size(theme.ui(20.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .text_xs()
+                                        .hover(|style| style.bg(rgba(0x00000026)))
+                                        .child("×")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(SidebarEvent::CloseSettings);
+                                        })),
+                                )
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings)))
+                                .on_mouse_down(
+                                    MouseButton::Middle,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.middle_pressed = Some(None);
+                                        cx.stop_propagation();
+                                    }),
+                                )
+                                .on_mouse_up(
+                                    MouseButton::Middle,
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        if this.middle_pressed.take() == Some(None) {
+                                            cx.emit(SidebarEvent::CloseSettings);
+                                        }
+                                    }),
+                                ),
+                        ),
                 )
             })
             .child(
@@ -760,12 +846,16 @@ impl Render for SidebarView {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .on_drop(cx.listener(|this, dragged: &DraggedProject, _, cx| this.drop_project(&dragged.root, None, cx)))
+                    .on_drop(
+                        cx.listener(|this, dragged: &DraggedProject, _, cx| this.drop_project(&dragged.root, None, cx)),
+                    )
                     .child(
                         uniform_list(
                             "session-rows",
                             self.rows.len(),
-                            cx.processor(|this, range: Range<usize>, _window, cx| range.map(|index| this.render_row(index, cx)).collect::<Vec<_>>()),
+                            cx.processor(|this, range: Range<usize>, _window, cx| {
+                                range.map(|index| this.render_row(index, cx)).collect::<Vec<_>>()
+                            }),
                         )
                         .track_scroll(&self.scroll)
                         .flex_1(),
@@ -790,7 +880,14 @@ impl Render for SidebarView {
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(theme.tokens.text)))
                     .child(div().flex_1().child("Recent sessions"))
-                    .child(div().px(px(6.)).py(px(2.)).rounded(px(6.)).bg(rgb(theme.tokens.raised)).child(shortcut_label(cx.global::<SettingsStore>().settings(), "openRecents")))
+                    .child(
+                        div()
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(6.))
+                            .bg(rgb(theme.tokens.raised))
+                            .child(shortcut_label(cx.global::<SettingsStore>().settings(), "openRecents")),
+                    )
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenRecents))),
             )
             .child(

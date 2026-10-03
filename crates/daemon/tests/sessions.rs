@@ -130,7 +130,10 @@ fn a_pane_whose_process_wrote_a_pid_file_is_managed() {
         "status": "waiting", "waitingFor": "input needed", "statusUpdatedAt": 7});
     std::fs::write(s.config.join("sessions").join(format!("{pid}.json")), pid_file.to_string()).unwrap();
     let found = wait_for(&s.conn, "s3", |s| s.state == SessionState::Managed { pane });
-    assert_eq!((found.status, found.status_since_ms), (Some(SessionStatus::NeedsInput { reason: Some("input needed".into()) }), 7));
+    assert_eq!(
+        (found.status, found.status_since_ms),
+        (Some(SessionStatus::NeedsInput { reason: Some("input needed".into()) }), 7)
+    );
 }
 
 #[test]
@@ -160,7 +163,8 @@ fn a_session_is_closed_as_soon_as_its_pane_exits() {
     let pid: u32 = digits.parse().unwrap();
     let start = claude_index::host::process_start(pid).unwrap();
     std::fs::create_dir_all(s.config.join("sessions")).unwrap();
-    let pid_file = serde_json::json!({"pid": pid, "sessionId": "s6", "cwd": s.work, "procStart": start, "status": "idle"});
+    let pid_file =
+        serde_json::json!({"pid": pid, "sessionId": "s6", "cwd": s.work, "procStart": start, "status": "idle"});
     std::fs::write(s.config.join("sessions").join(format!("{pid}.json")), pid_file.to_string()).unwrap();
     wait_for(&s.conn, "s6", |s| s.state == SessionState::Managed { pane });
     let killed = Instant::now();
@@ -192,7 +196,8 @@ fn outside(s: &Setup, id: &str, program: &str, args: &[&str]) -> Child {
     let pid = child.id();
     let start = claude_index::host::process_start(pid).unwrap();
     std::fs::create_dir_all(s.config.join("sessions")).unwrap();
-    let pid_file = serde_json::json!({"pid": pid, "sessionId": id, "cwd": s.work, "procStart": start, "status": "idle"});
+    let pid_file =
+        serde_json::json!({"pid": pid, "sessionId": id, "cwd": s.work, "procStart": start, "status": "idle"});
     std::fs::write(s.config.join("sessions").join(format!("{pid}.json")), pid_file.to_string()).unwrap();
     child
 }
@@ -205,7 +210,9 @@ fn take_over_result(conn: &Connection, id: &str) -> (TakeOverOutcome, Vec<Sessio
         assert!(Instant::now() < deadline, "no take-over result for {id}");
         match conn.events.try_recv() {
             Ok(ClientEvent::TakeOverResult { session, outcome }) if session == id => return (outcome, seen),
-            Ok(ClientEvent::SessionsChanged { upserted, .. }) => seen.extend(upserted.into_iter().filter(|s| s.id == id).map(|s| s.state)),
+            Ok(ClientEvent::SessionsChanged { upserted, .. }) => {
+                seen.extend(upserted.into_iter().filter(|s| s.id == id).map(|s| s.state))
+            }
             Ok(_) => {}
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }

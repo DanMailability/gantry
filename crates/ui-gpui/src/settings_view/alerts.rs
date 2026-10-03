@@ -2,7 +2,7 @@
 
 use app_core::session_tree::Tone;
 use app_core::settings::{AlertSettings, AlertTone, EventAlerts, Settings};
-use gpui::{Context, Div, MouseButton, Window, div, px, rgb, canvas};
+use gpui::{Context, Div, MouseButton, Window, canvas, div, px, rgb};
 
 use super::*;
 use crate::alerts;
@@ -73,7 +73,6 @@ fn tone_label(tone: AlertTone) -> &'static str {
     TONES.iter().find(|(candidate, _)| *candidate == tone).map_or("", |(_, label)| label)
 }
 
-
 const FINISHED_AFTER: Stepped = Stepped {
     name: "finished-after",
     get: |s| s.alerts.finished_after_seconds as f32,
@@ -84,7 +83,6 @@ const FINISHED_AFTER: Stepped = Stepped {
     unit: "s",
 };
 
-
 /// The volume (0 to 1, whole percents) under pointer position `x` on a slider spanning `left..left + width`.
 fn volume_at(x: f32, left: f32, width: f32) -> f32 {
     if width <= 0.0 {
@@ -94,7 +92,13 @@ fn volume_at(x: f32, left: f32, width: f32) -> f32 {
 }
 
 impl SettingsView {
-    pub(super) fn alerts(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn alerts(
+        &mut self,
+        theme: &Theme,
+        settings: &Settings,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let events = self.events_group(theme, settings, window, cx);
         let visibility = self.visibility_group(theme, settings, window, cx);
         let sound = self.sound_group(theme, settings, window, cx);
@@ -110,28 +114,69 @@ impl SettingsView {
                 let channels = *event.alerts(&mut copy);
                 let index = event.index();
                 let labelled = |label: &'static str, switch: Stateful<Div>| {
-                    div().flex_none().flex().flex_col().items_center().gap(theme.ui(4.)).child(muted(theme, label)).child(switch)
+                    div()
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(theme.ui(4.))
+                        .child(muted(theme, label))
+                        .child(switch)
                 };
-                let badge = self.switch("badge", index, channels.badge, window, cx, change(move |s| {
-                    let e = event.alerts(&mut s.alerts);
-                    e.badge = !e.badge;
-                }));
-                let notification = self.switch("notification", index, channels.notification, window, cx, change(move |s| {
-                    let e = event.alerts(&mut s.alerts);
-                    e.notification = !e.notification;
-                }));
-                let sound = self.switch("sound", index, channels.sound, window, cx, change(move |s| {
-                    let e = event.alerts(&mut s.alerts);
-                    e.sound = !e.sound;
-                }));
+                let badge = self.switch(
+                    "badge",
+                    index,
+                    channels.badge,
+                    window,
+                    cx,
+                    change(move |s| {
+                        let e = event.alerts(&mut s.alerts);
+                        e.badge = !e.badge;
+                    }),
+                );
+                let notification = self.switch(
+                    "notification",
+                    index,
+                    channels.notification,
+                    window,
+                    cx,
+                    change(move |s| {
+                        let e = event.alerts(&mut s.alerts);
+                        e.notification = !e.notification;
+                    }),
+                );
+                let sound = self.switch(
+                    "sound",
+                    index,
+                    channels.sound,
+                    window,
+                    cx,
+                    change(move |s| {
+                        let e = event.alerts(&mut s.alerts);
+                        e.sound = !e.sound;
+                    }),
+                );
                 let options = event
                     .tones()
                     .into_iter()
                     .map(|tone| {
-                        (tone_label(tone).to_string(), tone == channels.tone, change(move |s| event.alerts(&mut s.alerts).tone = tone))
+                        (
+                            tone_label(tone).to_string(),
+                            tone == channels.tone,
+                            change(move |s| event.alerts(&mut s.alerts).tone = tone),
+                        )
                     })
                     .collect();
-                let picker = self.dropdown("tone", index, Popover::Tone(event), tone_label(channels.tone).into(), theme.ui(170.), options, window, cx);
+                let picker = self.dropdown(
+                    "tone",
+                    index,
+                    Popover::Tone(event),
+                    tone_label(channels.tone).into(),
+                    theme.ui(170.),
+                    options,
+                    window,
+                    cx,
+                );
                 let tone = channels.tone;
                 let play = handler(move |_, _, cx| {
                     let volume = cx.global::<SettingsStore>().settings().alerts.volume;
@@ -169,23 +214,73 @@ impl SettingsView {
             })
             .collect();
         let after = self.stepper(&FINISHED_AFTER, settings, window, cx);
-        let after_reset = self.reset_slot("reset-finished-after", 0, settings, |s| s.alerts.finished_after_seconds, |s, v| s.alerts.finished_after_seconds = v, window, cx);
-        rows.push(row(theme, "Finished after", "How long a session must be busy before going idle counts as finished.", after, after_reset));
+        let after_reset = self.reset_slot(
+            "reset-finished-after",
+            0,
+            settings,
+            |s| s.alerts.finished_after_seconds,
+            |s, v| s.alerts.finished_after_seconds = v,
+            window,
+            cx,
+        );
+        rows.push(row(
+            theme,
+            "Finished after",
+            "How long a session must be busy before going idle counts as finished.",
+            after,
+            after_reset,
+        ));
         group(theme, "Events", Some("Badge, notification and sound for each event."), rows)
     }
 
     fn visibility_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let alerts = settings.alerts;
-        let visible = self.switch("when", 0, alerts.when_visible, window, cx, change(|s| s.alerts.when_visible = !s.alerts.when_visible));
-        let visible_reset = self.reset_slot("reset-when", 0, settings, |s| s.alerts.when_visible, |s, v| s.alerts.when_visible = v, window, cx);
-        let background = self.switch("when", 1, alerts.only_when_unfocused, window, cx, change(|s| s.alerts.only_when_unfocused = !s.alerts.only_when_unfocused));
-        let background_reset = self.reset_slot("reset-when", 1, settings, |s| s.alerts.only_when_unfocused, |s, v| s.alerts.only_when_unfocused = v, window, cx);
+        let visible = self.switch(
+            "when",
+            0,
+            alerts.when_visible,
+            window,
+            cx,
+            change(|s| s.alerts.when_visible = !s.alerts.when_visible),
+        );
+        let visible_reset = self.reset_slot(
+            "reset-when",
+            0,
+            settings,
+            |s| s.alerts.when_visible,
+            |s, v| s.alerts.when_visible = v,
+            window,
+            cx,
+        );
+        let background = self.switch(
+            "when",
+            1,
+            alerts.only_when_unfocused,
+            window,
+            cx,
+            change(|s| s.alerts.only_when_unfocused = !s.alerts.only_when_unfocused),
+        );
+        let background_reset = self.reset_slot(
+            "reset-when",
+            1,
+            settings,
+            |s| s.alerts.only_when_unfocused,
+            |s, v| s.alerts.only_when_unfocused = v,
+            window,
+            cx,
+        );
         group(
             theme,
             "Visibility",
             None,
             vec![
-                row(theme, "Alert for visible panes", "Off: a pane you can see in the active window raises nothing.", visible, visible_reset),
+                row(
+                    theme,
+                    "Alert for visible panes",
+                    "Off: a pane you can see in the active window raises nothing.",
+                    visible,
+                    visible_reset,
+                ),
                 row(
                     theme,
                     "Notify only in the background",
@@ -199,10 +294,26 @@ impl SettingsView {
 
     fn sound_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let alerts = settings.alerts;
-        let sounds = self.switch("play-sounds", 0, alerts.play_sounds, window, cx, change(|s| s.alerts.play_sounds = !s.alerts.play_sounds));
-        let sounds_reset = self.reset_slot("reset-play-sounds", 0, settings, |s| s.alerts.play_sounds, |s, v| s.alerts.play_sounds = v, window, cx);
+        let sounds = self.switch(
+            "play-sounds",
+            0,
+            alerts.play_sounds,
+            window,
+            cx,
+            change(|s| s.alerts.play_sounds = !s.alerts.play_sounds),
+        );
+        let sounds_reset = self.reset_slot(
+            "reset-play-sounds",
+            0,
+            settings,
+            |s| s.alerts.play_sounds,
+            |s, v| s.alerts.play_sounds = v,
+            window,
+            cx,
+        );
         let slider = self.volume_slider(theme, alerts.volume, window, cx);
-        let volume_reset = self.reset_slot("reset-volume", 0, settings, |s| s.alerts.volume, |s, v| s.alerts.volume = v, window, cx);
+        let volume_reset =
+            self.reset_slot("reset-volume", 0, settings, |s| s.alerts.volume, |s, v| s.alerts.volume = v, window, cx);
         group(
             theme,
             "Sound",
@@ -213,7 +324,10 @@ impl SettingsView {
                 stacked_row(
                     theme,
                     None,
-                    muted(theme, "Claude Code also sends its own notifications for the same events, so you may get two. Turn them off in Claude Code's settings if you prefer Gantry's."),
+                    muted(
+                        theme,
+                        "Claude Code also sends its own notifications for the same events, so you may get two. Turn them off in Claude Code's settings if you prefer Gantry's.",
+                    ),
                 ),
             ],
         )
@@ -258,7 +372,11 @@ impl SettingsView {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 moving.update(cx, |this, cx| {
-                                    this.volume_drag = Some(volume_at(f32::from(event.position.x), f32::from(bounds.left()), f32::from(bounds.size.width)));
+                                    this.volume_drag = Some(volume_at(
+                                        f32::from(event.position.x),
+                                        f32::from(bounds.left()),
+                                        f32::from(bounds.size.width),
+                                    ));
                                     cx.notify();
                                 });
                             }
@@ -296,7 +414,11 @@ impl SettingsView {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     let bounds = this.slider_bounds.get();
-                    this.volume_drag = Some(volume_at(f32::from(event.position.x), f32::from(bounds.left()), f32::from(bounds.size.width)));
+                    this.volume_drag = Some(volume_at(
+                        f32::from(event.position.x),
+                        f32::from(bounds.left()),
+                        f32::from(bounds.size.width),
+                    ));
                     this.stop("volume", 0, cx).focus(window, cx);
                     cx.notify();
                 }),
@@ -314,14 +436,13 @@ impl SettingsView {
                 cx.notify();
             }))
             .child(rail);
-        div()
-            .w(theme.ui(240.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(theme.ui(12.))
-            .child(slider)
-            .child(div().flex_none().w(theme.ui(44.)).text_color(rgb(theme.tokens.muted)).child(format!("{:.0}%", shown * 100.0)))
+        div().w(theme.ui(240.)).flex_none().flex().items_center().gap(theme.ui(12.)).child(slider).child(
+            div()
+                .flex_none()
+                .w(theme.ui(44.))
+                .text_color(rgb(theme.tokens.muted))
+                .child(format!("{:.0}%", shown * 100.0)),
+        )
     }
 }
 

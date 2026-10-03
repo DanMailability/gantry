@@ -7,27 +7,26 @@ use crate::theme::{RADIUS, Theme, UI_FONT, theme};
 use app_core::bidi::{RowOrder, logical_hit, to_display};
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
-use app_core::paste::encode_paste;
 use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
+use app_core::paste::encode_paste;
 use app_core::scroll::{ScrollAction, scroll_action};
-use app_core::url::link_at;
-use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
 use app_core::settings::Settings;
+use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
 use app_core::term_state::TermState;
 use app_core::theme_colors::terminal_palette;
+use app_core::url::link_at;
 use app_core::workspace::PaneLaunch;
 use daemon::client::{ClientEvent, DaemonClient};
-use protocol::message::PaneId;
 use gpui::{
     App, BorderStyle, Bounds, ClickEvent, ContentMask, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
-    FontWeight, Hsla, Pixels, Point, StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, canvas,
-    div, fill, font, outline, point, prelude::*, px, rgb, size,
+    FontWeight, Hsla, Pixels, Point, StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, canvas, div, fill,
+    font, outline, point, prelude::*, px, rgb, size,
 };
 use gpui::{
-    ClipboardItem, ElementInputHandler, EntityInputHandler, KeyBinding, KeyDownEvent, MouseButton,
-    Modifiers, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent,
-    UTF16Selection,
+    ClipboardItem, ElementInputHandler, EntityInputHandler, KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, UTF16Selection,
 };
+use protocol::message::PaneId;
 
 #[allow(missing_docs)]
 mod terminal_actions {
@@ -366,7 +365,8 @@ impl TerminalView {
     fn cell_metrics(font: &Font, font_size: Pixels, line_height: f32, window: &Window) -> CellMetrics {
         let text_system = window.text_system();
         let font_id = text_system.resolve_font(font);
-        let width = text_system.advance(font_id, font_size, 'm').map(|advance| advance.width).unwrap_or(font_size * 0.6);
+        let width =
+            text_system.advance(font_id, font_size, 'm').map(|advance| advance.width).unwrap_or(font_size * 0.6);
         CellMetrics { width, height: (font_size * line_height).round() }
     }
 
@@ -405,7 +405,11 @@ impl TerminalView {
                 let keystroke = &event.keystroke;
                 if keystroke.key == "enter" {
                     cx.emit(PaneEvent::Rerun);
-                } else if keystroke.key == "d" && keystroke.modifiers.control && !keystroke.modifiers.shift && !keystroke.modifiers.alt {
+                } else if keystroke.key == "d"
+                    && keystroke.modifiers.control
+                    && !keystroke.modifiers.shift
+                    && !keystroke.modifiers.alt
+                {
                     cx.emit(PaneEvent::Close);
                 }
             }
@@ -531,9 +535,7 @@ impl TerminalView {
             .mouse_position
             .filter(|_| link_modifier(modifiers))
             .and_then(|position| self.logical_cell_at(position))
-            .and_then(|(col, row, _)| {
-                link_at(&self.term.row_text(row), col as usize).map(|link| (row, link.cols))
-            });
+            .and_then(|(col, row, _)| link_at(&self.term.row_text(row), col as usize).map(|link| (row, link.cols)));
         if hovered != self.hovered_link {
             self.hovered_link = hovered;
             cx.notify();
@@ -773,8 +775,20 @@ impl Render for TerminalView {
                                     div()
                                         .flex()
                                         .gap(theme.ui(8.))
-                                        .child(banner_button("rerun", rerun, true, &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun))))
-                                        .child(banner_button("close", "Close", false, &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close)))),
+                                        .child(banner_button(
+                                            "rerun",
+                                            rerun,
+                                            true,
+                                            &theme,
+                                            cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun)),
+                                        ))
+                                        .child(banner_button(
+                                            "close",
+                                            "Close",
+                                            false,
+                                            &theme,
+                                            cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close)),
+                                        )),
                                 )
                             }),
                     ),
@@ -807,9 +821,15 @@ fn banner_button(
         .cursor_pointer()
         .map(|button| {
             if primary {
-                button.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)).font_weight(FontWeight::SEMIBOLD)
+                button
+                    .bg(rgb(theme.tokens.accent))
+                    .text_color(rgb(theme.tokens.on_accent))
+                    .font_weight(FontWeight::SEMIBOLD)
             } else {
-                button.border_1().border_color(rgb(theme.tokens.line)).hover(|style| style.bg(rgb(theme.tokens.surface)))
+                button
+                    .border_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .hover(|style| style.bg(rgb(theme.tokens.surface)))
             }
         })
         .child(label)
@@ -873,7 +893,18 @@ fn paint_grid(
                 let style = CellStyle { fg: snapshot.background, ..cursor.style };
                 let single = !cursor.wide && !cursor.ch.is_ascii();
                 let force_width = (!cursor.wide && !single).then_some(m.width);
-                paint_text(&cursor.ch.to_string(), &style, bounds.origin, force_width, single, m, base_font, font_size, window, cx);
+                paint_text(
+                    &cursor.ch.to_string(),
+                    &style,
+                    bounds.origin,
+                    force_width,
+                    single,
+                    m,
+                    base_font,
+                    font_size,
+                    window,
+                    cx,
+                );
             }
         } else {
             window.paint_quad(outline(bounds, color, BorderStyle::Solid));

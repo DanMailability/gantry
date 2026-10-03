@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use app_core::session_tree::display_path;
 use app_core::settings::{ClaudeDir, Settings};
+use app_core::text_field::TextField;
 use app_core::theme_colors::ProjectColor;
 use app_core::workspace::ClaudeDirs;
-use app_core::text_field::TextField;
 use gpui::{Context, Div, FontWeight, KeyDownEvent, PathPromptOptions, Window, deferred, div, px, rgb};
 
 use super::*;
@@ -118,7 +118,13 @@ fn dir_rows(settings: &Settings, daemon_dir: Option<&Path>, home: Option<&Path>)
         return settings.claude_dirs.clone();
     }
     let path = daemon_dir.map(|dir| display_path(dir, home)).unwrap_or_else(|| "~/.claude".into());
-    vec![ClaudeDir { name: "Default".into(), path: PathBuf::from(path), command: "claude".into(), args: Vec::new(), color: None }]
+    vec![ClaudeDir {
+        name: "Default".into(),
+        path: PathBuf::from(path),
+        command: "claude".into(),
+        args: Vec::new(),
+        color: None,
+    }]
 }
 
 /// Make the implicit Default a real entry, so it can be edited or sit beside others.
@@ -130,13 +136,21 @@ fn materialize(settings: &mut Settings, daemon_dir: Option<&Path>, home: Option<
 
 /// The name of the default dir (an unknown or unset one means the first).
 fn default_name(settings: &Settings, rows: &[ClaudeDir]) -> String {
-    settings.default_claude_dir.clone().filter(|name| rows.iter().any(|dir| dir.name == *name)).unwrap_or_else(|| rows[0].name.clone())
+    settings
+        .default_claude_dir
+        .clone()
+        .filter(|name| rows.iter().any(|dir| dir.name == *name))
+        .unwrap_or_else(|| rows[0].name.clone())
 }
 
 /// Add the dir `picked` (named after its folder, made unique), written with `~` when it is under `home`.
 fn add_dir(settings: &mut Settings, picked: &Path, daemon_dir: Option<&Path>, home: Option<&Path>) {
     materialize(settings, daemon_dir, home);
-    let stem = picked.file_name().map(|name| name.to_string_lossy().trim_start_matches('.').to_string()).filter(|name| !name.is_empty()).unwrap_or_else(|| "Claude".into());
+    let stem = picked
+        .file_name()
+        .map(|name| name.to_string_lossy().trim_start_matches('.').to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Claude".into());
     let mut name = stem.clone();
     let mut number = 2;
     while settings.claude_dirs.iter().any(|dir| dir.name == name) {
@@ -151,7 +165,13 @@ fn add_dir(settings: &mut Settings, picked: &Path, daemon_dir: Option<&Path>, ho
 }
 
 /// Pick `color` for the dir at `index` (listing the implicit Default first, so it has somewhere to live).
-fn set_dir_color(settings: &mut Settings, index: usize, color: ProjectColor, daemon_dir: Option<&Path>, home: Option<&Path>) {
+fn set_dir_color(
+    settings: &mut Settings,
+    index: usize,
+    color: ProjectColor,
+    daemon_dir: Option<&Path>,
+    home: Option<&Path>,
+) {
     materialize(settings, daemon_dir, home);
     if let Some(dir) = settings.claude_dirs.get_mut(index) {
         dir.color = Some(color);
@@ -162,7 +182,8 @@ fn set_dir_color(settings: &mut Settings, index: usize, color: ProjectColor, dae
 fn rename_dir(settings: &mut Settings, index: usize, name: &str) -> bool {
     let name = name.trim();
     let Some(old) = settings.claude_dirs.get(index).map(|dir| dir.name.clone()) else { return false };
-    if name.is_empty() || settings.claude_dirs.iter().enumerate().any(|(other, dir)| other != index && dir.name == name) {
+    if name.is_empty() || settings.claude_dirs.iter().enumerate().any(|(other, dir)| other != index && dir.name == name)
+    {
         return false;
     }
     settings.claude_dirs[index].name = name.to_string();
@@ -194,13 +215,19 @@ fn remove_dir(settings: &mut Settings, index: usize) {
 
 /// Move favorite `index` by `delta` places.
 fn move_favorite(settings: &mut Settings, index: usize, delta: isize) {
-    let Some(target) = index.checked_add_signed(delta).filter(|target| *target < settings.favorites.len()) else { return };
+    let Some(target) = index.checked_add_signed(delta).filter(|target| *target < settings.favorites.len()) else {
+        return;
+    };
     settings.favorites.swap(index, target);
 }
 
 /// "3 folders remember a config dir." ("1 folder remembers" in the singular).
 fn remembered_text(count: usize) -> String {
-    if count == 1 { "1 folder remembers a config dir.".into() } else { format!("{count} folders remember a config dir.") }
+    if count == 1 {
+        "1 folder remembers a config dir.".into()
+    } else {
+        format!("{count} folders remember a config dir.")
+    }
 }
 
 /// A favorite's title: its last path component (the whole path when it has none, like `/`).
@@ -214,7 +241,9 @@ impl SettingsView {
         let rows = dir_rows(settings, self.daemon_dir.as_deref(), std::env::home_dir().as_deref());
         match key {
             (DIR_NAME, index) => rows.get(index).map(|dir| dir.name.clone()),
-            (DIR_COMMAND, index) => rows.get(index).map(|dir| join_args(&[std::slice::from_ref(&dir.command), &dir.args].concat())),
+            (DIR_COMMAND, index) => {
+                rows.get(index).map(|dir| join_args(&[std::slice::from_ref(&dir.command), &dir.args].concat()))
+            }
             (SHELL_PROGRAM, _) => Some(settings.shell.program.clone()),
             (SHELL_ARGS, _) => Some(join_args(&settings.shell.args)),
             _ => None,
@@ -284,7 +313,16 @@ impl SettingsView {
 
     /// An editable text box for `key` showing `value` (the edited text while it has focus).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn text_field(&mut self, key: FieldKey, value: &str, placeholder: &'static str, mono: bool, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+    pub(super) fn text_field(
+        &mut self,
+        key: FieldKey,
+        value: &str,
+        placeholder: &'static str,
+        mono: bool,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
         self.watch_field(key, window, cx);
         let handle = self.stop(key.0, key.1, cx);
         let focused = handle.is_focused(window);
@@ -329,15 +367,27 @@ impl SettingsView {
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.stop(key.0, key.1, cx).focus(window, cx)))
-            .child(field::render(&shown, placeholder, focused, theme, field::on_press(cx, move |this, offset, clicks, _, cx| {
-                if editing {
-                    this.edit.press(offset, clicks);
-                    cx.notify();
-                }
-            })))
+            .child(field::render(
+                &shown,
+                placeholder,
+                focused,
+                theme,
+                field::on_press(cx, move |this, offset, clicks, _, cx| {
+                    if editing {
+                        this.edit.press(offset, clicks);
+                        cx.notify();
+                    }
+                }),
+            ))
     }
 
-    pub(super) fn sessions(&mut self, theme: &Theme, settings: &Settings, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn sessions(
+        &mut self,
+        theme: &Theme,
+        settings: &Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let dirs = self.claude_dirs_group(theme, settings, window, cx);
         let favorites = self.favorites_group(theme, settings, window, cx);
         let recents = self.recents_group(theme, settings, window, cx);
@@ -346,7 +396,16 @@ impl SettingsView {
 
     /// A small text button for a list row's trailing slot.
     #[allow(clippy::too_many_arguments)]
-    fn link(&mut self, name: &'static str, index: usize, label: &'static str, enabled: bool, press: Handler, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn link(
+        &mut self,
+        name: &'static str,
+        index: usize,
+        label: &'static str,
+        enabled: bool,
+        press: Handler,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let theme = theme(cx).clone();
         self.pressable(name, index, None, window, cx, press)
             .h(theme.ui(28.))
@@ -359,7 +418,13 @@ impl SettingsView {
             .child(label)
     }
 
-    fn claude_dirs_group(&mut self, theme: &Theme, settings: &Settings, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn claude_dirs_group(
+        &mut self,
+        theme: &Theme,
+        settings: &Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let home = std::env::home_dir();
         let dirs = dir_rows(settings, self.daemon_dir.as_deref(), home.as_deref());
         let default = default_name(settings, &dirs);
@@ -376,7 +441,14 @@ impl SettingsView {
                     cx.notify();
                 });
                 let badge_button = self
-                    .pressable("dir-colour", index, Some(if open { theme.tokens.accent } else { theme.tokens.line }), window, cx, open_picker)
+                    .pressable(
+                        "dir-colour",
+                        index,
+                        Some(if open { theme.tokens.accent } else { theme.tokens.line }),
+                        window,
+                        cx,
+                        open_picker,
+                    )
                     .relative()
                     .flex_none()
                     .size(theme.ui(30.))
@@ -389,20 +461,33 @@ impl SettingsView {
                     .font_weight(FontWeight::BOLD)
                     .child(badge.letter.clone());
                 let picker = open.then(|| {
-                    let swatches = ProjectColor::ALL.iter().enumerate().map(|(number, color)| {
-                        let color = *color;
-                        let (daemon_dir, home) = (self.daemon_dir.clone(), home.clone());
-                        let pick = handler(move |this, window, cx| {
-                            SettingsStore::update(cx, |settings| set_dir_color(settings, index, color, daemon_dir.as_deref(), home.as_deref()));
-                            this.close_popover(window, cx);
-                        });
-                        self.pressable("dir-swatch", index * ProjectColor::ALL.len() + number, None, window, cx, pick)
+                    let swatches = ProjectColor::ALL
+                        .iter()
+                        .enumerate()
+                        .map(|(number, color)| {
+                            let color = *color;
+                            let (daemon_dir, home) = (self.daemon_dir.clone(), home.clone());
+                            let pick = handler(move |this, window, cx| {
+                                SettingsStore::update(cx, |settings| {
+                                    set_dir_color(settings, index, color, daemon_dir.as_deref(), home.as_deref())
+                                });
+                                this.close_popover(window, cx);
+                            });
+                            self.pressable(
+                                "dir-swatch",
+                                index * ProjectColor::ALL.len() + number,
+                                None,
+                                window,
+                                cx,
+                                pick,
+                            )
                             .size(theme.ui(30.))
                             .rounded(px(RADIUS_SMALL))
                             .bg(rgb(color.value(theme.preset)))
                             .border_2()
                             .when(color == badge.color, |swatch| swatch.border_color(rgb(theme.tokens.text)))
-                    }).collect::<Vec<_>>();
+                        })
+                        .collect::<Vec<_>>();
                     deferred(
                         div()
                             .occlude()
@@ -419,29 +504,70 @@ impl SettingsView {
                             .border_1()
                             .border_color(rgb(theme.tokens.line))
                             .shadow_lg()
-                            .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(format!("Colour for {}", dir.name)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.tokens.muted))
+                                    .child(format!("Colour for {}", dir.name)),
+                            )
                             .child(div().grid().grid_cols(4).gap(theme.ui(6.)).children(swatches)),
                     )
                     .with_priority(1)
                 });
                 let badge_button = badge_button.children(picker);
-                let name = self.text_field((DIR_NAME, index), &dir.name, "Name", false, theme, window, cx).w(theme.ui(180.));
-                let path = div().mt(theme.ui(4.)).font_family(FONT_FAMILY).text_size(theme.ui(12.)).text_color(rgb(theme.tokens.muted)).truncate().child(dir.path.display().to_string());
+                let name =
+                    self.text_field((DIR_NAME, index), &dir.name, "Name", false, theme, window, cx).w(theme.ui(180.));
+                let path = div()
+                    .mt(theme.ui(4.))
+                    .font_family(FONT_FAMILY)
+                    .text_size(theme.ui(12.))
+                    .text_color(rgb(theme.tokens.muted))
+                    .truncate()
+                    .child(dir.path.display().to_string());
                 let command = join_args(&[std::slice::from_ref(&dir.command), &dir.args].concat());
-                let command = self.text_field((DIR_COMMAND, index), &command, "Command and arguments", true, theme, window, cx).w(theme.ui(260.));
+                let command = self
+                    .text_field((DIR_COMMAND, index), &command, "Command and arguments", true, theme, window, cx)
+                    .w(theme.ui(260.));
                 let trailing = if is_default {
-                    actions_slot(theme).child(div().px(theme.ui(8.)).text_xs().text_color(rgb(theme.tokens.muted)).child("Default"))
+                    actions_slot(theme)
+                        .child(div().px(theme.ui(8.)).text_xs().text_color(rgb(theme.tokens.muted)).child("Default"))
                 } else {
                     let (daemon_dir, home) = (self.daemon_dir.clone(), home.clone());
-                    let make_default = self.link("dir-default", index, "Make default", true, change(move |settings| {
-                        materialize(settings, daemon_dir.as_deref(), home.as_deref());
-                        set_default(settings, index);
-                    }), window, cx);
-                    let remove = self.link("dir-remove", index, "Remove", true, change(move |settings| remove_dir(settings, index)), window, cx);
+                    let make_default = self.link(
+                        "dir-default",
+                        index,
+                        "Make default",
+                        true,
+                        change(move |settings| {
+                            materialize(settings, daemon_dir.as_deref(), home.as_deref());
+                            set_default(settings, index);
+                        }),
+                        window,
+                        cx,
+                    );
+                    let remove = self.link(
+                        "dir-remove",
+                        index,
+                        "Remove",
+                        true,
+                        change(move |settings| remove_dir(settings, index)),
+                        window,
+                        cx,
+                    );
                     actions_slot(theme).child(make_default).child(remove)
                 };
                 // One trailing width for every dir, so the command fields line up.
-                row_shell(theme, div().flex().items_start().gap(theme.ui(12.)).child(badge_button).child(div().flex_1().min_w_0().child(name).child(path)), command, trailing.w(theme.ui(170.)).justify_end())
+                row_shell(
+                    theme,
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(theme.ui(12.))
+                        .child(badge_button)
+                        .child(div().flex_1().min_w_0().child(name).child(path)),
+                    command,
+                    trailing.w(theme.ui(170.)).justify_end(),
+                )
             })
             .collect();
 
@@ -453,13 +579,22 @@ impl SettingsView {
             window,
             cx,
             handler(move |_, window, cx| {
-                let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
+                let picked = cx.prompt_for_paths(PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: None,
+                });
                 let (daemon_dir, home) = (daemon_dir.clone(), add_home.clone());
                 cx.spawn_in(window, async move |_, cx| {
                     if let Ok(Ok(Some(paths))) = picked.await
                         && let Some(path) = paths.into_iter().next()
                     {
-                        let _ = cx.update(|_, cx| SettingsStore::update(cx, |settings| add_dir(settings, &path, daemon_dir.as_deref(), home.as_deref())));
+                        let _ = cx.update(|_, cx| {
+                            SettingsStore::update(cx, |settings| {
+                                add_dir(settings, &path, daemon_dir.as_deref(), home.as_deref())
+                            })
+                        });
                     }
                 })
                 .detach();
@@ -473,16 +608,39 @@ impl SettingsView {
         ));
         let remembered = settings.folder_claude_dirs.len();
         if remembered > 0 {
-            let forget = self.button("dir-forget", 0, "Forget all", window, cx, change(|settings| settings.folder_claude_dirs.clear()));
+            let forget = self.button(
+                "dir-forget",
+                0,
+                "Forget all",
+                window,
+                cx,
+                change(|settings| settings.folder_claude_dirs.clear()),
+            );
             rows.push(row(theme, "Remembered folders", remembered_text(remembered), forget, empty_slot(theme)));
         }
         if let Some(text) = self.sessions_message.clone() {
             let colors = theme.tone(Tone::NeedsInput);
-            rows.push(div().px(theme.ui(16.)).py(theme.ui(12.)).child(
-                div().px(theme.ui(10.)).py(theme.ui(6.)).rounded(px(RADIUS_SMALL)).bg(rgb(colors.fill.unwrap_or(theme.tokens.raised))).text_color(rgb(colors.ink)).text_sm().child(text),
-            ));
+            rows.push(
+                div().px(theme.ui(16.)).py(theme.ui(12.)).child(
+                    div()
+                        .px(theme.ui(10.))
+                        .py(theme.ui(6.))
+                        .rounded(px(RADIUS_SMALL))
+                        .bg(rgb(colors.fill.unwrap_or(theme.tokens.raised)))
+                        .text_color(rgb(colors.ink))
+                        .text_sm()
+                        .child(text),
+                ),
+            );
         }
-        group(theme, "Claude config dirs", Some("New folders use the default. A dir picked in the launcher is remembered for that folder. The letter and colour mark its sessions."), rows)
+        group(
+            theme,
+            "Claude config dirs",
+            Some(
+                "New folders use the default. A dir picked in the launcher is remembered for that folder. The letter and colour mark its sessions.",
+            ),
+            rows,
+        )
     }
 
     fn favorites_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -493,31 +651,95 @@ impl SettingsView {
             .iter()
             .enumerate()
             .map(|(index, path)| {
-                let up = self.link("favorite-up", index, "↑", index > 0, change(move |settings| move_favorite(settings, index, -1)), window, cx);
-                let down = self.link("favorite-down", index, "↓", index + 1 < count, change(move |settings| move_favorite(settings, index, 1)), window, cx);
+                let up = self.link(
+                    "favorite-up",
+                    index,
+                    "↑",
+                    index > 0,
+                    change(move |settings| move_favorite(settings, index, -1)),
+                    window,
+                    cx,
+                );
+                let down = self.link(
+                    "favorite-down",
+                    index,
+                    "↓",
+                    index + 1 < count,
+                    change(move |settings| move_favorite(settings, index, 1)),
+                    window,
+                    cx,
+                );
                 let target = path.clone();
-                let unpin = self.link("favorite-unpin", index, "Unpin", true, change(move |settings| settings.favorites.retain(|favorite| *favorite != target)), window, cx);
-                let path_text = div().font_family(FONT_FAMILY).text_size(theme.ui(12.)).text_color(rgb(theme.tokens.muted)).truncate().child(display_path(path, home.as_deref()));
-                row_shell(theme, row_label(favorite_name(path), path_text), div(), actions_slot(theme).child(up).child(down).child(unpin))
+                let unpin = self.link(
+                    "favorite-unpin",
+                    index,
+                    "Unpin",
+                    true,
+                    change(move |settings| settings.favorites.retain(|favorite| *favorite != target)),
+                    window,
+                    cx,
+                );
+                let path_text = div()
+                    .font_family(FONT_FAMILY)
+                    .text_size(theme.ui(12.))
+                    .text_color(rgb(theme.tokens.muted))
+                    .truncate()
+                    .child(display_path(path, home.as_deref()));
+                row_shell(
+                    theme,
+                    row_label(favorite_name(path), path_text),
+                    div(),
+                    actions_slot(theme).child(up).child(down).child(unpin),
+                )
             })
             .collect();
         if rows.is_empty() {
-            rows.push(div().px(theme.ui(16.)).py(theme.ui(12.)).child(muted(theme, "No favorites yet. Pin a folder from a project's right-click menu in the sidebar.")));
+            rows.push(div().px(theme.ui(16.)).py(theme.ui(12.)).child(muted(
+                theme,
+                "No favorites yet. Pin a folder from a project's right-click menu in the sidebar.",
+            )));
         }
-        group(theme, "Favorites", Some("Shown first in the launcher. Pin a folder from a project's right-click menu."), rows)
+        group(
+            theme,
+            "Favorites",
+            Some("Shown first in the launcher. Pin a folder from a project's right-click menu."),
+            rows,
+        )
     }
 
     fn recents_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let per_project = self.stepper(&SESSIONS_PER_PROJECT, settings, window, cx);
-        let per_project_reset = self.reset_slot("reset-recents-per-project", 0, settings, |s| s.recents.per_project, |s, v| s.recents.per_project = v, window, cx);
+        let per_project_reset = self.reset_slot(
+            "reset-recents-per-project",
+            0,
+            settings,
+            |s| s.recents.per_project,
+            |s, v| s.recents.per_project = v,
+            window,
+            cx,
+        );
         let chips = self.stepper(&PROJECT_CHIPS, settings, window, cx);
-        let chips_reset = self.reset_slot("reset-recents-chips", 0, settings, |s| s.recents.chips, |s, v| s.recents.chips = v, window, cx);
+        let chips_reset = self.reset_slot(
+            "reset-recents-chips",
+            0,
+            settings,
+            |s| s.recents.chips,
+            |s, v| s.recents.chips = v,
+            window,
+            cx,
+        );
         group(
             theme,
             "Recent sessions",
             None,
             vec![
-                row(theme, "Sessions per project", "Shown in the pop-up before you search.", per_project, per_project_reset),
+                row(
+                    theme,
+                    "Sessions per project",
+                    "Shown in the pop-up before you search.",
+                    per_project,
+                    per_project_reset,
+                ),
                 row(theme, "Project chips", "Projects you can filter by in one click.", chips, chips_reset),
             ],
         )
@@ -549,7 +771,13 @@ mod tests {
         let mut settings = Settings {
             claude_dirs: vec![
                 ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![], color: None },
-                ClaudeDir { name: "B".into(), path: "/b".into(), command: "claude".into(), args: vec![], color: Some(ProjectColor::Blue) },
+                ClaudeDir {
+                    name: "B".into(),
+                    path: "/b".into(),
+                    command: "claude".into(),
+                    args: vec![],
+                    color: Some(ProjectColor::Blue),
+                },
             ],
             ..Settings::default()
         };
@@ -564,7 +792,10 @@ mod tests {
     fn split_args_respects_quotes() {
         assert_eq!(split_args("claude --model opus"), words(&["claude", "--model", "opus"]));
         assert_eq!(split_args("  a   b "), words(&["a", "b"]));
-        assert_eq!(split_args(r#"run "two words" 'single $x' plain\ space"#), words(&["run", "two words", "single $x", "plain space"]));
+        assert_eq!(
+            split_args(r#"run "two words" 'single $x' plain\ space"#),
+            words(&["run", "two words", "single $x", "plain space"])
+        );
         assert_eq!(split_args(r#"say "a \"quoted\" \\ word""#), words(&["say", r#"a "quoted" \ word"#]));
         assert_eq!(split_args(r#"empty "" end"#), words(&["empty", "", "end"]));
         assert_eq!(split_args(r#"open "unterminated rest"#), words(&["open", "unterminated rest"]));
@@ -583,7 +814,10 @@ mod tests {
     fn the_implicit_default_row_is_shown_and_materialised_on_edit() {
         let mut settings = Settings::default();
         let rows = dir_rows(&settings, Some(Path::new("/home/u/.claude")), Some(Path::new("/home/u")));
-        assert_eq!((rows[0].name.as_str(), rows[0].path.as_path(), rows[0].command.as_str()), ("Default", Path::new("~/.claude"), "claude"));
+        assert_eq!(
+            (rows[0].name.as_str(), rows[0].path.as_path(), rows[0].command.as_str()),
+            ("Default", Path::new("~/.claude"), "claude")
+        );
         assert_eq!(dir_rows(&settings, None, None)[0].path, Path::new("~/.claude"));
         materialize(&mut settings, Some(Path::new("/home/u/.claude")), Some(Path::new("/home/u")));
         assert_eq!(settings.claude_dirs, rows);
@@ -594,7 +828,10 @@ mod tests {
         let (daemon, home) = (Some(Path::new("/home/u/.claude")), Some(Path::new("/home/u")));
         let mut settings = Settings::default();
         add_dir(&mut settings, Path::new("/home/u/.claude-work"), daemon, home);
-        assert_eq!(settings.claude_dirs.iter().map(|dir| dir.name.as_str()).collect::<Vec<_>>(), ["Default", "claude-work"]);
+        assert_eq!(
+            settings.claude_dirs.iter().map(|dir| dir.name.as_str()).collect::<Vec<_>>(),
+            ["Default", "claude-work"]
+        );
         assert_eq!(settings.claude_dirs[1].path, Path::new("~/.claude-work"));
         add_dir(&mut settings, Path::new("/srv/claude-work"), daemon, home);
         assert_eq!(settings.claude_dirs[2].name, "claude-work 2");
@@ -604,7 +841,11 @@ mod tests {
 
     #[test]
     fn renaming_follows_the_default_and_the_memory_and_refuses_duplicates() {
-        let mut settings = Settings { claude_dirs: vec![dir("A", "/a"), dir("B", "/b")], default_claude_dir: Some("B".into()), ..Settings::default() };
+        let mut settings = Settings {
+            claude_dirs: vec![dir("A", "/a"), dir("B", "/b")],
+            default_claude_dir: Some("B".into()),
+            ..Settings::default()
+        };
         settings.folder_claude_dirs.insert("/r".into(), "B".into());
         assert!(!rename_dir(&mut settings, 1, "A"));
         assert!(!rename_dir(&mut settings, 1, "  "));
@@ -616,7 +857,8 @@ mod tests {
 
     #[test]
     fn default_and_remove_keep_the_settings_consistent() {
-        let mut settings = Settings { claude_dirs: vec![dir("A", "/a"), dir("B", "/b"), dir("C", "/c")], ..Settings::default() };
+        let mut settings =
+            Settings { claude_dirs: vec![dir("A", "/a"), dir("B", "/b"), dir("C", "/c")], ..Settings::default() };
         set_default(&mut settings, 2);
         assert_eq!(settings.default_claude_dir.as_deref(), Some("C"));
         set_default(&mut settings, 0);

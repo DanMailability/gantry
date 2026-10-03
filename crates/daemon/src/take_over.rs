@@ -53,7 +53,8 @@ pub fn signal(target: &Target, force: bool, host: &impl Host) -> Result<bool, St
 fn kill(pid: u32, force: bool) -> Result<(), String> {
     use rustix::process::{Pid, Signal, kill_process};
     let pid = i32::try_from(pid).ok().and_then(Pid::from_raw).ok_or_else(|| format!("invalid pid {pid}"))?;
-    kill_process(pid, if force { Signal::KILL } else { Signal::TERM }).map_err(|err| format!("could not signal it: {err}"))
+    kill_process(pid, if force { Signal::KILL } else { Signal::TERM })
+        .map_err(|err| format!("could not signal it: {err}"))
 }
 
 #[cfg(not(unix))]
@@ -108,7 +109,8 @@ mod tests {
             cwd_exists: true,
             status: None,
             status_since_ms: 0,
-            container: None, claude_dir: None,
+            container: None,
+            claude_dir: None,
         }
     }
 
@@ -142,7 +144,8 @@ mod tests {
             info("old", SessionState::Closed),
             info("nostart", SessionState::External { pid: Some(42) }),
         ];
-        let records = [record("box", Some("1")), record("mine", Some("1")), record("old", Some("1")), record("nostart", None)];
+        let records =
+            [record("box", Some("1")), record("mine", Some("1")), record("old", Some("1")), record("nostart", None)];
         let refused = |id: &str| target(&sessions, &records, id).unwrap_err();
         assert!(refused("box").contains("container"), "{}", refused("box"));
         assert!(refused("mine").contains("already runs in Gantry"), "{}", refused("mine"));
