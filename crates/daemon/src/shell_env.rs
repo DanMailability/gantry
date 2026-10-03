@@ -73,7 +73,8 @@ mod tests {
     fn print_env_json_round_trips() {
         let json = print_env_json();
         let env = parse_env_output(&format!("{ENV_MARKER}{json}")).unwrap();
-        assert!(env.iter().any(|(k, _)| k == "PATH"));
+        // Windows spells it `Path` (names are case-insensitive there).
+        assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("PATH")));
     }
 
     #[cfg(unix)]
