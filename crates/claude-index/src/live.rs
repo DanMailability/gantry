@@ -8,7 +8,7 @@ use serde_json::Value;
 /// What a live Claude reports doing (`status` in its pid file).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity {
-    /// Working on a turn.
+    /// Working on a turn, or idle with a background shell running (`status` `shell`).
     Busy,
     /// Waiting for the next prompt.
     Idle,
@@ -63,7 +63,7 @@ pub fn parse(text: &str) -> Option<LiveRecord> {
         _ => None,
     });
     let activity = match file.status.as_ref().and_then(Value::as_str) {
-        Some("busy") => Some(Activity::Busy),
+        Some("busy" | "shell") => Some(Activity::Busy),
         Some("idle") => Some(Activity::Idle),
         Some("waiting") => {
             Some(Activity::Waiting { reason: file.waiting_for.as_ref().and_then(Value::as_str).map(String::from) })
@@ -130,6 +130,7 @@ mod tests {
     #[test]
     fn status_values_map_to_activities() {
         let with = |extra: &str| parse(&format!(r#"{{"pid":1,"sessionId":"s","cwd":"/",{extra}}}"#)).unwrap();
+        assert_eq!(with(r#""status":"shell""#).activity, Some(Activity::Busy));
         let idle = with(r#""status":"idle","statusUpdatedAt":5,"updatedAt":9"#);
         assert_eq!((idle.activity, idle.activity_since_ms), (Some(Activity::Idle), Some(5)));
         let waiting = with(r#""status":"waiting","waitingFor":"input needed""#);
