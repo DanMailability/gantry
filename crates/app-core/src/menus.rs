@@ -41,6 +41,8 @@ pub enum MenuAction {
     OpenInVsCode(Vec<String>),
     /// Mark a pane's session as having a result the user has not seen (its tab and row turn Done).
     MarkUnread(NodeId),
+    /// Remove a pane's unread mark (its tab and row go back to the session's own colour).
+    MarkRead(NodeId),
     /// Close one pane.
     ClosePane(NodeId),
     /// Close every pane of a tab.
@@ -266,22 +268,23 @@ pub fn vscode_args(folder: &Path, container: Option<&ContainerPlace>, pane_conta
     }
 }
 
-/// A tab's menu; `dir` is its focused pane's directory.
+/// A tab's menu; `dir` is its focused pane's directory. `mark` = the focused pane and whether it is unread (offers
+/// "Mark as read"), `None` when it is neither unread nor idle.
 /// `context.dirs` is empty for a dev container tab.
 pub fn tab_menu(
     tab: usize,
     dir: &Path,
     vscode: Vec<String>,
     context: &MenuContext,
-    unread: Option<NodeId>,
+    mark: Option<(NodeId, bool)>,
 ) -> Vec<MenuItem> {
     let mut items = vec![
         with_shortcut("Split right", Shortcut::SplitRight, MenuAction::Split { tab, axis: Axis::Horizontal }),
         with_shortcut("Split down", Shortcut::SplitDown, MenuAction::Split { tab, axis: Axis::Vertical }),
     ];
     items.extend(claude_with(dir, context));
-    if let Some(leaf) = unread {
-        items.push(entry("Mark as unread", MenuAction::MarkUnread(leaf)));
+    if let Some((leaf, unread)) = mark {
+        items.push(read_mark_item(leaf, unread));
     }
     items.push(MenuItem::Separator);
     items.extend(folder_items(dir, vscode));
@@ -298,6 +301,15 @@ pub fn middle_click(row: &Row) -> Option<MenuAction> {
         RowKind::Session { leaf: Some(leaf), .. } => Some(MenuAction::ClosePane(*leaf)),
         RowKind::Pane { entry, .. } => Some(MenuAction::ClosePane(entry.leaf)),
         _ => None,
+    }
+}
+
+/// "Mark as read" for an unread pane, "Mark as unread" for an idle one.
+fn read_mark_item(leaf: NodeId, unread: bool) -> MenuItem {
+    if unread {
+        entry("Mark as read", MenuAction::MarkRead(leaf))
+    } else {
+        entry("Mark as unread", MenuAction::MarkUnread(leaf))
     }
 }
 
@@ -336,8 +348,8 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     items.push(MenuItem::Separator);
                 }
             }
-            if let (Tone::Idle, Some(leaf)) = (tone, leaf) {
-                items.push(entry("Mark as unread", MenuAction::MarkUnread(*leaf)));
+            if let (Tone::Idle | Tone::Done, Some(leaf)) = (tone, leaf) {
+                items.push(read_mark_item(*leaf, *tone == Tone::Done));
             }
             items.push(entry("Copy session id", MenuAction::Copy(session.id.clone())));
             items.extend(folder_items(&session.cwd, vscode));
@@ -501,7 +513,7 @@ mod tests {
 
     #[test]
     fn a_tab_with_an_idle_claude_offers_mark_as_unread() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some(7));
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, false)));
         assert_eq!(
             labels(&items),
             [
@@ -521,13 +533,25 @@ mod tests {
     }
 
     #[test]
-    fn only_an_idle_session_row_offers_mark_as_unread() {
-        for (tone, offered) in
-            [(Tone::Idle, true), (Tone::Done, false), (Tone::Working, false), (Tone::NeedsInput, false)]
-        {
+    fn an_unread_tab_offers_mark_as_read() {
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, true)));
+        let MenuItem::Entry(read) = &items[2] else { panic!() };
+        assert_eq!((read.label.as_str(), &read.action), ("Mark as read", &MenuAction::MarkRead(7)));
+    }
+
+    #[test]
+    fn idle_session_rows_offer_mark_as_unread_and_done_ones_mark_as_read() {
+        for (tone, label) in [
+            (Tone::Idle, Some("Mark as unread")),
+            (Tone::Done, Some("Mark as read")),
+            (Tone::Working, None),
+            (Tone::NeedsInput, None),
+        ] {
             let row = session_row(SessionState::Managed { pane: 1 }, tone, Some(4));
             let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
-            assert_eq!(labels(&items).contains(&"Mark as unread".to_string()), offered, "{tone:?}");
+            let marks: Vec<_> =
+                labels(&items).into_iter().filter(|l| l == "Mark as unread" || l == "Mark as read").collect();
+            assert_eq!(marks, label.map(String::from).into_iter().collect::<Vec<_>>(), "{tone:?}");
         }
     }
 
