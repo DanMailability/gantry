@@ -4,6 +4,11 @@ on:
   pull_request:
   # macOS and Windows run only from here (Actions → CI → Run workflow): their minutes cost 10× and 2×.
   workflow_dispatch:
+    inputs:
+      linux:
+        description: Also run Linux (fmt, deny, tests)
+        type: boolean
+        default: true
 
 # A newer push to the same branch cancels the run still going.
 concurrency:
@@ -16,6 +21,7 @@ env:
 
 jobs:
   fmt:
+    if: github.event_name != 'workflow_dispatch' || inputs.linux
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -28,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["ubuntu-24.04", "macos-15", "windows-2025"]') || fromJSON('["ubuntu-24.04"]') }}
+        os: ${{ github.event_name != 'workflow_dispatch' && fromJSON('["ubuntu-24.04"]') || inputs.linux && fromJSON('["ubuntu-24.04", "macos-15", "windows-2025"]') || fromJSON('["macos-15", "windows-2025"]') }}
     runs-on: ${{ matrix.os }}
     # A cold build (no cache) takes about 30 min on Linux; a hang must not run for the default 6 hours.
     timeout-minutes: 60
@@ -51,6 +57,7 @@ jobs:
       - run: cargo test --workspace
 
   deny:
+    if: github.event_name != 'workflow_dispatch' || inputs.linux
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

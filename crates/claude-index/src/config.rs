@@ -10,7 +10,7 @@ pub fn config_dir(env: &[(String, String)]) -> Option<PathBuf> {
     get("CLAUDE_CONFIG_DIR").or_else(|| get(home).map(|home| home.join(".claude")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -18,14 +18,12 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
-    #[cfg(unix)]
     #[test]
     fn explicit_config_dir_wins_over_home() {
         let env = env(&[("HOME", "/home/me"), ("CLAUDE_CONFIG_DIR", "/cfg")]);
         assert_eq!(config_dir(&env), Some(PathBuf::from("/cfg")));
     }
 
-    #[cfg(unix)]
     #[test]
     fn home_fallback_and_empty_values_count_as_unset() {
         assert_eq!(

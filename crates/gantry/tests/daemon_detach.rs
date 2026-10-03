@@ -1,5 +1,5 @@
-#![cfg(unix)]
 //! The daemon must keep running when started from an interactive terminal session.
+#![cfg(unix)]
 
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};

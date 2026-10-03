@@ -1,5 +1,5 @@
-#![cfg(unix)]
 //! End-to-end tests of the daemon server over a real local socket.
+#![cfg(unix)]
 
 use std::time::Duration;
 

@@ -1,5 +1,5 @@
-#![cfg(target_os = "linux")]
 //! Session index → daemon → client, with a temp Claude config directory.
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

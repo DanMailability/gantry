@@ -9,6 +9,7 @@ use interprocess::local_socket::tokio::{Stream, prelude::*};
 
 use crate::paths::Paths;
 use crate::server::{ServerOptions, serve};
+#[cfg(unix)]
 use crate::shell_env::{resolve_login_env, shell_quote};
 
 /// How `run_daemon` ended.
