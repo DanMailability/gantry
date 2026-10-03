@@ -26,7 +26,7 @@ use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
+use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, group_tint, container_icon, dir_badge, side_line, sweeping, theme, working_sweep};
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
 const ROW_HEIGHT: f32 = 38.0;
@@ -361,6 +361,7 @@ impl SidebarView {
             .border_l_1()
             .border_r_1()
             .border_color(rgb(theme.tokens.line))
+            .bg(rgba(group_tint(theme.tokens.text)))
             .when(edges.first, |group| group.border_t_1().rounded_t(px(RADIUS)))
             .when(edges.last, |group| group.border_b_1().rounded_b(px(RADIUS)))
             .child(content);

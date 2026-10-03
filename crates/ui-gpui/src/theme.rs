@@ -99,6 +99,14 @@ pub(crate) fn dir_badge(badge: &DirBadge, theme: &Theme) -> Div {
         .child(badge.letter.clone())
 }
 
+/// How much of the text colour (alpha, of 255) tints a project's group box in the sidebar: about 11%.
+const GROUP_TINT_ALPHA: u32 = 0x1c;
+
+/// The colour laid over a project's group box in the sidebar: `text` at [`GROUP_TINT_ALPHA`], as `rgba` bits.
+pub(crate) fn group_tint(text: u32) -> u32 {
+    (text << 8) | GROUP_TINT_ALPHA
+}
+
 /// Width of the Working glow, as a fraction of the row.
 pub(crate) const SWEEP_BAND: f32 = 0.45;
 /// One pass of the Working glow.
@@ -168,6 +176,12 @@ mod tests {
         for tone in [Tone::NeedsInput, Tone::Done, Tone::Idle, Tone::Closed, Tone::Elsewhere] {
             assert!(!sweeping(tone, true, true), "{tone:?}");
         }
+    }
+
+    #[test]
+    fn the_group_tint_is_the_text_colour_at_about_eleven_percent() {
+        assert_eq!(group_tint(0xe7eaf3), 0xe7ea_f31c);
+        assert_eq!(group_tint(0x1f2533) & 0xff, 0x1c);
     }
 
     #[test]

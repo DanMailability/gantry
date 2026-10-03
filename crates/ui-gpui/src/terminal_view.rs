@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use crate::settings_store::SettingsStore;
-use crate::theme::{Theme, theme};
+use crate::theme::{RADIUS, Theme, UI_FONT, theme};
 use app_core::bidi::{RowOrder, logical_hit, to_display};
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
@@ -682,7 +682,6 @@ impl Render for TerminalView {
         let hovering_link = self.hovered_link.is_some();
         let focused = self.focus_handle.is_focused(window);
         let background = to_hsla(snapshot.background);
-        let banner_color = to_hsla(snapshot.cursor_color);
         let layout_view = cx.entity();
         let input_view = cx.entity();
         let focus = self.focus_handle.clone();
@@ -709,6 +708,7 @@ impl Render for TerminalView {
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .when(hovering_link, |this| this.cursor_pointer())
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(background)
@@ -729,21 +729,34 @@ impl Render for TerminalView {
             )
             .when_some(self.banner(), |this, (text, actions)| {
                 let rerun = if self.launch.is_claude() { "Continue" } else { "Restart" };
+                // A message in the middle of the pane, over the (still visible) terminal text.
                 this.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .flex()
-                        .flex_row()
-                        .gap_3()
-                        .items_center()
-                        .text_color(banner_color)
-                        // Long messages (e.g. Docker's) wrap; the buttons stay visible.
-                        .child(div().flex_1().min_w_0().child(text))
-                        .when(actions, |row| {
-                            row.child(banner_button("rerun", rerun, &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun))))
-                                .child(banner_button("close", "Close", &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close))))
-                        }),
+                    div().absolute().size_full().flex().items_center().justify_center().p(theme.ui(16.)).child(
+                        div()
+                            .max_w(theme.ui(320.))
+                            .px(theme.ui(20.))
+                            .py(theme.ui(18.))
+                            .flex()
+                            .flex_col()
+                            .gap(theme.ui(14.))
+                            .rounded(px(RADIUS))
+                            .bg(rgb(theme.tokens.raised))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .shadow_lg()
+                            .text_color(rgb(theme.tokens.text))
+                            .font_family(UI_FONT)
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(text))
+                            .when(actions, |card| {
+                                card.child(
+                                    div()
+                                        .flex()
+                                        .gap(theme.ui(8.))
+                                        .child(banner_button("rerun", rerun, true, &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Rerun))))
+                                        .child(banner_button("close", "Close", false, &theme, cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close)))),
+                                )
+                            }),
+                    ),
                 )
             })
     }
@@ -758,19 +771,26 @@ fn resize_on_attach(grid: (u16, u16), cell: (u16, u16)) -> Option<(u16, u16, u16
 fn banner_button(
     id: &'static str,
     label: &'static str,
+    primary: bool,
     theme: &Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
         .flex_none()
-        .px_3()
-        .py(px(2.))
+        .h(theme.ui(32.))
+        .px(theme.ui(16.))
+        .flex()
+        .items_center()
         .rounded_full()
-        .border_1()
-        .border_color(rgb(theme.tokens.accent))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme.tokens.raised)))
+        .map(|button| {
+            if primary {
+                button.bg(rgb(theme.tokens.accent)).text_color(rgb(theme.tokens.on_accent)).font_weight(FontWeight::SEMIBOLD)
+            } else {
+                button.border_1().border_color(rgb(theme.tokens.line)).hover(|style| style.bg(rgb(theme.tokens.surface)))
+            }
+        })
         .child(label)
         .on_click(on_click)
 }
