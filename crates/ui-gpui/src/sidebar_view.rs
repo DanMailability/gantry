@@ -97,6 +97,8 @@ pub struct SidebarView {
     /// The Settings tab is open (a row above the list), and is the visible tab.
     settings_open: bool,
     settings_active: bool,
+    /// What a middle press started on, until the button is released: a row, or the Settings row (`None`).
+    middle_pressed: Option<Option<RowKey>>,
     _refresh: Task<()>,
 }
 
@@ -146,6 +148,7 @@ impl SidebarView {
             roots: ProjectRoots::new(std::env::home_dir()),
             settings_open: false,
             settings_active: false,
+            middle_pressed: None,
             _refresh: refresh,
         };
         sidebar.rebuild(cx);
@@ -445,6 +448,7 @@ impl SidebarView {
         let key = row.key();
         let selected = self.selected.as_ref() == Some(&key);
         let menu_key = key.clone();
+        let (middle_down, middle_up) = (key.clone(), key.clone());
         let theme = theme(cx).clone();
         let base = div()
             .id(index)
@@ -465,6 +469,21 @@ impl SidebarView {
                 // clicked, by identity, or on nothing if it is gone.
                 if let Some(index) = session_tree::find(&this.rows, &key) {
                     this.activate(index, event.modifiers().secondary(), cx);
+                }
+            }))
+            // A middle click closes the pane or tab the row stands for (press and release on the same row).
+            .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
+                this.middle_pressed = Some(Some(middle_down.clone()));
+                cx.stop_propagation();
+            }))
+            .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if this.middle_pressed.take() != Some(Some(middle_up.clone())) {
+                    return;
+                }
+                let action = session_tree::find(&this.rows, &middle_up).and_then(|index| menus::middle_click(&this.rows[index]));
+                if let Some(action) = action {
+                    cx.emit(SidebarEvent::Menu(action));
                 }
             }))
             .on_mouse_down(
@@ -636,6 +655,7 @@ impl Render for SidebarView {
             .key_context("Sidebar")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
+            .on_mouse_up(MouseButton::Middle, cx.listener(|this, _, _, _| this.middle_pressed = None))
             .size_full()
             .flex()
             .flex_col()
@@ -702,7 +722,17 @@ impl Render for SidebarView {
                                     cx.emit(SidebarEvent::CloseSettings);
                                 })),
                         )
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings))),
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings)))
+                        .on_mouse_down(MouseButton::Middle, cx.listener(|this, _, _, cx| {
+                            this.middle_pressed = Some(None);
+                            cx.stop_propagation();
+                        }))
+                        .on_mouse_up(MouseButton::Middle, cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            if this.middle_pressed.take() == Some(None) {
+                                cx.emit(SidebarEvent::CloseSettings);
+                            }
+                        })),
                 )
             })
             .child(
