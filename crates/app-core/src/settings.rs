@@ -229,7 +229,7 @@ pub struct RecentsSettings {
 }
 
 /// Window behaviour.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowSettings {
     /// Restore tabs and panes on start.
     pub restore_layout: bool,
@@ -241,6 +241,10 @@ pub struct WindowSettings {
     pub right_to_left: bool,
     /// Show your last prompt above each Claude pane.
     pub last_prompt: bool,
+    /// Text size of the last prompt card (11 to 32, scaled with the interface size).
+    pub last_prompt_size: f32,
+    /// Background colour of the last prompt card; unset = the theme's accent.
+    pub last_prompt_color: Option<u32>,
 }
 
 /// `~/x` becomes `<home>/x`; other paths are unchanged.
@@ -347,6 +351,8 @@ impl Default for Settings {
                 scrollback: 10_000,
                 right_to_left: true,
                 last_prompt: true,
+                last_prompt_size: 18.0,
+                last_prompt_color: None,
             },
             project_colors: ProjectColors::default(),
             animate_working: true,
@@ -742,6 +748,8 @@ impl Reader {
             scrollback: self.number(&map, "window.", "scrollback", 10_000.0, (1000.0, 100_000.0)).round() as u32,
             right_to_left: self.bool(&map, "window.", "rightToLeft", defaults.window.right_to_left),
             last_prompt: self.bool(&map, "window.", "lastPrompt", defaults.window.last_prompt),
+            last_prompt_size: self.number(&map, "window.", "lastPromptSize", 18.0, (11.0, 32.0)) as f32,
+            last_prompt_color: self.color(&map, "window.", "lastPromptColor"),
         };
 
         let map = self.object(raw, "", "projectColors");
@@ -887,6 +895,16 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     add(&["window", "scrollback"], window.scrollback.into(), window.scrollback != base.scrollback);
     add(&["window", "rightToLeft"], window.right_to_left.into(), window.right_to_left != base.right_to_left);
     add(&["window", "lastPrompt"], window.last_prompt.into(), window.last_prompt != base.last_prompt);
+    add(
+        &["window", "lastPromptSize"],
+        number(window.last_prompt_size),
+        window.last_prompt_size != base.last_prompt_size,
+    );
+    add(
+        &["window", "lastPromptColor"],
+        window.last_prompt_color.map_or(Value::Null, |color| hex(color).into()),
+        window.last_prompt_color != base.last_prompt_color,
+    );
     add(
         &["projectColors", "enabled"],
         settings.project_colors.enabled.into(),
@@ -1194,6 +1212,8 @@ mod tests {
             scrollback: 50000,
             right_to_left: false,
             last_prompt: false,
+            last_prompt_size: 24.0,
+            last_prompt_color: Some(0xec8a96),
         };
         settings.animate_working = false;
         settings
@@ -1218,7 +1238,9 @@ mod tests {
                 sidebar_at_start: SidebarAtStart::Remember,
                 scrollback: 10000,
                 right_to_left: true,
-                last_prompt: true
+                last_prompt: true,
+                last_prompt_size: 18.0,
+                last_prompt_color: None,
             }
         );
     }
@@ -1240,6 +1262,20 @@ mod tests {
         let bad = parse(r#"{"window": {"lastPrompt": "yes"}}"#);
         assert_eq!(bad.problems.len(), 1);
         assert!(bad.settings.unwrap().window.last_prompt);
+    }
+
+    #[test]
+    fn last_prompt_card_size_and_colour() {
+        let s = parse("{}").settings.unwrap().window;
+        assert_eq!((s.last_prompt_size, s.last_prompt_color), (18.0, None));
+        let set = parse(r##"{"window": {"lastPromptSize": 22, "lastPromptColor": "#4fc4b4"}}"##).settings.unwrap();
+        assert_eq!((set.window.last_prompt_size, set.window.last_prompt_color), (22.0, Some(0x4fc4b4)));
+        let clamped = parse(r#"{"window": {"lastPromptSize": 99}}"#);
+        assert_eq!(clamped.settings.unwrap().window.last_prompt_size, 32.0);
+        assert_eq!(clamped.problems.len(), 1);
+        let bad = parse(r#"{"window": {"lastPromptColor": "teal"}}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert_eq!(bad.settings.unwrap().window.last_prompt_color, None);
     }
 
     #[test]

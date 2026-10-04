@@ -11,7 +11,7 @@ use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
-use app_core::theme_colors::{Preset, terminal_palette};
+use app_core::theme_colors::{Preset, mix, terminal_palette};
 use app_core::workspace::{ClaudeDirs, DirBadge, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
@@ -1886,7 +1886,8 @@ impl WorkspaceView {
                     .leaves
                     .get(&leaf)
                     .map(|entry| display_path(&entry.launch.cwd, std::env::home_dir().as_deref()));
-                let last_prompt = if cx.global::<SettingsStore>().settings().window.last_prompt {
+                let window_settings = cx.global::<SettingsStore>().settings().window;
+                let last_prompt = if window_settings.last_prompt {
                     self.workspace.leaf_last_prompt(leaf, self.sidebar.read(cx).sessions()).map(str::to_string)
                 } else {
                     None
@@ -1920,7 +1921,15 @@ impl WorkspaceView {
                                         index, title, status, unseen, animate, container, dir, folder, project, &theme,
                                     ))
                                 })
-                                .when_some(last_prompt, |pane, text| pane.child(prompt_card(text, multiple, &theme)))
+                                .when_some(last_prompt, |pane, text| {
+                                    pane.child(prompt_card(
+                                        text,
+                                        multiple,
+                                        window_settings.last_prompt_size,
+                                        window_settings.last_prompt_color,
+                                        &theme,
+                                    ))
+                                })
                                 .child(
                                     div()
                                         .relative()
@@ -1971,37 +1980,35 @@ impl WorkspaceView {
     }
 }
 
-/// Your last prompt in a card above a Claude pane's terminal: a fixed two lines, clipped with an ellipsis.
-fn prompt_card(text: String, multiple: bool, theme: &Theme) -> Div {
+/// Your last prompt in a card above a Claude pane's terminal: a fixed two lines, clipped with an ellipsis, on a
+/// tint of `color` (the theme's accent when unset) with a bar of it on the left. `size` is the text size.
+fn prompt_card(text: String, multiple: bool, size: f32, color: Option<u32>, theme: &Theme) -> Div {
+    let color = color.unwrap_or(theme.tokens.accent);
+    let line = (size * 1.38).round();
     div()
+        .relative()
         .flex_none()
-        .h(theme.ui(56.))
+        .h(theme.ui(line * 2. + 20.))
         .mb(px(6.))
         .when(multiple, |card| card.mt(px(6.)))
         .px(theme.ui(14.))
         .py(theme.ui(9.))
         .flex()
-        .items_start()
+        .items_center()
         .gap(theme.ui(10.))
         .overflow_hidden()
         .rounded(px(RADIUS_SMALL))
-        .bg(rgb(theme.tokens.surface))
+        .bg(rgb(mix(color, theme.tokens.surface, 0.18)))
         .border_1()
-        .border_color(rgb(theme.tokens.line))
-        .child(
-            svg()
-                .path(PROMPT_ICON)
-                .flex_none()
-                .mt(theme.ui(2.))
-                .size(theme.ui(14.))
-                .text_color(rgb(theme.tokens.accent)),
-        )
+        .border_color(rgb(mix(color, theme.tokens.line, 0.55)))
+        .child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(rgb(color)))
+        .child(svg().path(PROMPT_ICON).flex_none().size(theme.ui(size)).text_color(rgb(color)))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(theme.ui(13.))
-                .line_height(theme.ui(18.))
+                .text_size(theme.ui(size))
+                .line_height(theme.ui(line))
                 .text_color(rgb(theme.tokens.text))
                 .line_clamp(2)
                 .text_ellipsis()
