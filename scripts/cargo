@@ -1,18 +1,34 @@
 #!/usr/bin/env bash
 # Run cargo for Gantry the way every session on this machine must: one build at a time (a machine-wide lock shared
-# by all checkouts and worktrees), in the main checkout's target dir (worktrees reuse its built dependencies instead
-# of compiling GPUI from scratch), capped in memory and CPU at the lowest priority.
+# by all checkouts and worktrees), capped in memory and CPU at the lowest priority. A worktree builds in its own
+# target/, seeded once with a copy-on-write (btrfs reflink) copy of the main checkout's compiled dependencies, so it
+# does not compile GPUI from scratch. (Sharing one target/ between checkouts is wrong: cargo then mistakes the other
+# checkout's build of a workspace crate for an up-to-date one.)
 # Usage: scripts/cargo <cargo arguments>, e.g. scripts/cargo test -p daemon
 set -euo pipefail
 
-common=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(dirname "$common")/target}"
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+here=$(git rev-parse --path-format=absolute --git-dir)
+main_target="$(dirname "$common")/target"
 
 lock="${XDG_RUNTIME_DIR:-/tmp}/gantry-cargo.lock"
 exec 9>"$lock"
 if ! flock -n 9; then
     echo "scripts/cargo: waiting for another Gantry build to finish…" >&2
     flock 9
+fi
+
+if [ "$here" != "$common" ] && [ -z "${CARGO_TARGET_DIR:-}" ]; then
+    target="$(git rev-parse --show-toplevel)/target"
+    if [ ! -d "$target/debug/deps" ] && [ -d "$main_target/debug/deps" ]; then
+        echo "scripts/cargo: seeding $target from the main checkout's build (reflink)…" >&2
+        mkdir -p "$target/debug"
+        for part in deps build .fingerprint; do
+            [ -d "$main_target/debug/$part" ] || continue
+            cp -a --reflink=always "$main_target/debug/$part" "$target/debug/" \
+                || echo "scripts/cargo: no reflink copy of $part; it builds from scratch" >&2
+        done
+    fi
 fi
 
 systemd-run --user --scope --quiet -p MemoryMax=8G -p CPUQuota=600% \
