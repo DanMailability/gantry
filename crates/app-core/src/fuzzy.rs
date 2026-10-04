@@ -17,7 +17,7 @@ impl Fuzzy {
             return None;
         }
         Some(Fuzzy {
-            pattern: Pattern::parse(query, CaseMatching::Smart, Normalization::Smart),
+            pattern: Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             buf: Vec::new(),
         })
@@ -41,5 +41,11 @@ mod tests {
         assert!(fuzzy.score("Bump k8s chart").is_none());
         let mut exact = Fuzzy::new("rust").unwrap();
         assert!(exact.score("~/Private/Repos/rust_terminal").unwrap() > exact.score("~/r/u/s/t").unwrap_or(0));
+    }
+
+    #[test]
+    fn case_is_ignored() {
+        assert!(Fuzzy::new("Font").unwrap().score("font fallback").is_some());
+        assert!(Fuzzy::new("font").unwrap().score("Font Fallback").is_some());
     }
 }

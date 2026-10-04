@@ -1,5 +1,6 @@
 //! The recent sessions pop-up (`Ctrl+Shift+R`): closed sessions by project, newest first, a few per project
-//! unless searching or looking at one project; chips for the most recently used projects.
+//! unless looking at one project; while searching, one list of the matches, best first; chips for the most recently
+//! used projects.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -259,24 +260,21 @@ fn content_items(input: &RecentsInput<'_>, listed: &[RecentItem]) -> Vec<RecentI
     items
 }
 
-/// The title matches, by project.
+/// The title matches: by project without a search, else one list, best match first.
 fn title_items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
     let grouped = grouped(input);
+    if let Some(fuzzy) = Fuzzy::new(input.query) {
+        return ranked(input, grouped, fuzzy);
+    }
     let paths: Vec<PathBuf> = grouped.iter().map(|(path, _)| path.clone()).collect();
     let labels = labels(&paths, input.home);
-    let mut fuzzy = Fuzzy::new(input.query);
-    let limited = fuzzy.is_none() && input.project.is_none();
     let mut items = Vec::new();
-    for (path, sessions) in grouped {
+    for (path, matching) in grouped {
         if !in_scope(input, &path) {
             continue;
         }
-        let matching: Vec<&SessionInfo> =
-            sessions.into_iter().filter(|s| keep(&mut fuzzy, session_title(s), &s.cwd, input.home)).collect();
-        if matching.is_empty() {
-            continue;
-        }
-        let cap = if limited && !input.expanded.contains(&path) { input.per_project } else { usize::MAX };
+        let cap =
+            if input.project.is_none() && !input.expanded.contains(&path) { input.per_project } else { usize::MAX };
         let display = display_path(&path, input.home);
         items.push(RecentItem::Heading { label: labels[&path].clone(), display, path: path.clone() });
         for session in matching.iter().take(cap) {
@@ -293,6 +291,40 @@ fn title_items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
         }
     }
     items
+}
+
+/// Sessions matching the search, best first: title matches, then those matching only with their folder; equal
+/// scores newest first.
+fn ranked(input: &RecentsInput<'_>, grouped: Vec<(PathBuf, Vec<&SessionInfo>)>, mut fuzzy: Fuzzy) -> Vec<RecentItem> {
+    let mut matches: Vec<(bool, u32, &SessionInfo, PathBuf)> = Vec::new();
+    for (path, sessions) in grouped {
+        if !in_scope(input, &path) {
+            continue;
+        }
+        for session in sessions {
+            let title = session_title(session);
+            let rank = match fuzzy.score(title) {
+                Some(score) => Some((true, score)),
+                None => fuzzy
+                    .score(&format!("{title} {}", display_path(&session.cwd, input.home)))
+                    .map(|score| (false, score)),
+            };
+            if let Some((in_title, score)) = rank {
+                matches.push((in_title, score, session, path.clone()));
+            }
+        }
+    }
+    matches.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then_with(|| newest_first(&a.2, &b.2)));
+    matches
+        .into_iter()
+        .map(|(_, _, session, project)| RecentItem::Session {
+            session: Box::new(session.clone()),
+            age: age(input.now_ms, session.last_active_ms),
+            project,
+            snippet: None,
+            open: false,
+        })
+        .collect()
 }
 
 /// The project chips: All, the `input.chips` projects with the newest sessions (plus the picked one), then More….
@@ -506,8 +538,35 @@ mod tests {
         let mut fixture = Fixture::of(sessions);
         fixture.query = "title a".into();
         let outline = fixture.outline();
-        assert_eq!((outline[0].as_str(), outline.len()), ("# a", 9), "{outline:?}");
+        assert_eq!(outline.len(), 8, "{outline:?}");
         assert_eq!(fixture.with(counts), (8, 9));
+    }
+
+    fn titled(id: &str, title: &str, cwd: &str, ago_hours: u64) -> SessionInfo {
+        SessionInfo { title: title.into(), ..closed(id, cwd, ago_hours) }
+    }
+
+    #[test]
+    fn searching_lists_title_matches_best_first_across_projects() {
+        let mut fixture = Fixture::of(vec![
+            titled("boundary", "Selected tab cyan boundary", "/r/a", 1),
+            titled("gantry", "Gantry sounds", "/r/a", 2),
+            titled("system", "System sounds", "/r/b", 3),
+            titled("other", "Unrelated", "/r/b", 4),
+        ]);
+        fixture.query = "sound".into();
+        // No headings: a better match in an older project comes before a weak one in the newest; ties go newest first.
+        assert_eq!(fixture.outline(), vec!["gantry", "system", "boundary"]);
+    }
+
+    #[test]
+    fn folder_only_matches_come_after_title_matches() {
+        let mut fixture = Fixture::of(vec![
+            titled("in-folder", "Notes", "/r/sounds", 1),
+            titled("in-title", "Sound check", "/r/a", 5),
+        ]);
+        fixture.query = "sound".into();
+        assert_eq!(fixture.outline(), vec!["in-title", "in-folder"]);
     }
 
     #[test]
@@ -594,7 +653,7 @@ mod tests {
         fixture.query = "title a1".into();
         fixture.hits = vec![hit("b2", "x", vec![]), hit("a1", "y", vec![]), hit("b1", "z", vec![])];
         fixture.content = ContentState::Ready;
-        assert_eq!(fixture.outline(), vec!["# a", "a1", "## Found in conversations", "~b2", "~b1"]);
+        assert_eq!(fixture.outline(), vec!["a1", "## Found in conversations", "~b2", "~b1"]);
     }
 
     #[test]
@@ -640,7 +699,7 @@ mod tests {
         fixture.query = "title a1".into();
         fixture.hits = vec![hit("a1", "x", vec![])];
         fixture.content = ContentState::Ready;
-        assert_eq!(fixture.outline(), vec!["# a", "a1"]);
+        assert_eq!(fixture.outline(), vec!["a1"]);
     }
 
     #[test]

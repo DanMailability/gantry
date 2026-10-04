@@ -409,6 +409,7 @@ impl RecentsView {
                             ),
                     );
                 }
+                // While searching the list is one ranked list without headings, so each row names its project.
                 RecentItem::Session { session, age, project, snippet: None, .. } => row.child(
                     pill()
                         .when_some(theme.project(project), |pill, color| {
@@ -428,6 +429,11 @@ impl RecentsView {
                             dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
                                 .map(|badge| dir_badge(&badge, &theme)),
                         )
+                        .when(!self.query.text().trim().is_empty(), |pill| {
+                            pill.child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(
+                                project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                            ))
+                        })
                         .child(
                             div()
                                 .flex_none()
