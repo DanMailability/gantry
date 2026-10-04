@@ -284,6 +284,8 @@ pub struct Settings {
     pub project_colors: ProjectColors,
     /// Whether Working sessions show the moving glow.
     pub animate_working: bool,
+    /// The first-run wizard has been answered (imported or skipped), so it does not open by itself.
+    pub setup_done: bool,
 }
 
 /// The `projectColors` setting: whether projects are coloured, and the colours picked per folder.
@@ -345,6 +347,7 @@ impl Default for Settings {
             },
             project_colors: ProjectColors::default(),
             animate_working: true,
+            setup_done: false,
         }
     }
 }
@@ -671,6 +674,7 @@ impl Reader {
 
         let ui_font_size = self.number(raw, "", "uiFontSize", 14.0, (11.0, 20.0)) as f32;
         let animate_working = self.bool(raw, "", "animateWorking", true);
+        let setup_done = self.bool(raw, "", "setupDone", false);
 
         let map = self.object(raw, "", "alerts");
         let default = defaults.alerts;
@@ -770,6 +774,7 @@ impl Reader {
             window,
             project_colors,
             animate_working,
+            setup_done,
         }
     }
 }
@@ -890,6 +895,7 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         .collect();
     add(&["projectColors", "folders"], Value::Object(colors), !settings.project_colors.folders.is_empty());
     add(&["animateWorking"], settings.animate_working.into(), settings.animate_working != default.animate_working);
+    add(&["setupDone"], settings.setup_done.into(), settings.setup_done != default.setup_done);
     out
 }
 
@@ -996,6 +1002,28 @@ mod tests {
         let path = dir.path().join("settings.json");
         save(&path, &settings, &Map::new()).unwrap();
         assert!(read_json(&path).get("animateWorking").is_none(), "the default writes nothing");
+    }
+
+    #[test]
+    fn setup_done_defaults_off_and_round_trips() {
+        assert!(!Settings::default().setup_done);
+        let loaded = parse(r#"{"setupDone": true}"#);
+        assert!(loaded.problems.is_empty());
+        let mut settings = loaded.settings.unwrap();
+        assert!(settings.setup_done);
+        let bad = parse(r#"{"setupDone": "yes"}"#);
+        assert_eq!(bad.problems.iter().map(|problem| problem.key.as_str()).collect::<Vec<_>>(), ["setupDone"]);
+        assert!(!bad.settings.unwrap().setup_done);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let raw = serde_json::json!({"unknownKey": 1, "theme": "Mist light"}).as_object().unwrap().clone();
+        save(&path, &settings, &raw).unwrap();
+        let written = read_json(&path);
+        assert_eq!(written["setupDone"], true);
+        assert_eq!(written["unknownKey"], 1, "other keys survive");
+        settings.setup_done = false;
+        save(&path, &settings, &raw).unwrap();
+        assert!(read_json(&path).get("setupDone").is_none(), "the default writes nothing");
     }
 
     fn read_json(path: &Path) -> Value {
