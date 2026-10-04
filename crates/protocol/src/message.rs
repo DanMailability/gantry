@@ -174,18 +174,18 @@ pub fn claude_session<'a>(claude: bool, program: &str, args: &'a [String]) -> Op
         .map(|pair| pair[1].as_str())
 }
 
-/// Terminal colours the GUI draws with, 0xRRGGBB (the daemon answers colour queries from them).
+/// Terminal colors the GUI draws with, 0xRRGGBB (the daemon answers color queries from them).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaletteColors {
-    /// Default text colour.
+    /// Default text color.
     pub foreground: u32,
-    /// Default background colour.
+    /// Default background color.
     pub background: u32,
-    /// Cursor colour.
+    /// Cursor color.
     pub cursor: u32,
     /// Background of selected cells.
     pub selection: u32,
-    /// The 16 ANSI colours: 0-7 normal, 8-15 bright.
+    /// The 16 ANSI colors: 0-7 normal, 8-15 bright.
     pub ansi: [u32; 16],
 }
 
@@ -230,7 +230,7 @@ pub enum ClientMessage {
         /// Cell height in pixels (for size queries).
         cell_height: u16,
     },
-    /// The terminal colours the GUI uses now; the daemon answers colour queries from them.
+    /// The terminal colors the GUI uses now; the daemon answers color queries from them.
     SetPalette(PaletteColors),
     /// The user focused this pane.
     Focus {

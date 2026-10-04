@@ -211,7 +211,7 @@ impl SettingsView {
                     row(
                         theme,
                         "Prompt background",
-                        "A tint of this colour. The first swatch is the theme's accent.",
+                        "A tint of this color. The first swatch is the theme's accent.",
                         swatches,
                         color_reset,
                     ),

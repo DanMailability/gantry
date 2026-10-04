@@ -1,4 +1,4 @@
-//! The sidebar: the Active list (every pane and every Claude session running outside Gantry, by project), coloured
+//! The sidebar: the Active list (every pane and every Claude session running outside Gantry, by project), colored
 //! by what each needs, with a fuzzy filter.
 
 use std::collections::HashSet;
@@ -554,7 +554,7 @@ impl SidebarView {
                     None => pill.hover(|style| style.bg(rgb(theme.tokens.raised))),
                 })
         };
-        // The row's project colour, as a side line inside the pill's left edge.
+        // The row's project color, as a side line inside the pill's left edge.
         let line = row.project.as_ref().and_then(|root| theme.project(root));
         let lined = |pill: gpui::Div| match line {
             Some(color) => pill.relative().pl(theme.ui(18. - inset)).child(side_line(color, &theme)),

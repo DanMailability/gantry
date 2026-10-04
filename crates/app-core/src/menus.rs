@@ -54,7 +54,7 @@ pub enum MenuAction {
     OpenInVsCode(Vec<String>),
     /// Mark a pane's session as having a result the user has not seen (its tab and row turn Done).
     MarkUnread(NodeId),
-    /// Remove a pane's unread mark (its tab and row go back to the session's own colour).
+    /// Remove a pane's unread mark (its tab and row go back to the session's own color).
     MarkRead(NodeId),
     /// Close one pane.
     ClosePane(NodeId),
@@ -82,11 +82,11 @@ pub enum MenuAction {
     RecentsFor(PathBuf),
     /// Continue the session of an exited pane.
     Continue(NodeId),
-    /// Set (`Some`) or clear (`None`, automatic) the colour picked for a project.
+    /// Set (`Some`) or clear (`None`, automatic) the color picked for a project.
     SetProjectColor {
         /// The project root.
         root: PathBuf,
-        /// The colour, or `None` for the automatic one.
+        /// The color, or `None` for the automatic one.
         color: Option<ProjectColor>,
     },
     /// Take over a session running outside Gantry.
@@ -105,11 +105,11 @@ pub struct MenuEntry {
     pub label: String,
     /// The shortcut hint shown beside it.
     pub shortcut: Option<Shortcut>,
-    /// Drawn in the accent colour (the row's main action).
+    /// Drawn in the accent color (the row's main action).
     pub accent: bool,
     /// What picking it does.
     pub action: MenuAction,
-    /// Drawn as a colour swatch (in a grid) instead of a text row.
+    /// Drawn as a color swatch (in a grid) instead of a text row.
     pub swatch: Option<ProjectColor>,
     /// Marked as the current choice.
     pub checked: bool,
@@ -138,7 +138,7 @@ pub struct MenuContext {
     pub dirs: Vec<(String, bool, bool)>,
     /// Whether the folder is pinned as a favorite.
     pub favorite: bool,
-    /// The project's colour: `None` = project colours are off (no Colour menu), `Some(None)` = automatic,
+    /// The project's color: `None` = project colors are off (no Color menu), `Some(None)` = automatic,
     /// `Some(Some(c))` = picked.
     pub project_color: Option<Option<ProjectColor>>,
 }
@@ -201,8 +201,8 @@ fn accented(label: &str, action: MenuAction) -> MenuItem {
     })
 }
 
-/// "Colour ▸": the eight swatches, then "Automatic colour". `current` is the project's pick (`None` = automatic).
-fn colour_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
+/// "Color ▸": the eight swatches, then "Automatic color". `current` is the project's pick (`None` = automatic).
+fn color_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
     let mut items: Vec<MenuItem> = ProjectColor::ALL
         .into_iter()
         .map(|color| {
@@ -220,14 +220,14 @@ fn colour_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
         })
         .collect();
     items.push(MenuItem::Entry(MenuEntry {
-        label: "Automatic colour".into(),
+        label: "Automatic color".into(),
         shortcut: None,
         accent: false,
         action: MenuAction::SetProjectColor { root: root.to_path_buf(), color: None },
         swatch: None,
         checked: current.is_none(),
     }));
-    MenuItem::Submenu { label: "Colour".into(), items }
+    MenuItem::Submenu { label: "Color".into(), items }
 }
 
 /// "New Claude here with ▸" and the config dirs, when there are two or more.
@@ -424,7 +424,7 @@ pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &M
         entry("Pin as favorite", MenuAction::PinFavorite(path.to_path_buf()))
     });
     if let Some(current) = context.project_color {
-        items.push(colour_menu(path, current));
+        items.push(color_menu(path, current));
     }
     items.extend([
         with_shortcut("Recent sessions here", Shortcut::Recents, MenuAction::RecentsFor(path.to_path_buf())),
@@ -849,16 +849,16 @@ mod tests {
     }
 
     #[test]
-    fn project_menu_has_colour_submenu_when_on() {
+    fn project_menu_has_color_submenu_when_on() {
         let mut ctx = MenuContext { project_color: Some(Some(ProjectColor::Teal)), ..MenuContext::default() };
         let items = project_menu(Path::new("/r/app"), None, &ctx);
-        let Some(MenuItem::Submenu { label, items: colours }) =
-            items.iter().find(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Colour"))
+        let Some(MenuItem::Submenu { label, items: colors }) =
+            items.iter().find(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Color"))
         else {
-            panic!("no Colour submenu")
+            panic!("no Color submenu")
         };
-        assert_eq!(label, "Colour");
-        let swatches: Vec<&MenuEntry> = colours
+        assert_eq!(label, "Color");
+        let swatches: Vec<&MenuEntry> = colors
             .iter()
             .filter_map(|i| match i {
                 MenuItem::Entry(e) if e.swatch.is_some() => Some(e),
@@ -868,18 +868,18 @@ mod tests {
         assert_eq!(swatches.len(), 8);
         assert!(swatches.iter().any(|e| e.checked && e.swatch == Some(ProjectColor::Teal)));
         assert_eq!(swatches.iter().filter(|e| e.checked).count(), 1);
-        assert!(colours.iter().any(|i| matches!(i, MenuItem::Entry(e) if e.label == "Automatic colour" && !e.checked
+        assert!(colors.iter().any(|i| matches!(i, MenuItem::Entry(e) if e.label == "Automatic color" && !e.checked
             && e.action == MenuAction::SetProjectColor { root: "/r/app".into(), color: None })));
         ctx.project_color = None;
         assert!(
             !project_menu(Path::new("/r/app"), None, &ctx)
                 .iter()
-                .any(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Colour"))
+                .any(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Color"))
         );
     }
 
     #[test]
-    fn the_context_reads_the_folders_colour_from_settings() {
+    fn the_context_reads_the_folders_color_from_settings() {
         let mut settings = Settings::default();
         assert_eq!(MenuContext::for_folder(&settings, Path::new("/r/app")).project_color, Some(None));
         settings.project_colors.folders.insert("/r/app".into(), ProjectColor::Lime);

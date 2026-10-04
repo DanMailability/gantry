@@ -166,7 +166,7 @@ pub struct ClaudeDir {
     pub command: String,
     /// Arguments placed before Gantry's own.
     pub args: Vec<String>,
-    /// Colour of its badge; `None` = the automatic colour of its path.
+    /// Color of its badge; `None` = the automatic color of its path.
     pub color: Option<ProjectColor>,
 }
 
@@ -245,7 +245,7 @@ pub struct WindowSettings {
     pub last_prompt: bool,
     /// Text size of the last prompt card (11 to 32, scaled with the interface size).
     pub last_prompt_size: f32,
-    /// Background colour of the last prompt card; unset = the theme's accent.
+    /// Background color of the last prompt card; unset = the theme's accent.
     pub last_prompt_color: Option<u32>,
 }
 
@@ -264,7 +264,7 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Status fills.
     pub status_fills: StatusFills,
-    /// Colour of the ring around the selected sidebar row (`None` = the theme's accent).
+    /// Color of the ring around the selected sidebar row (`None` = the theme's accent).
     pub selection: Option<u32>,
     /// Terminal font.
     pub terminal_font: TerminalFont,
@@ -288,7 +288,7 @@ pub struct Settings {
     pub favorites: Vec<PathBuf>,
     /// Window behaviour.
     pub window: WindowSettings,
-    /// Project colours.
+    /// Project colors.
     pub project_colors: ProjectColors,
     /// Whether Working sessions show the moving glow.
     pub animate_working: bool,
@@ -296,12 +296,12 @@ pub struct Settings {
     pub setup_done: bool,
 }
 
-/// The `projectColors` setting: whether projects are coloured, and the colours picked per folder.
+/// The `projectColors` setting: whether projects are colored, and the colors picked per folder.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectColors {
-    /// Whether projects get a colour at all.
+    /// Whether projects get a color at all.
     pub enabled: bool,
-    /// Project root to the colour picked for it; others get the automatic colour.
+    /// Project root to the color picked for it; others get the automatic color.
     pub folders: BTreeMap<PathBuf, ProjectColor>,
 }
 
@@ -311,13 +311,13 @@ impl Default for ProjectColors {
     }
 }
 
-/// The colour of the project at `root`: its pick, else the automatic one; `None` when project colours are off.
+/// The color of the project at `root`: its pick, else the automatic one; `None` when project colors are off.
 pub fn project_color(settings: &Settings, root: &Path) -> Option<ProjectColor> {
     settings.project_colors.color_of(root)
 }
 
 impl ProjectColors {
-    /// The colour of the project at `root`: its pick, else the automatic one; `None` when colours are off.
+    /// The color of the project at `root`: its pick, else the automatic one; `None` when colors are off.
     pub fn color_of(&self, root: &Path) -> Option<ProjectColor> {
         self.enabled.then(|| self.folders.get(root).copied().unwrap_or_else(|| ProjectColor::auto(root)))
     }
@@ -505,11 +505,11 @@ impl Reader {
     fn color(&mut self, map: &Map<String, Value>, prefix: &str, key: &str) -> Option<u32> {
         match map.get(key)? {
             Value::String(text) => parse_hex(text).or_else(|| {
-                self.problem(&format!("{prefix}{key}"), format!("\"{text}\" is not a #rrggbb colour"));
+                self.problem(&format!("{prefix}{key}"), format!("\"{text}\" is not a #rrggbb color"));
                 None
             }),
             _ => {
-                self.problem(&format!("{prefix}{key}"), "expected a #rrggbb colour".into());
+                self.problem(&format!("{prefix}{key}"), "expected a #rrggbb color".into());
                 None
             }
         }
@@ -583,10 +583,7 @@ impl Reader {
                 None => None,
                 Some(Value::String(name)) if ProjectColor::from_name(name).is_some() => ProjectColor::from_name(name),
                 Some(_) => {
-                    self.problem(
-                        &format!("{key}.color"),
-                        "expected a colour name; the automatic colour is used".into(),
-                    );
+                    self.problem(&format!("{key}.color"), "expected a color name; the automatic color is used".into());
                     None
                 }
             };
@@ -767,7 +764,7 @@ impl Reader {
                 }
                 None => self.problem(
                     &format!("projectColors.folders.{folder}"),
-                    "expected a colour name (blue, amber, teal, violet, rose, lime, orange, pink); dropped".into(),
+                    "expected a color name (blue, amber, teal, violet, rose, lime, orange, pink); dropped".into(),
                 ),
             }
         }
@@ -991,7 +988,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_dir_colour_round_trips_and_a_bad_one_keeps_the_dir() {
+    fn a_dir_color_round_trips_and_a_bad_one_keeps_the_dir() {
         let loaded = parse(
             r#"{"claudeDirs": [
             {"name": "A", "path": "/a", "color": "violet"},
@@ -1012,7 +1009,7 @@ mod tests {
         let written = read_json(&path);
         assert_eq!(written["claudeDirs"][0]["color"], "violet");
         assert_eq!(written["claudeDirs"][1]["color"], "teal");
-        assert!(written["claudeDirs"][2].get("color").is_none(), "no colour picked, none written");
+        assert!(written["claudeDirs"][2].get("color").is_none(), "no color picked, none written");
     }
 
     #[test]
@@ -1272,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn last_prompt_card_size_and_colour() {
+    fn last_prompt_card_size_and_color() {
         let s = parse("{}").settings.unwrap().window;
         assert_eq!((s.last_prompt_size, s.last_prompt_color), (18.0, None));
         let set = parse(r##"{"window": {"lastPromptSize": 22, "lastPromptColor": "#4fc4b4"}}"##).settings.unwrap();

@@ -235,7 +235,7 @@ impl DaemonClient {
         self.send(&ClientMessage::Resize { pane, cols, rows, cell_width, cell_height });
     }
 
-    /// Tell the daemon the terminal colours in use, so it answers colour queries with them.
+    /// Tell the daemon the terminal colors in use, so it answers color queries with them.
     pub fn set_palette(&self, colors: PaletteColors) {
         self.send(&ClientMessage::SetPalette(colors));
     }

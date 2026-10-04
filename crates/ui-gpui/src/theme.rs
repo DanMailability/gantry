@@ -17,12 +17,12 @@ use gpui::{
 
 use crate::assets::CONTAINER_ICON;
 
-/// The colours and sizes views draw with, a GPUI global replaced whenever the settings change.
+/// The colors and sizes views draw with, a GPUI global replaced whenever the settings change.
 #[derive(Clone)]
 pub(crate) struct Theme {
     /// Which preset is drawn.
     pub preset: Preset,
-    /// The preset's app colours.
+    /// The preset's app colors.
     pub tokens: Tokens,
     /// The user's status fills that are readable on this preset.
     pub fills: StatusFills,
@@ -37,17 +37,17 @@ pub(crate) struct Theme {
 impl Global for Theme {}
 
 impl Theme {
-    /// The colours of a session row, tab or pane header in `tone`.
+    /// The colors of a session row, tab or pane header in `tone`.
     pub fn tone(&self, tone: Tone) -> ToneColors {
         tone_colors(self.preset, &self.fills, tone)
     }
 
-    /// The colour of the project at `root` on this theme, if project colours are on.
+    /// The color of the project at `root` on this theme, if project colors are on.
     pub fn project(&self, root: &Path) -> Option<u32> {
         self.project_colors.color_of(root).map(|color| color.value(self.preset))
     }
 
-    /// The colour of the ring around the selected row: the `selection` setting, else the accent.
+    /// The color of the ring around the selected row: the `selection` setting, else the accent.
     pub fn selection(&self) -> u32 {
         self.selection.unwrap_or(self.tokens.accent)
     }
@@ -97,7 +97,7 @@ pub(crate) fn container_icon(ink: u32, theme: &Theme) -> Svg {
     svg().path(CONTAINER_ICON).flex_none().size(theme.ui(14.)).text_color(rgba((ink << 8) | 0xd9))
 }
 
-/// A config dir's badge: its letter on its colour. Shown only with two or more config dirs.
+/// A config dir's badge: its letter on its color. Shown only with two or more config dirs.
 pub(crate) fn dir_badge(badge: &DirBadge, theme: &Theme) -> Div {
     div()
         .flex_none()
@@ -113,10 +113,10 @@ pub(crate) fn dir_badge(badge: &DirBadge, theme: &Theme) -> Div {
         .child(badge.letter.clone())
 }
 
-/// How much of the text colour (alpha, of 255) tints a project's group box in the sidebar: about 11%.
+/// How much of the text color (alpha, of 255) tints a project's group box in the sidebar: about 11%.
 const GROUP_TINT_ALPHA: u32 = 0x1c;
 
-/// The colour laid over a project's group box in the sidebar: `text` at [`GROUP_TINT_ALPHA`], as `rgba` bits.
+/// The color laid over a project's group box in the sidebar: `text` at [`GROUP_TINT_ALPHA`], as `rgba` bits.
 pub(crate) fn group_tint(text: u32) -> u32 {
     (text << 8) | GROUP_TINT_ALPHA
 }
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn the_group_tint_is_the_text_colour_at_about_eleven_percent() {
+    fn the_group_tint_is_the_text_color_at_about_eleven_percent() {
         assert_eq!(group_tint(0xe7eaf3), 0xe7ea_f31c);
         assert_eq!(group_tint(0x1f2533) & 0xff, 0x1c);
     }
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn project_colours_follow_the_preset_and_the_switch() {
+    fn project_colors_follow_the_preset_and_the_switch() {
         let root = Path::new("/r/app");
         let mut dark = theme(Preset::Mist);
         let light = Theme { preset: Preset::MistLight, ..dark.clone() };

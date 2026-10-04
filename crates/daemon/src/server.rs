@@ -86,7 +86,7 @@ struct Client {
 #[derive(Default)]
 struct State {
     panes: HashMap<PaneId, Pane>,
-    /// Colours the GUI draws with; panes answer colour queries from them.
+    /// Colors the GUI draws with; panes answer color queries from them.
     palette: Palette,
     client: Option<Client>,
     next_pane: PaneId,

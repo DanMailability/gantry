@@ -61,18 +61,18 @@ pub struct ResolvedDir {
     pub command: String,
     /// Arguments placed before Gantry's own.
     pub args: Vec<String>,
-    /// Picked badge colour.
+    /// Picked badge color.
     pub color: Option<ProjectColor>,
 }
 
-/// A config dir's mark on sessions, tabs and pane headers: the first letter of its name on its colour.
+/// A config dir's mark on sessions, tabs and pane headers: the first letter of its name on its color.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirBadge {
     /// The dir's name.
     pub name: String,
     /// Its first letter, upper-cased.
     pub letter: String,
-    /// The picked colour, else the automatic colour of its path.
+    /// The picked color, else the automatic color of its path.
     pub color: ProjectColor,
 }
 
@@ -809,7 +809,7 @@ mod tests {
     use crate::settings::ClaudeDir;
 
     #[test]
-    fn a_dirs_badge_is_its_upper_cased_first_letter_on_its_colour() {
+    fn a_dirs_badge_is_its_upper_cased_first_letter_on_its_color() {
         let dir = |name: &str, color| ResolvedDir {
             name: name.into(),
             path: "/c/one".into(),
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unpicked_dir_colour_follows_its_path_not_its_name() {
+    fn an_unpicked_dir_color_follows_its_path_not_its_name() {
         let dir = |name: &str| ResolvedDir {
             name: name.into(),
             path: "/c/one".into(),
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_dirs_carry_the_picked_colour() {
+    fn resolved_dirs_carry_the_picked_color() {
         let settings = Settings {
             claude_dirs: vec![
                 ClaudeDir {

@@ -216,7 +216,7 @@ pub struct WorkspaceView {
     /// them read.
     marked_unread: HashSet<NodeId>,
     _activation: Subscription,
-    /// The theme whose terminal colours the daemon was last told.
+    /// The theme whose terminal colors the daemon was last told.
     sent_palette: Option<Preset>,
     _theme: Subscription,
     _appearance: Subscription,
@@ -345,7 +345,7 @@ impl WorkspaceView {
             this.spawn_leaf(leaf, None, cx);
         }
         this.focus_current(window, cx);
-        // Every connection starts with the GUI's colours: the daemon outlives the GUI.
+        // Every connection starts with the GUI's colors: the daemon outlives the GUI.
         this.apply_settings(cx);
         this.save(cx);
         let store = cx.global::<SettingsStore>();
@@ -355,7 +355,7 @@ impl WorkspaceView {
         this
     }
 
-    /// Take over what the settings say that is not drawn by `render`: pane colours, the daemon's palette, and the
+    /// Take over what the settings say that is not drawn by `render`: pane colors, the daemon's palette, and the
     /// alert threshold.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
         let preset = theme(cx).preset;
@@ -573,7 +573,7 @@ impl WorkspaceView {
         dir_badge_for(cx.global::<SettingsStore>().settings(), path.as_deref())
     }
 
-    /// The colour of the project `leaf` belongs to (its session's directory, else the pane's), if project colours are on.
+    /// The color of the project `leaf` belongs to (its session's directory, else the pane's), if project colors are on.
     fn leaf_project_color(&self, leaf: NodeId, cx: &App) -> Option<u32> {
         let cwd = self.leaf_cwd(leaf, cx)?;
         theme(cx).project(&self.sidebar.read(cx).project_of(&cwd))
@@ -1189,7 +1189,7 @@ impl WorkspaceView {
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(RADIUS_SMALL))
-            // 70 % of the terminal colour behind both buttons, so they read over text.
+            // 70 % of the terminal color behind both buttons, so they read over text.
             .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))

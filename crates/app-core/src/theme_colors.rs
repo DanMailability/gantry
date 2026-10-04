@@ -1,4 +1,4 @@
-//! Colour presets (Mist, Mist light) and status colours, including those derived from a user-chosen fill.
+//! Color presets (Mist, Mist light) and status colors, including those derived from a user-chosen fill.
 
 use std::path::Path;
 
@@ -15,7 +15,7 @@ pub enum Preset {
     MistLight,
 }
 
-/// A preset's app colours, `0xRRGGBB`.
+/// A preset's app colors, `0xRRGGBB`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tokens {
     /// Behind everything: the window and the gaps between panes.
@@ -38,7 +38,7 @@ pub struct Tokens {
     pub terminal: u32,
 }
 
-/// Colours of a session row, tab or pane header in a given tone.
+/// Colors of a session row, tab or pane header in a given tone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ToneColors {
     /// Background (`None` = the surface shows through).
@@ -73,7 +73,7 @@ const MIST_LIGHT: Tokens = Tokens {
     terminal: 0xf8f9fc,
 };
 
-/// The app colours of `preset`.
+/// The app colors of `preset`.
 pub fn tokens(preset: Preset) -> Tokens {
     match preset {
         Preset::Mist => MIST,
@@ -99,7 +99,7 @@ pub fn resolve(choice: ThemeChoice, system_dark: bool) -> Preset {
     }
 }
 
-/// A project's colour: one of eight, each with a value per theme preset.
+/// A project's color: one of eight, each with a value per theme preset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectColor {
     /// Blue.
@@ -121,7 +121,7 @@ pub enum ProjectColor {
 }
 
 impl ProjectColor {
-    /// Every colour, in palette order.
+    /// Every color, in palette order.
     pub const ALL: [ProjectColor; 8] =
         [Self::Blue, Self::Amber, Self::Teal, Self::Violet, Self::Rose, Self::Lime, Self::Orange, Self::Pink];
 
@@ -139,7 +139,7 @@ impl ProjectColor {
         }
     }
 
-    /// The colour called `name` (lower case).
+    /// The color called `name` (lower case).
     pub fn from_name(name: &str) -> Option<ProjectColor> {
         Self::ALL.into_iter().find(|color| color.name() == name)
     }
@@ -162,7 +162,7 @@ impl ProjectColor {
         }
     }
 
-    /// The automatic colour of the project at `root`: FNV-1a 64 of the path's bytes, mod 8 (stable across runs).
+    /// The automatic color of the project at `root`: FNV-1a 64 of the path's bytes, mod 8 (stable across runs).
     pub fn auto(root: &Path) -> ProjectColor {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in root.as_os_str().as_encoded_bytes() {
@@ -190,7 +190,7 @@ fn default_tone_colors(preset: Preset, tone: Tone) -> ToneColors {
     ToneColors { fill, ink, dot }
 }
 
-/// The colours of `tone` in `preset`, with the user's fills applied (via [`derive`]) where set and readable.
+/// The colors of `tone` in `preset`, with the user's fills applied (via [`derive`]) where set and readable.
 pub fn tone_colors(preset: Preset, fills: &StatusFills, tone: Tone) -> ToneColors {
     let custom = match tone {
         Tone::NeedsInput => fills.needs_input,
@@ -222,7 +222,7 @@ pub fn readable_fill(fill: u32, tokens: &Tokens) -> bool {
     contrast(derive(fill, tokens).ink, fill) >= 4.5
 }
 
-/// WCAG relative luminance of an `0xRRGGBB` colour.
+/// WCAG relative luminance of an `0xRRGGBB` color.
 pub fn luminance(color: u32) -> f64 {
     let channel = |shift: u32| {
         let c = f64::from((color >> shift) & 0xff) / 255.0;
@@ -231,7 +231,7 @@ pub fn luminance(color: u32) -> f64 {
     0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
 }
 
-/// WCAG contrast ratio between two `0xRRGGBB` colours.
+/// WCAG contrast ratio between two `0xRRGGBB` colors.
 pub fn contrast(a: u32, b: u32) -> f64 {
     let (la, lb) = (luminance(a), luminance(b));
     let (light, dark) = if la > lb { (la, lb) } else { (lb, la) };
@@ -337,7 +337,7 @@ mod tests {
                 .iter()
                 .map(|p| ProjectColor::auto(Path::new(p)))
                 .collect();
-        assert!(distinct.len() >= 4, "ten paths should spread over several colours");
+        assert!(distinct.len() >= 4, "ten paths should spread over several colors");
     }
 
     #[cfg(unix)]

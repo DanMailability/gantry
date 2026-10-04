@@ -83,7 +83,7 @@ fn shown(settings: &Settings, action: &Action, platform: Platform) -> String {
     shortcuts::label(shortcuts::current(action.id, &settings.shortcuts, platform).as_deref(), platform)
 }
 
-/// The `!` badge of a key taken from the terminal, in the Needs input colours.
+/// The `!` badge of a key taken from the terminal, in the Needs input colors.
 fn warn_mark(theme: &Theme) -> Div {
     let colors = theme.tone(Tone::NeedsInput);
     div()

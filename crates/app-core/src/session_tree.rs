@@ -9,7 +9,7 @@ use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
 use crate::fuzzy::Fuzzy;
 use crate::split_tree::NodeId;
 
-/// How a session's row is coloured: what it needs from the user, most urgent first.
+/// How a session's row is colored: what it needs from the user, most urgent first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tone {
     /// Waiting for an answer.
@@ -235,7 +235,7 @@ pub enum RowKind {
     Session {
         /// The session.
         session: SessionInfo,
-        /// Its colour.
+        /// Its color.
         tone: Tone,
         /// Right-hand note: what it is doing and since when.
         note: String,
@@ -246,7 +246,7 @@ pub enum RowKind {
     Pane {
         /// The pane.
         entry: PaneEntry,
-        /// Its colour.
+        /// Its color.
         tone: Tone,
         /// Right-hand note.
         note: String,

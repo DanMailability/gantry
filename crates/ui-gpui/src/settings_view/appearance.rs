@@ -1,4 +1,4 @@
-//! The Appearance section: theme, status colours and fonts.
+//! The Appearance section: theme, status colors and fonts.
 
 use app_core::session_tree::Tone;
 use app_core::settings::{Settings, StatusFills, ThemeChoice, parse_hex};
@@ -103,7 +103,7 @@ const THEME_CARDS: [(ThemeChoice, &str, &str); 3] = [
     (ThemeChoice::System, "Follow system", "Dark or light, as the desktop is."),
 ];
 
-/// The ring colours offered besides the theme's accent, each readable against the sidebar.
+/// The ring colors offered besides the theme's accent, each readable against the sidebar.
 fn selection_choices(preset: Preset) -> [u32; 4] {
     match preset {
         Preset::Mist => [0xffffff, 0xb79cff, 0xff7eb6, 0xffe066],
@@ -111,12 +111,12 @@ fn selection_choices(preset: Preset) -> [u32; 4] {
     }
 }
 
-/// "3 folders have a colour you picked." ("1 folder has" in the singular).
+/// "3 folders have a color you picked." ("1 folder has" in the singular).
 fn picked_text(count: usize) -> String {
     if count == 1 {
-        "1 folder has a colour you picked.".into()
+        "1 folder has a color you picked.".into()
     } else {
-        format!("{count} folders have a colour you picked.")
+        format!("{count} folders have a color you picked.")
     }
 }
 
@@ -186,9 +186,9 @@ impl SettingsView {
             .flex_col()
             .gap(theme.ui(26.))
             .child(self.theme_cards(theme, settings, window, cx))
-            .child(self.status_colours(theme, settings, window, cx))
+            .child(self.status_colors(theme, settings, window, cx))
             .child(self.interface_group(theme, settings, window, cx))
-            .child(self.project_colours(theme, settings, window, cx))
+            .child(self.project_colors(theme, settings, window, cx))
     }
 
     fn theme_cards(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -275,7 +275,7 @@ impl SettingsView {
         )
     }
 
-    fn status_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn status_colors(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let mut rows: Vec<Div> = Status::ALL
             .map(|status| {
                 let index = status as usize;
@@ -309,7 +309,7 @@ impl SettingsView {
                 let open_picker = handler(move |this, window, cx| this.open_fill_picker(status, window, cx));
                 let picker_button = self
                     .pressable(
-                        "status-colour",
+                        "status-color",
                         index,
                         Some(if open { theme.tokens.accent } else { theme.tokens.line }),
                         window,
@@ -377,7 +377,7 @@ impl SettingsView {
             toggle,
             reset,
         ));
-        group(theme, "Status colours", Some("Pick a fill for each status. Text and dot colours follow it."), rows)
+        group(theme, "Status colors", Some("Pick a fill for each status. Text and dot colors follow it."), rows)
     }
 
     fn interface_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -428,10 +428,10 @@ impl SettingsView {
         )
     }
 
-    fn project_colours(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn project_colors(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
         let enabled = settings.project_colors.enabled;
         let switch = self.switch(
-            "project-colours",
+            "project-colors",
             0,
             enabled,
             window,
@@ -439,7 +439,7 @@ impl SettingsView {
             change(move |settings| settings.project_colors.enabled = !enabled),
         );
         let switch_reset = self.reset_slot(
-            "reset-project-colours",
+            "reset-project-colors",
             0,
             settings,
             |s| s.project_colors.enabled,
@@ -471,8 +471,8 @@ impl SettingsView {
         let mut rows = vec![
             row(
                 theme,
-                "Project colours",
-                "Each project gets a colour in the sidebar, on its tabs and in recent sessions. Change one from the project's right-click menu.",
+                "Project colors",
+                "Each project gets a color in the sidebar, on its tabs and in recent sessions. Change one from the project's right-click menu.",
                 switch,
                 switch_reset,
             ),
@@ -480,16 +480,16 @@ impl SettingsView {
         ];
         if picked > 0 {
             let forget = self.button(
-                "forget-colours",
+                "forget-colors",
                 0,
                 "Forget all",
                 window,
                 cx,
                 change(|settings| settings.project_colors.folders.clear()),
             );
-            rows.push(row(theme, "Picked colours", picked_text(picked), forget, empty_slot(theme)));
+            rows.push(row(theme, "Picked colors", picked_text(picked), forget, empty_slot(theme)));
         }
-        group(theme, "Project colours", None, rows)
+        group(theme, "Project colors", None, rows)
     }
 
     fn fill_picker(
@@ -586,7 +586,7 @@ impl SettingsView {
                         .text_color(rgb(theme.tokens.muted))
                         .child(div().flex_none().mt(theme.ui(4.)).size(theme.ui(8.)).rounded_full().bg(rgb(tone.dot)))
                         .child(div().flex_1().min_w_0().child(text)),
-                    None => muted(theme, "Type a colour as #rrggbb"),
+                    None => muted(theme, "Type a color as #rrggbb"),
                 }),
         )
         .with_priority(1)
@@ -599,9 +599,9 @@ mod tests {
     use app_core::theme_colors::tokens;
 
     #[test]
-    fn picked_colours_text_is_singular_for_one_folder() {
-        assert_eq!(picked_text(1), "1 folder has a colour you picked.");
-        assert_eq!(picked_text(3), "3 folders have a colour you picked.");
+    fn picked_colors_text_is_singular_for_one_folder() {
+        assert_eq!(picked_text(1), "1 folder has a color you picked.");
+        assert_eq!(picked_text(3), "3 folders have a color you picked.");
     }
 
     #[test]
