@@ -238,6 +238,15 @@ pub fn contrast(a: u32, b: u32) -> f64 {
     (light + 0.05) / (dark + 0.05)
 }
 
+/// `top` laid over `under` at `amount` (0..=1) of opacity, as `0xRRGGBB`.
+pub fn mix(top: u32, under: u32, amount: f32) -> u32 {
+    let channel = |shift: u32| {
+        let (t, u) = (((top >> shift) & 0xff) as f32, ((under >> shift) & 0xff) as f32);
+        ((t * amount + u * (1.0 - amount)).round() as u32).min(0xff) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
 /// Hue in degrees, saturation and lightness in 0..=1.
 fn rgb_to_hsl(color: u32) -> (f64, f64, f64) {
     let channel = |shift: u32| f64::from((color >> shift) & 0xff) / 255.0;
@@ -278,6 +287,23 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mix_blends_each_channel() {
+        assert_eq!(mix(0xffffff, 0x000000, 0.5), 0x808080);
+        assert_eq!(mix(0x102030, 0x405060, 0.0), 0x405060);
+        assert_eq!(mix(0x102030, 0x405060, 1.0), 0x102030);
+    }
+
+    #[test]
+    fn text_stays_readable_on_every_tinted_card() {
+        for preset in [Preset::Mist, Preset::MistLight] {
+            let t = tokens(preset);
+            for color in std::iter::once(t.accent).chain(ProjectColor::ALL.map(|c| c.value(preset))) {
+                assert!(contrast(t.text, mix(color, t.surface, 0.18)) >= 4.5, "{preset:?} {color:06x}");
+            }
+        }
+    }
+
     use super::*;
     use crate::snapshot::Rgb;
 
