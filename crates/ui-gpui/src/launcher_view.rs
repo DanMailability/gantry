@@ -19,6 +19,12 @@ use crate::field;
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, theme};
 
+#[allow(missing_docs)]
+mod launcher_actions {
+    gpui::actions!(launcher, [LauncherBrowse]);
+}
+pub(crate) use launcher_actions::LauncherBrowse;
+
 /// What the launcher asks the workspace to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LauncherEvent {
@@ -165,7 +171,6 @@ impl LauncherView {
             "enter" => self.choose(self.selected, keystroke.modifiers.alt, cx),
             "escape" if self.chip_open => self.chip_open = false,
             "escape" => cx.emit(LauncherEvent::Dismiss),
-            "o" if keystroke.modifiers.secondary() => self.browse(keystroke.modifiers.alt, cx),
             _ => {
                 if !field::edit(&mut self.query, keystroke, cx) {
                     return;
@@ -349,6 +354,7 @@ impl Render for LauncherView {
             .key_context("Launcher")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(|this, _: &LauncherBrowse, _, cx| this.browse(false, cx)))
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(LauncherEvent::Dismiss)))
             .w(theme.ui(560.))
             .flex()

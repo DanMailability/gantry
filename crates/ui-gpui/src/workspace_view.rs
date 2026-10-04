@@ -34,7 +34,7 @@ use app_core::shortcuts::{self, Platform};
 use crate::alerts::{self, Notice};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
-use crate::launcher_view::{LauncherEvent, LauncherView};
+use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::SettingsView;
@@ -91,6 +91,8 @@ pub(crate) fn all_bindings(settings: &Settings, platform: Platform) -> Vec<gpui:
     shortcuts::bindings(&settings.shortcuts, platform)
         .into_iter()
         .filter_map(|(id, key)| workspace_binding(id, &key).or_else(|| terminal_binding(id, &key)))
+        // Browse inside the launcher; its own context wins over the Workspace binding of the same chord (Cmd+O on macOS).
+        .chain([gpui::KeyBinding::new("secondary-o", LauncherBrowse, Some("Launcher"))])
         .collect()
 }
 
@@ -1170,15 +1172,15 @@ impl WorkspaceView {
         self.show_launcher(true, window, cx);
     }
 
-    /// The folders with live panes, in tab order, for the launcher's "Open now".
+    /// The folders with live panes, in sidebar order, for the launcher's "Open now".
     fn open_folders(&self, cx: &Context<Self>) -> Vec<OpenFolder> {
         let sessions = self.sidebar.read(cx).sessions();
-        let panes: Vec<OpenPane> = self
-            .workspace
-            .tabs
-            .iter()
-            .filter(|tab| !tab.settings)
-            .flat_map(|tab| tab.root.leaves())
+        let order = self.sidebar.read(cx).leaf_order();
+        let mut ids: Vec<NodeId> =
+            self.workspace.tabs.iter().filter(|tab| !tab.settings).flat_map(|tab| tab.root.leaves()).collect();
+        ids.sort_by_key(|id| order.iter().position(|ordered| ordered == id).unwrap_or(usize::MAX));
+        let panes: Vec<OpenPane> = ids
+            .into_iter()
             .filter_map(|id| {
                 let leaf = self.workspace.leaves.get(&id).filter(|leaf| leaf.pane.is_some())?;
                 let status = leaf
