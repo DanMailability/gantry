@@ -120,6 +120,8 @@ impl RecentsView {
             now_ms,
             per_project: self.per_project,
             chips: self.chip_count,
+            hits: &[],
+            content: recents::ContentState::Waiting,
         };
         self.list = if self.choosing {
             List::Projects(recents::projects(&input))
@@ -290,7 +292,7 @@ impl RecentsView {
                             ),
                     );
                 }
-                RecentItem::Session { session, age, project } => row.child(
+                RecentItem::Session { session, age, project, .. } => row.child(
                     pill()
                         .when_some(theme.project(project), |pill, color| {
                             pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme))
@@ -317,6 +319,7 @@ impl RecentsView {
                                 .child(if session.cwd_exists { age.clone() } else { "Folder missing".into() }),
                         ),
                 ),
+                RecentItem::Section { .. } | RecentItem::Note { .. } => row,
                 RecentItem::More { hidden, .. } => row.child(
                     pill().pl(theme.ui(30.)).text_color(rgb(theme.tokens.accent)).child(format!("Show {hidden} more")),
                 ),
