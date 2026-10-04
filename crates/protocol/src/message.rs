@@ -157,6 +157,9 @@ pub struct SessionInfo {
     /// The Claude config dir it was found in (`None` from an older daemon).
     #[serde(default)]
     pub claude_dir: Option<PathBuf>,
+    /// Your newest prompt in this session, on one line; `None` when unknown (or from an older daemon).
+    #[serde(default)]
+    pub last_prompt: Option<String>,
 }
 
 /// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`. With `claude`
@@ -482,6 +485,7 @@ mod tests {
             status_since_ms: 1_790_840_985_000,
             container: None,
             claude_dir: Some("/home/me/.claude-work".into()),
+            last_prompt: Some("Fix the build".into()),
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains(r#""state":{"kind":"managed","pane":3}"#), "{json}");
@@ -500,6 +504,26 @@ mod tests {
             let json = serde_json::to_string(&message).unwrap();
             assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn last_prompt_is_optional_on_the_wire() {
+        let session = SessionInfo {
+            id: "s".into(),
+            cwd: "/r".into(),
+            title: "t".into(),
+            last_active_ms: 1,
+            state: SessionState::Closed,
+            cwd_exists: true,
+            status: None,
+            status_since_ms: 0,
+            container: None,
+            claude_dir: None,
+            last_prompt: Some("x".into()),
+        };
+        let mut json = serde_json::to_value(&session).unwrap();
+        json.as_object_mut().unwrap().remove("last_prompt");
+        assert_eq!(serde_json::from_value::<SessionInfo>(json).unwrap().last_prompt, None);
     }
 
     #[test]

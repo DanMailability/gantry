@@ -112,6 +112,7 @@ pub fn resolve(
                 status,
                 container: placed.map(|(place, _)| place),
                 claude_dir: r.claude_dir.clone(),
+                last_prompt: r.last_prompt.clone(),
             }
         })
         .collect()
@@ -214,6 +215,13 @@ mod tests {
             claude_dir: None,
             last_prompt: None,
         }
+    }
+
+    #[test]
+    fn resolve_passes_the_last_prompt_on() {
+        let mut r = record("a", IndexState::Closed);
+        r.last_prompt = Some("what next".into());
+        assert_eq!(plain(&[r], &[], &[])[0].last_prompt.as_deref(), Some("what next"));
     }
 
     fn pane(pane: PaneId, pid: u32, session_arg: Option<&str>) -> PaneSession {
