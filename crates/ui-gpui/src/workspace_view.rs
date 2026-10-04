@@ -1187,6 +1187,10 @@ impl WorkspaceView {
             .right(px(4.))
             .flex()
             .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(RADIUS_SMALL))
+            // 70 % of the terminal colour behind both buttons, so they read over text.
+            .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))
             .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
