@@ -18,11 +18,11 @@ use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, PhraseQuery, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value};
 use tantivy::snippet::SnippetGenerator;
-use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
+use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term, doc};
 
 /// Bump when the schema or the extracted text changes: an index of another version is rebuilt.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Index writer memory budget, on one thread.
 const WRITER_BUDGET: usize = 50_000_000;
 /// Messages between commits while indexing.
@@ -35,6 +35,17 @@ const PREFIX_TERMS: usize = 64;
 const DOCS_PER_HIT: usize = 20;
 /// Most documents read for one search.
 const MAX_DOCS: usize = 5_000;
+/// Tokenizer of the `words` field: like `en_stem` without the stemming.
+const WORDS_TOKENIZER: &str = "gantry_words";
+
+/// Lowercased words, unstemmed: what a partly typed word is matched against ("termina" is a prefix of "terminal",
+/// not of its stem "termin").
+fn words_analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(SimpleTokenizer::default()).filter(RemoveLongFilter::limit(40)).filter(LowerCaser).build()
+}
+
+/// The query of the stemmed terms a search marks in its snippets.
+type Marks = Box<dyn Query>;
 
 /// What each commit stores beside the documents.
 #[derive(Default, Serialize, Deserialize)]
@@ -51,7 +62,10 @@ struct Fields {
     session: Field,
     claude_dir: Field,
     speaker: Field,
+    /// The message, stemmed (exact words and phrases); stored for snippets.
     text: Field,
+    /// The message, unstemmed and not stored (the last word's prefix).
+    words: Field,
 }
 
 fn schema() -> (Schema, Fields) {
@@ -69,6 +83,14 @@ fn schema() -> (Schema, Fields) {
         claude_dir: builder.add_text_field("claude_dir", STORED),
         speaker: builder.add_text_field("speaker", STORED),
         text: builder.add_text_field("text", text),
+        words: builder.add_text_field(
+            "words",
+            TextOptions::default().set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer(WORDS_TOKENIZER)
+                    .set_index_option(IndexRecordOption::WithFreqs),
+            ),
+        ),
     };
     (builder.build(), fields)
 }
@@ -149,6 +171,7 @@ impl ConversationIndex {
     }
 
     fn with(index: Index, fields: Fields, offsets: BTreeMap<PathBuf, u64>) -> anyhow::Result<ConversationIndex> {
+        index.tokenizers().register(WORDS_TOKENIZER, words_analyzer());
         let reader = index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?;
         Ok(ConversationIndex { index, reader, fields, offsets, unreadable: HashSet::new() })
     }
@@ -221,6 +244,7 @@ impl ConversationIndex {
                                     MessageSpeaker::Claude => "claude",
                                 },
                                 self.fields.text => message.text.as_str(),
+                                self.fields.words => message.text.as_str(),
                             ))?;
                         }
                         since_commit += messages.len();
@@ -315,10 +339,10 @@ impl ConversationSearcher {
     /// `known` accepts, at most `limit`. A query without words finds nothing.
     pub fn search(&self, query: &str, limit: usize, known: &dyn Fn(&str) -> bool) -> anyhow::Result<Vec<SearchHit>> {
         let searcher = self.reader.searcher();
-        let Some(query) = self.build_query(&searcher, query)? else { return Ok(Vec::new()) };
+        let Some((query, marked)) = self.build_query(&searcher, query)? else { return Ok(Vec::new()) };
         let wanted = (limit.saturating_mul(DOCS_PER_HIT)).clamp(1, MAX_DOCS);
         let top = searcher.search(&*query, &TopDocs::with_limit(wanted).order_by_score())?;
-        let mut snippets = SnippetGenerator::create(&searcher, &*query, self.fields.text)?;
+        let mut snippets = SnippetGenerator::create(&searcher, &*marked, self.fields.text)?;
         snippets.set_max_num_chars(SNIPPET_CHARS);
         let mut seen = HashSet::new();
         let mut hits = Vec::new();
@@ -351,10 +375,11 @@ impl ConversationSearcher {
         Ok(hits)
     }
 
-    /// Every word must match (stemmed); a closed quote is a phrase; the last plain word also matches as a prefix.
-    fn build_query(&self, searcher: &Searcher, query: &str) -> anyhow::Result<Option<Box<dyn Query>>> {
+    /// The query, and the stemmed terms to mark in snippets. Every word must match (stemmed); a closed quote is a
+    /// phrase; the last plain word also matches any word it begins (unstemmed, so "termina" finds "terminal").
+    fn build_query(&self, searcher: &Searcher, query: &str) -> anyhow::Result<Option<(Box<dyn Query>, Marks)>> {
         let mut stemmer = self.index.tokenizer_for_field(self.fields.text)?;
-        let mut plain = TextAnalyzer::builder(SimpleTokenizer::default()).filter(LowerCaser).build();
+        let mut plain = words_analyzer();
         let tokens = |analyzer: &mut TextAnalyzer, text: &str| {
             let mut out = Vec::new();
             let mut stream = analyzer.token_stream(text);
@@ -364,19 +389,20 @@ impl ConversationSearcher {
             out
         };
         let term = |text: &str| Term::from_field_text(self.fields.text, text);
+        let term_query =
+            |term: Term| -> Box<dyn Query> { Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) };
         let parts = split_query(query);
         let last_word = parts.iter().rposition(|part| matches!(part, Part::Word(_)));
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        let mut marks: Vec<Term> = Vec::new();
         for (i, part) in parts.iter().enumerate() {
             match part {
                 Part::Phrase(text) => {
                     let terms: Vec<Term> = tokens(&mut stemmer, text).iter().map(|t| term(t)).collect();
+                    marks.extend(terms.iter().cloned());
                     match terms.len() {
                         0 => {}
-                        1 => clauses.push((
-                            Occur::Must,
-                            Box::new(TermQuery::new(terms[0].clone(), IndexRecordOption::WithFreqs)),
-                        )),
+                        1 => clauses.push((Occur::Must, term_query(terms[0].clone()))),
                         _ => clauses.push((Occur::Must, Box::new(PhraseQuery::new(terms)))),
                     }
                 }
@@ -385,14 +411,15 @@ impl ConversationSearcher {
                     let raw = tokens(&mut plain, word);
                     for (j, token) in raw.iter().enumerate() {
                         let Some(stem) = tokens(&mut stemmer, token).into_iter().next() else { continue };
-                        let exact: Box<dyn Query> = Box::new(TermQuery::new(term(&stem), IndexRecordOption::WithFreqs));
+                        marks.push(term(&stem));
+                        let exact = term_query(term(&stem));
                         if Some(i) == last_word && j + 1 == raw.len() {
                             let mut either = vec![(Occur::Should, exact)];
-                            for prefixed in self.prefix_terms(searcher, token)? {
-                                either.push((
-                                    Occur::Should,
-                                    Box::new(TermQuery::new(prefixed, IndexRecordOption::WithFreqs)),
-                                ));
+                            for word in self.prefix_words(searcher, token)? {
+                                either
+                                    .push((Occur::Should, term_query(Term::from_field_text(self.fields.words, &word))));
+                                // Snippets are marked on the stemmed field: mark the stem of each word found.
+                                marks.extend(tokens(&mut stemmer, &word).first().map(|stem| term(stem)));
                             }
                             clauses.push((Occur::Must, Box::new(BooleanQuery::new(either))));
                         } else {
@@ -402,28 +429,33 @@ impl ConversationSearcher {
                 }
             }
         }
-        Ok((!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>))
+        if clauses.is_empty() {
+            return Ok(None);
+        }
+        marks.dedup();
+        let marked: Box<dyn Query> =
+            Box::new(BooleanQuery::new(marks.into_iter().map(|t| (Occur::Should, term_query(t))).collect()));
+        Ok(Some((Box::new(BooleanQuery::new(clauses)), marked)))
     }
 
-    /// Up to `PREFIX_TERMS` index terms starting with `prefix`.
-    fn prefix_terms(&self, searcher: &Searcher, prefix: &str) -> anyhow::Result<Vec<Term>> {
+    /// Up to `PREFIX_TERMS` indexed words (unstemmed) starting with `prefix`.
+    fn prefix_words(&self, searcher: &Searcher, prefix: &str) -> anyhow::Result<Vec<String>> {
         // No UTF-8 byte is 0xff, so every term starting with `prefix` sorts below `prefix` + 0xff.
         let mut upper = prefix.as_bytes().to_vec();
         upper.push(0xff);
-        let mut terms = Vec::new();
+        let mut words: Vec<String> = Vec::new();
         for segment in searcher.segment_readers() {
-            let inverted = segment.inverted_index(self.fields.text)?;
+            let inverted = segment.inverted_index(self.fields.words)?;
             let mut stream = inverted.terms().range().ge(prefix.as_bytes()).lt(&upper).into_stream()?;
-            while terms.len() < PREFIX_TERMS && stream.advance() {
-                if let Ok(text) = std::str::from_utf8(stream.key()) {
-                    let term = Term::from_field_text(self.fields.text, text);
-                    if !terms.contains(&term) {
-                        terms.push(term);
-                    }
+            while words.len() < PREFIX_TERMS && stream.advance() {
+                if let Ok(text) = std::str::from_utf8(stream.key())
+                    && !words.iter().any(|word| word == text)
+                {
+                    words.push(text.to_string());
                 }
             }
         }
-        Ok(terms)
+        Ok(words)
     }
 }
 
@@ -680,6 +712,30 @@ mod tests {
         assert_eq!(f.ids("fallb"), vec!["s1"]);
         assert_eq!(f.ids("ubuntu fallb"), vec!["s1"]);
         assert!(f.ids("fallb ubuntu").is_empty(), "only the last word is a prefix");
+    }
+
+    #[test]
+    fn every_typed_prefix_of_a_word_finds_it() {
+        // Stemming shortens these ("terminal" → "termin", "running" → "run"); a partly typed word must still match
+        // while the user types it out.
+        let mut f = Fixture::new();
+        transcript(&f.claude, "s1", &[("you", "the terminal configuration was running pricing")]);
+        f.sync();
+        for word in ["terminal", "configuration", "running", "pricing"] {
+            for end in 3..=word.len() {
+                assert_eq!(f.ids(&word[..end]), vec!["s1"], "typing {:?}", &word[..end]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_partly_typed_word_is_marked_in_the_snippet() {
+        let mut f = Fixture::new();
+        transcript(&f.claude, "s1", &[("claude", "open the terminal now")]);
+        f.sync();
+        let hit = &f.index.searcher().search("termina", 50, &|_| true).unwrap()[0];
+        let marked: Vec<&str> = hit.highlights.iter().map(|&(s, e)| &hit.snippet[s as usize..e as usize]).collect();
+        assert_eq!(marked, vec!["terminal"]);
     }
 
     #[test]

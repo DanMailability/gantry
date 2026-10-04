@@ -136,7 +136,14 @@ impl RecentsView {
         view
     }
 
+    /// Rebuild the list after the user changed what it shows (query, chip): back to the top, first row selected.
     fn refresh(&mut self) {
+        self.rebuild();
+        self.selected = self.first_selectable();
+        self.list_state.reset(self.len());
+    }
+
+    fn rebuild(&mut self) {
         let sessions: Vec<&SessionInfo> = self.sessions.iter().collect();
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let roots = &self.roots;
@@ -162,9 +169,6 @@ impl RecentsView {
         };
         self.chips = recents::chips(&input);
         self.counts = recents::counts(&input);
-        let first = self.first_selectable();
-        self.selected = first;
-        self.list_state.reset(self.len());
     }
 
     fn content_state(&self) -> ContentState {
@@ -223,12 +227,23 @@ impl RecentsView {
         cx.notify();
     }
 
+    /// Rebuild after a change the user didn't make (hits, the index's state, "Show N more"): only the rows that
+    /// changed are re-measured, so the scroll position stays and the selected row can still be revealed.
     fn refresh_keeping_selection(&mut self) {
         let keep = self.selected;
-        self.refresh();
-        if self.selectable(keep) {
-            self.selected = keep;
-        }
+        let old = std::mem::replace(&mut self.list, List::Sessions(Vec::new()));
+        self.rebuild();
+        let (same_start, same_end) = match (&old, &self.list) {
+            (List::Sessions(old), List::Sessions(new)) => unchanged_ends(old, new),
+            (List::Projects(old), List::Projects(new)) => unchanged_ends(old, new),
+            _ => (0, 0),
+        };
+        let old_len = match &old {
+            List::Sessions(items) => items.len(),
+            List::Projects(projects) => projects.len(),
+        };
+        self.list_state.splice(same_start..old_len - same_end, self.len() - same_start - same_end);
+        self.selected = if self.selectable(keep) { keep } else { self.first_selectable() };
     }
 
     fn len(&self) -> usize {
@@ -299,9 +314,7 @@ impl RecentsView {
                 }
                 Some(RecentItem::More { project, .. }) => {
                     self.expanded.insert(project.clone());
-                    let keep = index;
-                    self.refresh();
-                    self.selected = keep;
+                    self.refresh_keeping_selection();
                 }
                 _ => {}
             },
@@ -717,3 +730,25 @@ fn snippet_text(snippet: &Snippet, theme: &Theme) -> StyledText {
 const SPLIT_KEY: &str = "⌘Enter";
 #[cfg(not(target_os = "macos"))]
 const SPLIT_KEY: &str = "Ctrl+Enter";
+
+/// How many items at the start and at the end of `old` and `new` are the same (never overlapping).
+fn unchanged_ends<T: PartialEq>(old: &[T], new: &[T]) -> (usize, usize) {
+    let start = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let room = old.len().min(new.len()) - start;
+    let end = old.iter().rev().zip(new.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
+    (start, end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_ends_are_found_on_both_sides() {
+        assert_eq!(unchanged_ends(&[1, 2, 3, 4], &[1, 2, 9, 4]), (2, 1));
+        assert_eq!(unchanged_ends(&[1, 2], &[1, 2, 3]), (2, 0), "rows added at the end");
+        assert_eq!(unchanged_ends(&[1, 2, 3], &[1, 3]), (1, 1), "a row removed in the middle");
+        assert_eq!(unchanged_ends(&[1, 1], &[1, 1, 1]), (2, 0), "prefix and suffix never overlap");
+        assert_eq!(unchanged_ends::<u8>(&[], &[]), (0, 0));
+    }
+}
