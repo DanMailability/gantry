@@ -1,24 +1,34 @@
 //! The recent sessions overlay (`Ctrl+Shift+R`): closed sessions by project, searchable, with project chips.
 
 use std::collections::HashSet;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use app_core::recents::{self, Chip, ChipTarget, ProjectItem, RecentItem, RecentsInput};
+use app_core::recents::{
+    self, Chip, ChipTarget, ContentState, ProjectItem, RecentItem, RecentsInput, Snippet, searches_content,
+};
 use app_core::session_tree::{ProjectRoots, session_title};
 use app_core::text_field::TextField;
 use gpui::{
-    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, Render,
-    ScrollStrategy, Stateful, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
+    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, IntoElement,
+    KeyDownEvent, ListAlignment, ListState, Render, Stateful, StyledText, Window, div, list, prelude::*, px, rgb,
 };
-use protocol::message::SessionInfo;
+use protocol::message::{SearchHit, SessionInfo, Speaker};
 
 use crate::field;
 use crate::settings_store::{SettingsStore, dir_badge_for};
-use crate::theme::{RADIUS, RADIUS_LARGE, container_icon, dir_badge, side_line, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, Theme, container_icon, dir_badge, side_line, theme};
 
 const ROW_HEIGHT: f32 = 36.0;
+/// Height of a conversation hit's row (two lines).
+const HIT_ROW_HEIGHT: f32 = 56.0;
+/// Quiet time after typing before the query is sent.
+const SEARCH_DELAY: Duration = Duration::from_millis(150);
+/// Most sessions asked for (the project chips filter them here).
+pub const SEARCH_LIMIT: u32 = 200;
+/// Request ids, unique across pop-ups (a late reply to a closed pop-up must not match a new one's).
+static NEXT_SEARCH: AtomicU64 = AtomicU64::new(1);
 
 /// What the overlay asks the workspace to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +44,13 @@ pub enum RecentsEvent {
     },
     /// Close without opening anything.
     Dismiss,
+    /// Search the conversations for `query`; the reply goes to `set_hits` with the same `request`.
+    Search {
+        /// Request id.
+        request: u64,
+        /// The query.
+        query: String,
+    },
 }
 
 /// What the list shows.
@@ -59,9 +76,18 @@ pub struct RecentsView {
     chips: Vec<Chip>,
     counts: (usize, usize),
     selected: usize,
-    scroll: UniformListScrollHandle,
+    list_state: ListState,
     per_project: usize,
     chip_count: usize,
+    /// The last conversation search sent (0 = none).
+    request: u64,
+    /// Whether the reply to `request` arrived.
+    answered: bool,
+    hits: Vec<SearchHit>,
+    /// Percent of the index built while a large pass runs.
+    indexing: Option<u8>,
+    unavailable: bool,
+    search_task: Option<gpui::Task<()>>,
 }
 
 impl EventEmitter<RecentsEvent> for RecentsView {}
@@ -96,9 +122,15 @@ impl RecentsView {
             chips: Vec::new(),
             counts: (0, 0),
             selected: 0,
-            scroll: UniformListScrollHandle::new(),
+            list_state: ListState::new(0, ListAlignment::Top, px(200.)),
             per_project: recents.per_project,
             chip_count: recents.chips,
+            request: 0,
+            answered: false,
+            hits: Vec::new(),
+            indexing: None,
+            unavailable: false,
+            search_task: None,
         };
         view.refresh();
         view
@@ -120,8 +152,8 @@ impl RecentsView {
             now_ms,
             per_project: self.per_project,
             chips: self.chip_count,
-            hits: &[],
-            content: recents::ContentState::Waiting,
+            hits: &self.hits,
+            content: self.content_state(),
         };
         self.list = if self.choosing {
             List::Projects(recents::projects(&input))
@@ -132,6 +164,71 @@ impl RecentsView {
         self.counts = recents::counts(&input);
         let first = self.first_selectable();
         self.selected = first;
+        self.list_state.reset(self.len());
+    }
+
+    fn content_state(&self) -> ContentState {
+        if self.unavailable {
+            ContentState::Unavailable
+        } else if let Some(percent) = self.indexing {
+            ContentState::Indexing(percent)
+        } else if self.answered {
+            ContentState::Ready
+        } else {
+            ContentState::Waiting
+        }
+    }
+
+    /// The query changed: send it after `SEARCH_DELAY` when it is long enough (the last hits stay until the reply,
+    /// so the section does not flicker while typing).
+    fn query_changed(&mut self, cx: &mut Context<Self>) {
+        self.search_task = None;
+        self.request = 0;
+        self.answered = false;
+        if self.choosing || !searches_content(self.query.text()) {
+            self.hits.clear();
+            return;
+        }
+        let query = self.query.text().to_string();
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DELAY).await;
+            let _ = this.update(cx, |this, cx| this.send_search(query, cx));
+        }));
+    }
+
+    fn send_search(&mut self, query: String, cx: &mut Context<Self>) {
+        self.request = NEXT_SEARCH.fetch_add(1, Ordering::Relaxed);
+        cx.emit(RecentsEvent::Search { request: self.request, query });
+    }
+
+    /// Hits for `request`; replies to older requests are ignored.
+    pub fn set_hits(&mut self, request: u64, hits: Vec<SearchHit>, cx: &mut Context<Self>) {
+        if request == 0 || request != self.request {
+            return;
+        }
+        self.hits = hits;
+        self.answered = true;
+        self.refresh_keeping_selection();
+        cx.notify();
+    }
+
+    /// The index's state: `indexing` = percent while a large pass runs. When indexing ends, the query is sent again.
+    pub fn set_index_state(&mut self, indexing: Option<u8>, unavailable: bool, cx: &mut Context<Self>) {
+        let finished = self.indexing.is_some() && indexing.is_none();
+        (self.indexing, self.unavailable) = (indexing, unavailable);
+        if finished && !self.choosing && searches_content(self.query.text()) {
+            self.send_search(self.query.text().to_string(), cx);
+        }
+        self.refresh_keeping_selection();
+        cx.notify();
+    }
+
+    fn refresh_keeping_selection(&mut self) {
+        let keep = self.selected;
+        self.refresh();
+        if self.selectable(keep) {
+            self.selected = keep;
+        }
     }
 
     fn len(&self) -> usize {
@@ -165,23 +262,24 @@ impl RecentsView {
     }
 
     /// Pick chip `target`.
-    fn pick(&mut self, target: ChipTarget) {
+    fn pick(&mut self, target: ChipTarget, cx: &mut Context<Self>) {
         match target {
             ChipTarget::All => (self.project, self.choosing) = (None, false),
             ChipTarget::Project(path) => (self.project, self.choosing) = (Some(path), false),
             ChipTarget::More => self.choosing = true,
         }
         self.query.clear();
+        self.query_changed(cx);
         self.refresh();
     }
 
     /// Move to the next (or previous) chip.
-    fn cycle_chip(&mut self, forward: bool) {
+    fn cycle_chip(&mut self, forward: bool, cx: &mut Context<Self>) {
         let current = self.chips.iter().position(|chip| self.is_current(&chip.target)).unwrap_or(0);
         let len = self.chips.len().max(1);
         let next = if forward { (current + 1) % len } else { (current + len - 1) % len };
         if let Some(chip) = self.chips.get(next) {
-            self.pick(chip.target.clone());
+            self.pick(chip.target.clone(), cx);
         }
     }
 
@@ -210,7 +308,7 @@ impl RecentsView {
             List::Projects(projects) => {
                 if let Some(project) = projects.get(index) {
                     let target = ChipTarget::Project(project.path.clone());
-                    self.pick(target);
+                    self.pick(target, cx);
                 }
             }
         }
@@ -222,10 +320,11 @@ impl RecentsView {
             "up" => self.move_selection(false),
             "down" => self.move_selection(true),
             "enter" => self.choose(self.selected, keystroke.modifiers.secondary(), cx),
-            "tab" => self.cycle_chip(!keystroke.modifiers.shift),
+            "tab" => self.cycle_chip(!keystroke.modifiers.shift, cx),
             "escape" if self.choosing => {
                 self.choosing = false;
                 self.query.clear();
+                self.query_changed(cx);
                 self.refresh();
             }
             "escape" => cx.emit(RecentsEvent::Dismiss),
@@ -233,10 +332,11 @@ impl RecentsView {
                 if !field::edit(&mut self.query, keystroke, cx) {
                     return;
                 }
+                self.query_changed(cx);
                 self.refresh();
             }
         }
-        self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+        self.list_state.scroll_to_reveal_item(self.selected);
         cx.stop_propagation();
         cx.notify();
     }
@@ -292,7 +392,7 @@ impl RecentsView {
                             ),
                     );
                 }
-                RecentItem::Session { session, age, project, .. } => row.child(
+                RecentItem::Session { session, age, project, snippet: None, .. } => row.child(
                     pill()
                         .when_some(theme.project(project), |pill, color| {
                             pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme))
@@ -319,7 +419,94 @@ impl RecentsView {
                                 .child(if session.cwd_exists { age.clone() } else { "Folder missing".into() }),
                         ),
                 ),
-                RecentItem::Section { .. } | RecentItem::Note { .. } => row,
+                RecentItem::Session { session, age, project, snippet: Some(snippet), open } => {
+                    let project_name =
+                        project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    row.h(theme.ui(HIT_ROW_HEIGHT)).child(
+                        pill()
+                            .flex_col()
+                            .items_start()
+                            .justify_center()
+                            .gap(px(2.))
+                            .when_some(theme.project(project), |pill, color| {
+                                pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme))
+                            })
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div().flex_1().min_w_0().truncate().child(session_title(session).to_string()),
+                                    )
+                                    .when(*open, |line| {
+                                        line.child(
+                                            div()
+                                                .flex_none()
+                                                .text_xs()
+                                                .text_color(rgb(theme.tokens.accent))
+                                                .child("open"),
+                                        )
+                                    })
+                                    .when(session.container.is_some(), |line| {
+                                        line.child(container_icon(theme.tokens.text, &theme))
+                                    })
+                                    .children(
+                                        dir_badge_for(
+                                            cx.global::<SettingsStore>().settings(),
+                                            session.claude_dir.as_deref(),
+                                        )
+                                        .map(|badge| dir_badge(&badge, &theme)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(rgb(theme.tokens.muted))
+                                            .child(project_name),
+                                    )
+                                    .child(
+                                        div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(
+                                            if session.cwd_exists { age.clone() } else { "Folder missing".into() },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(theme.tokens.muted))
+                                    .child(snippet_text(snippet, &theme)),
+                            ),
+                    )
+                }
+                RecentItem::Section { label } => {
+                    return row.child(
+                        div()
+                            .size_full()
+                            .px_3()
+                            .flex()
+                            .items_end()
+                            .pb(theme.ui(4.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(label.clone()),
+                    );
+                }
+                RecentItem::Note { text } => {
+                    return row.child(
+                        div()
+                            .size_full()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child(text.clone()),
+                    );
+                }
                 RecentItem::More { hidden, .. } => row.child(
                     pill().pl(theme.ui(30.)).text_color(rgb(theme.tokens.accent)).child(format!("Show {hidden} more")),
                 ),
@@ -397,7 +584,7 @@ impl RecentsView {
                 el.child(div().text_xs().opacity(0.8).child(chip.count.to_string()))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.pick(target.clone());
+                this.pick(target.clone(), cx);
                 cx.notify();
             }))
     }
@@ -471,7 +658,7 @@ impl Render for RecentsView {
                             .border_color(rgb(theme.tokens.accent))
                             .child(field::render(
                                 &self.query,
-                                if self.choosing { "Search projects" } else { "Search recent sessions" },
+                                if self.choosing { "Search projects" } else { "Search sessions and conversations" },
                                 true,
                                 &theme,
                                 field::on_press(cx, |this, offset, clicks, _, cx| {
@@ -482,17 +669,14 @@ impl Render for RecentsView {
                     )
                     .child(div().flex().flex_wrap().gap(px(6.)).children(chips)),
             )
-            .child(
-                uniform_list(
-                    "recent-items",
-                    self.len(),
-                    cx.processor(|this, range: Range<usize>, _window, cx| {
-                        range.map(|index| this.render_item(index, cx)).collect::<Vec<_>>()
-                    }),
-                )
-                .track_scroll(&self.scroll)
-                .h(theme.ui(380.)),
-            )
+            .child({
+                let view = cx.entity().downgrade();
+                list(self.list_state.clone(), move |index, _window, cx| {
+                    view.update(cx, |this, cx| this.render_item(index, cx).into_any_element())
+                        .unwrap_or_else(|_| div().into_any_element())
+                })
+                .h(theme.ui(380.))
+            })
             .child(
                 div()
                     .h(theme.ui(34.))
@@ -512,6 +696,21 @@ impl Render for RecentsView {
                     .child(hint("Esc", if self.choosing { "back" } else { "close" })),
             )
     }
+}
+
+/// "You: …" / "Claude: …" with the matched ranges in bold.
+fn snippet_text(snippet: &Snippet, theme: &Theme) -> StyledText {
+    let prefix = match snippet.speaker {
+        Speaker::You => "You: ",
+        Speaker::Claude => "Claude: ",
+    };
+    let bold = HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        color: Some(rgb(theme.tokens.text).into()),
+        ..HighlightStyle::default()
+    };
+    StyledText::new(format!("{prefix}{}", snippet.text))
+        .with_highlights(snippet.highlights.iter().map(|r| (r.start + prefix.len()..r.end + prefix.len(), bold)))
 }
 
 #[cfg(target_os = "macos")]
