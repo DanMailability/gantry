@@ -65,6 +65,25 @@ impl SettingsView {
             cx,
         );
 
+        let resume = settings.window.resume_sessions;
+        let resume_switch = self.switch(
+            "resume-sessions",
+            0,
+            resume,
+            window,
+            cx,
+            change(move |settings| settings.window.resume_sessions = !resume),
+        );
+        let resume_reset = self.reset_slot(
+            "reset-resume-sessions",
+            0,
+            settings,
+            |s| s.window.resume_sessions,
+            |s, v| s.window.resume_sessions = v,
+            window,
+            cx,
+        );
+
         let sidebar =
             SIDEBAR.iter().position(|(choice, _, _)| *choice == settings.window.sidebar_at_start).unwrap_or(0);
         let sidebar_labels = SIDEBAR.map(|(_, label, _)| label);
@@ -160,6 +179,13 @@ impl SettingsView {
                 None,
                 vec![
                     row(theme, "Tabs at start", RESTORE[restore].2, restore_bar, restore_reset),
+                    row(
+                        theme,
+                        "Resume sessions",
+                        "Run finished sessions again on start (Claude with --resume) instead of waiting for Continue.",
+                        resume_switch,
+                        resume_reset,
+                    ),
                     row(theme, "Sidebar at start", SIDEBAR[sidebar].2, sidebar_bar, sidebar_reset),
                 ],
             ))

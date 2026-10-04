@@ -157,6 +157,8 @@ struct PendingOpen {
 /// Root view of the Gantry window.
 pub struct WorkspaceView {
     workspace: Workspace,
+    /// Finished leaves waiting for the session list, to resume on start.
+    to_resume: Vec<NodeId>,
     slots: HashMap<NodeId, Slot>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
@@ -275,6 +277,7 @@ impl WorkspaceView {
         });
         let mut this = WorkspaceView {
             workspace: restored.workspace,
+            to_resume: Vec::new(),
             slots: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
@@ -332,6 +335,11 @@ impl WorkspaceView {
             if this.workspace.leaves[leaf].pane.is_none() && !restored.spawn.contains(leaf) {
                 slot.view.update(cx, |view, cx| view.exited(None, cx));
             }
+        }
+        if cx.global::<SettingsStore>().settings().window.resume_sessions {
+            // The session list decides how each one resumes, so they wait for it.
+            this.to_resume =
+                this.workspace.finished_leaves().into_iter().filter(|leaf| !restored.spawn.contains(leaf)).collect();
         }
         for leaf in restored.spawn {
             this.spawn_leaf(leaf, None, cx);
@@ -431,6 +439,7 @@ impl WorkspaceView {
                     self.attention.reset(sessions);
                     let sessions = sessions.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(sessions, cx));
+                    self.resume_finished(cx);
                 }
                 ClientEvent::SessionsChanged { upserted, removed } => {
                     self.track_sessions(upserted, cx);
@@ -593,6 +602,18 @@ impl WorkspaceView {
         slot.view.update(cx, |view, cx| view.restarting(launch, cx));
         self.spawn_leaf(leaf, None, cx);
         self.save(cx);
+    }
+
+    /// Start what the last run left finished, once the session list is in. A session that runs elsewhere stays a card.
+    fn resume_finished(&mut self, cx: &mut Context<Self>) {
+        for leaf in std::mem::take(&mut self.to_resume) {
+            let Some(entry) = self.workspace.leaves.get(&leaf).filter(|entry| entry.pane.is_none()) else { continue };
+            if let Rerun::Start(launch) =
+                entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref())
+            {
+                self.start_leaf(leaf, launch, cx);
+            }
+        }
     }
 
     /// Continue / Restart a finished leaf. If its session already runs in another pane, show that one. If it runs
@@ -1449,13 +1470,10 @@ impl WorkspaceView {
             &["Detach", "Stop all sessions", "Cancel"],
             cx,
         );
-        let (client, prompting, layout_file) = (self.client.clone(), self.prompting.clone(), self.layout_file.clone());
+        let (client, prompting) = (self.client.clone(), self.prompting.clone());
         cx.spawn(async move |_, cx| match answer.await {
             Ok(0) => cx.update(|cx| cx.quit()),
             Ok(1) => {
-                if let Err(err) = layout_store::clear(&layout_file) {
-                    tracing::warn!("clearing the layout failed: {err}");
-                }
                 client.stop_all_and_wait(Duration::from_secs(2));
                 cx.update(|cx| cx.quit());
             }

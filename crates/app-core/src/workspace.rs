@@ -679,6 +679,12 @@ impl Workspace {
         self.tabs.iter().position(|tab| !tab.settings && tab.root.contains(leaf))
     }
 
+    /// Leaves without a running pane (they show Continue / Restart), tab by tab in screen order.
+    pub fn finished_leaves(&self) -> Vec<NodeId> {
+        let tabs = self.tabs.iter().flat_map(|tab| tab.root.leaves());
+        tabs.filter(|id| self.leaves.get(id).is_some_and(|leaf| leaf.pane.is_none())).collect()
+    }
+
     /// `leaf`'s process started as `pane` in `cwd`.
     pub fn pane_started(&mut self, leaf: NodeId, pane: PaneId, cwd: PathBuf) {
         if let Some(leaf) = self.leaves.get_mut(&leaf) {
@@ -1421,6 +1427,16 @@ mod tests {
         assert_eq!(restored.workspace.leaves[&b].pane, None, "pane 2 is gone");
         assert!(restored.spawn.is_empty(), "dead panes wait for Continue/Restart");
         assert_eq!(restored.workspace.tabs.len(), 1);
+    }
+
+    #[test]
+    fn finished_leaves_are_the_ones_without_a_pane_in_screen_order() {
+        let mut ws = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let a = ws.new_tab(shell("/a"));
+        let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
+        let c = ws.new_tab(shell("/c"));
+        ws.pane_started(b, 2, "/b".into());
+        assert_eq!(ws.finished_leaves(), vec![a, c]);
     }
 
     #[test]
