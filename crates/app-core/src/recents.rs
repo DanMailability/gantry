@@ -245,7 +245,9 @@ fn content_items(input: &RecentsInput<'_>, listed: &[RecentItem]) -> Vec<RecentI
     let note = match input.content {
         ContentState::Indexing(percent) => Some(format!("Indexing conversations… {percent}%")),
         ContentState::Unavailable => Some("Conversation search is unavailable — see the daemon log".to_string()),
-        ContentState::Ready if rows.is_empty() => Some("No conversations mention this".to_string()),
+        // Hits that are all listed above (title matches, another project) leave no note: saying no conversation
+        // mentions the query would be false.
+        ContentState::Ready if input.hits.is_empty() => Some("No conversations mention this".to_string()),
         _ => None,
     };
     if rows.is_empty() && note.is_none() {
@@ -628,6 +630,16 @@ mod tests {
         fixture.hits = vec![hit("tab", "x", vec![]), hit("elsewhere", "y", vec![]), hit("not-listed", "z", vec![])];
         fixture.content = ContentState::Ready;
         assert_eq!(fixture.outline(), vec!["## Found in conversations", "~tab open"]);
+    }
+
+    #[test]
+    fn hits_that_are_all_title_matches_leave_no_section() {
+        // "No conversations mention this" would be false: the conversation is listed above.
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1)]);
+        fixture.query = "title a1".into();
+        fixture.hits = vec![hit("a1", "x", vec![])];
+        fixture.content = ContentState::Ready;
+        assert_eq!(fixture.outline(), vec!["# a", "a1"]);
     }
 
     #[test]

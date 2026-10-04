@@ -304,6 +304,28 @@ pub struct ConversationSearcher {
     fields: Fields,
 }
 
+/// Most characters kept before the first match: the pop-up shows one line, so a match late in the snippet would be
+/// cut off.
+const LEAD_CHARS: usize = 30;
+
+/// `snippet` starting at most `LEAD_CHARS` characters before its first highlight (at a word start when there is one,
+/// marked with "…"), with the highlights moved to match.
+fn lead_to_match(snippet: String, highlights: Vec<(u32, u32)>) -> (String, Vec<(u32, u32)>) {
+    let Some(&(first, _)) = highlights.first() else { return (snippet, highlights) };
+    let before: Vec<(usize, char)> = snippet[..first as usize].char_indices().collect();
+    if before.len() <= LEAD_CHARS {
+        return (snippet, highlights);
+    }
+    let window = &before[before.len() - LEAD_CHARS..];
+    // Start after a space inside the window when there is one, so no word is cut in half.
+    let cut =
+        window.iter().position(|&(_, c)| c == ' ').and_then(|i| window.get(i + 1)).map_or(window[0].0, |&(at, _)| at);
+    let shifted = snippet[cut..].to_string();
+    let lead = "…";
+    let moved = |at: u32| at - cut as u32 + lead.len() as u32;
+    (format!("{lead}{shifted}"), highlights.iter().map(|&(start, end)| (moved(start), moved(end))).collect())
+}
+
 /// One piece of a query.
 #[derive(Debug, PartialEq)]
 enum Part {
@@ -363,12 +385,13 @@ impl ConversationSearcher {
                 let ranges = found.highlighted().iter().map(|r| (r.start as u32, r.end as u32)).collect();
                 (found.fragment().to_string(), ranges)
             };
+            // One line; each replaced character is one byte, so the ranges still fit.
+            let (snippet, highlights) = lead_to_match(snippet.replace(['\n', '\r', '\t'], " "), highlights);
             hits.push(SearchHit {
                 session_id: session,
                 claude_dir: PathBuf::from(field(self.fields.claude_dir)),
                 speaker: if field(self.fields.speaker) == "claude" { Speaker::Claude } else { Speaker::You },
-                // One line; each replaced character is one byte, so the ranges still fit.
-                snippet: snippet.replace(['\n', '\r', '\t'], " "),
+                snippet,
                 highlights,
             });
         }
@@ -726,6 +749,31 @@ mod tests {
                 assert_eq!(f.ids(&word[..end]), vec!["s1"], "typing {:?}", &word[..end]);
             }
         }
+    }
+
+    #[test]
+    fn the_snippet_starts_close_to_the_match() {
+        // The pop-up shows one line of about 90 characters: a match late in the fragment would be cut off.
+        let mut f = Fixture::new();
+        let long = "I looked through the repository layout first. The build uses a small script, and the deploy \
+                    step copies the static pages; the mascot image is a quokka.png that the header loads.";
+        transcript(&f.claude, "s1", &[("claude", long)]);
+        f.sync();
+        let hit = &f.index.searcher().search("mascot", 50, &|_| true).unwrap()[0];
+        let (start, end) = hit.highlights[0];
+        assert_eq!(&hit.snippet[start as usize..end as usize], "mascot");
+        let before = hit.snippet[..start as usize].chars().count();
+        assert!(before <= 35, "{before} characters before the match: {:?}", hit.snippet);
+        assert!(hit.snippet.starts_with('…'), "{:?}", hit.snippet);
+    }
+
+    #[test]
+    fn a_match_near_the_start_keeps_the_start() {
+        let mut f = Fixture::new();
+        transcript(&f.claude, "s1", &[("you", "the mascot is a quokka")]);
+        f.sync();
+        let hit = &f.index.searcher().search("mascot", 50, &|_| true).unwrap()[0];
+        assert_eq!(hit.snippet, "the mascot is a quokka");
     }
 
     #[test]
