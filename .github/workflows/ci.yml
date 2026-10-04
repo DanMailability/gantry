@@ -57,6 +57,9 @@ jobs:
         with:
           # Keep the built dependencies even when clippy or a test fails (first macOS/Windows runs).
           cache-on-failure: true
+          # A key is saved only once. Windows' first save held only clippy's build, so its key is new (v1); bump it
+          # again if a cache ever stays partial (a step that rebuilds the dependencies on every run).
+          prefix-key: ${{ runner.os == 'Windows' && 'v1-rust' || 'v0-rust' }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Every crate's failures in one run, not just the first crate's.
       - run: cargo test --workspace --no-fail-fast
