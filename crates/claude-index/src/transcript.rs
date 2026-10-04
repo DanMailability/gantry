@@ -13,6 +13,8 @@ const HEAD_LIMIT: u64 = 1 << 20;
 const TAIL_LIMIT: u64 = 256 << 10;
 /// Longest title kept, in characters.
 const MAX_TITLE_CHARS: usize = 120;
+/// Longest last prompt kept, in characters.
+const MAX_PROMPT_CHARS: usize = 400;
 
 /// What Gantry shows for one transcript.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +29,8 @@ pub struct TranscriptSummary {
     pub ai_title: Option<String>,
     /// First line of the first prompt the user typed.
     pub first_prompt: Option<String>,
+    /// Your newest prompt, from the newest `last-prompt` record in the tail, on one line.
+    pub last_prompt: Option<String>,
 }
 
 impl TranscriptSummary {
@@ -42,12 +46,12 @@ pub fn summarize(path: &Path) -> io::Result<Option<TranscriptSummary>> {
     let Some(session_id) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else { return Ok(None) };
     let mut file = File::open(path)?;
     let (cwd, first_prompt) = read_head(&mut file)?;
-    let (name, ai_title) = read_tail(&mut file)?;
+    let (name, ai_title, last_prompt) = read_tail(&mut file)?;
     let Some(cwd) = cwd else { return Ok(None) };
     if first_prompt.is_none() && name.is_none() && ai_title.is_none() {
         return Ok(None);
     }
-    Ok(Some(TranscriptSummary { session_id, cwd, name, ai_title, first_prompt }))
+    Ok(Some(TranscriptSummary { session_id, cwd, name, ai_title, first_prompt, last_prompt }))
 }
 
 /// The first `cwd` and the first user prompt within `HEAD_LIMIT` bytes. Unparseable lines are skipped.
@@ -71,17 +75,17 @@ fn read_head(file: &mut File) -> io::Result<(Option<PathBuf>, Option<String>)> {
     Ok((cwd, prompt))
 }
 
-/// The newest name and AI title in the last `TAIL_LIMIT` bytes. Only lines mentioning a title record
-/// are parsed; a partial first line (the window starts mid-line) and a half-written last line fail to
+/// The newest name, AI title and last prompt in the last `TAIL_LIMIT` bytes. Only lines mentioning one of those
+/// records are parsed; a partial first line (the window starts mid-line) and a half-written last line fail to
 /// parse and are skipped.
-fn read_tail(file: &mut File) -> io::Result<(Option<String>, Option<String>)> {
+fn read_tail(file: &mut File) -> io::Result<(Option<String>, Option<String>, Option<String>)> {
     let len = file.metadata()?.len();
     file.seek(SeekFrom::Start(len.saturating_sub(TAIL_LIMIT)))?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail)?;
-    let (mut name, mut ai_title) = (None, None);
+    let (mut name, mut ai_title, mut last_prompt) = (None, None, None);
     for line in tail.split(|&byte| byte == b'\n') {
-        if !mentions(line, b"-title\"") && !mentions(line, b"\"agent-name\"") {
+        if !mentions(line, b"-title\"") && !mentions(line, b"\"agent-name\"") && !mentions(line, b"\"last-prompt\"") {
             continue;
         }
         let Ok(record) = serde_json::from_slice::<Value>(line) else { continue };
@@ -90,10 +94,14 @@ fn read_tail(file: &mut File) -> io::Result<(Option<String>, Option<String>)> {
             Some("custom-title") => name = text("customTitle").or(name),
             Some("agent-name") => name = text("agentName").or(name),
             Some("ai-title") => ai_title = text("aiTitle").or(ai_title),
+            Some("last-prompt") => {
+                let prompt = record.get("lastPrompt").and_then(Value::as_str).map(clean_prompt);
+                last_prompt = prompt.filter(|prompt| !prompt.is_empty()).or(last_prompt);
+            }
             _ => {}
         }
     }
-    Ok((name, ai_title))
+    Ok((name, ai_title, last_prompt))
 }
 
 fn mentions(line: &[u8], needle: &[u8]) -> bool {
@@ -128,6 +136,16 @@ fn user_prompt(record: &Value) -> Option<String> {
 /// Trimmed, without control characters, at most `MAX_TITLE_CHARS` characters.
 fn clean(text: &str) -> String {
     text.trim().chars().filter(|c| !c.is_control()).take(MAX_TITLE_CHARS).collect()
+}
+
+/// One line: whitespace runs become single spaces, control characters are dropped, at most `MAX_PROMPT_CHARS`.
+fn clean_prompt(text: &str) -> String {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.join(" ").chars().take(MAX_PROMPT_CHARS).collect()
 }
 
 #[cfg(test)]
@@ -176,6 +194,7 @@ mod tests {
             name: Some("mine".into()),
             ai_title: Some("ai".into()),
             first_prompt: Some("prompt".into()),
+            last_prompt: None,
         };
         assert_eq!(summary.title(), "mine");
         summary.name = None;
@@ -266,5 +285,53 @@ mod tests {
         let summary = summarize(&path).unwrap().unwrap();
         assert_eq!(summary.ai_title.as_deref(), Some("x[31my"));
         assert_eq!(summary.first_prompt.unwrap().chars().count(), MAX_TITLE_CHARS);
+    }
+
+    fn last_prompt(text: &str) -> String {
+        serde_json::json!({"type": "last-prompt", "lastPrompt": text, "leafUuid": "u", "sessionId": "0f3c-session"})
+            .to_string()
+    }
+
+    #[test]
+    fn the_newest_last_prompt_record_wins_and_records_without_text_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            &[
+                user("hello"),
+                last_prompt("first"),
+                last_prompt("second"),
+                r#"{"type":"last-prompt","leafUuid":"u","sessionId":"0f3c-session"}"#.into(),
+            ],
+        );
+        assert_eq!(summarize(&path).unwrap().unwrap().last_prompt.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn last_prompt_is_one_clean_line_of_at_most_400_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "é".repeat(5000);
+        let path = write(dir.path(), &[user("hello"), last_prompt(&format!("a\n\tb\u{7}c  d {long}"))]);
+        let prompt = summarize(&path).unwrap().unwrap().last_prompt.unwrap();
+        assert!(prompt.starts_with("a bc d é"), "{prompt}");
+        assert_eq!(prompt.chars().count(), MAX_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn last_prompt_alone_does_not_make_a_session_worth_showing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path =
+            write(dir.path(), &[serde_json::json!({"type": "attachment", "cwd": "/r"}).to_string(), last_prompt("x")]);
+        assert_eq!(summarize(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn a_last_prompt_outside_the_tail_window_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let filler: Vec<String> =
+            (0..2000).map(|i| format!(r#"{{"type":"assistant","n":{i},"pad":"{}"}}"#, "y".repeat(200))).collect();
+        let mut lines = vec![user("start"), last_prompt("early")];
+        lines.extend(filler);
+        assert_eq!(summarize(&write(dir.path(), &lines)).unwrap().unwrap().last_prompt, None);
     }
 }

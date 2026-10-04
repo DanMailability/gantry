@@ -51,6 +51,8 @@ pub struct SessionRecord {
     pub container_id: Option<String>,
     /// The config directory it was found in.
     pub claude_dir: Option<PathBuf>,
+    /// Your newest prompt, from the transcript's `last-prompt` record; `None` when there is none.
+    pub last_prompt: Option<String>,
 }
 
 struct Cached {
@@ -99,6 +101,7 @@ impl<H: Host> Index<H> {
                 proc_start: None,
                 container_id: None,
                 claude_dir: Some(self.config.clone()),
+                last_prompt: summary.last_prompt.clone(),
             };
             // The same id in two folders: keep the newer.
             if records.get(&record.id).is_none_or(|old| old.last_active_ms < record.last_active_ms) {
@@ -120,6 +123,7 @@ impl<H: Host> Index<H> {
                 proc_start: None,
                 container_id: None,
                 claude_dir: Some(self.config.clone()),
+                last_prompt: None,
             });
             // A host process beats a container entry for the same session.
             if !matches!(record.state, IndexState::Running { .. }) {

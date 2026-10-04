@@ -322,6 +322,7 @@ mod tests {
             proc_start: None,
             container_id: container_id.map(Into::into),
             claude_dir: None,
+            last_prompt: None,
         }
     }
 

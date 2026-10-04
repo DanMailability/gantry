@@ -212,6 +212,7 @@ mod tests {
             proc_start: None,
             container_id: None,
             claude_dir: None,
+            last_prompt: None,
         }
     }
 
