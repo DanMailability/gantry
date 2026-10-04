@@ -1,4 +1,4 @@
-//! The Window section: what Gantry restores on start and the sidebar at start.
+//! The Window section: what Gantry restores on start, the sidebar at start and the last prompt card.
 
 use app_core::settings::{Settings, SidebarAtStart};
 use gpui::{Context, Div, Window, div};
@@ -78,15 +78,50 @@ impl SettingsView {
             cx,
         );
 
-        div().flex().flex_col().gap(theme.ui(26.)).child(group(
-            theme,
-            "Start",
-            None,
-            vec![
-                row(theme, "Tabs at start", RESTORE[restore].2, restore_bar, restore_reset),
-                row(theme, "Sidebar at start", SIDEBAR[sidebar].2, sidebar_bar, sidebar_reset),
-            ],
-        ))
+        let shown = settings.window.last_prompt;
+        let prompt_switch = self.switch(
+            "last-prompt",
+            0,
+            shown,
+            window,
+            cx,
+            change(move |settings| settings.window.last_prompt = !shown),
+        );
+        let prompt_reset = self.reset_slot(
+            "reset-last-prompt",
+            0,
+            settings,
+            |s| s.window.last_prompt,
+            |s, v| s.window.last_prompt = v,
+            window,
+            cx,
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.ui(26.))
+            .child(group(
+                theme,
+                "Start",
+                None,
+                vec![
+                    row(theme, "Tabs at start", RESTORE[restore].2, restore_bar, restore_reset),
+                    row(theme, "Sidebar at start", SIDEBAR[sidebar].2, sidebar_bar, sidebar_reset),
+                ],
+            ))
+            .child(group(
+                theme,
+                "Panes",
+                None,
+                vec![row(
+                    theme,
+                    "Last prompt",
+                    "Show your last prompt in a card above each Claude pane.",
+                    prompt_switch,
+                    prompt_reset,
+                )],
+            ))
     }
 }
 
