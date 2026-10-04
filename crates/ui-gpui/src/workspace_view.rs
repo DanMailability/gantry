@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, describe, without_claude_glyph};
+use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
@@ -1091,7 +1092,7 @@ impl WorkspaceView {
             },
             SidebarEvent::Menu(action) => self.run_menu_action(action, window, cx),
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
-            SidebarEvent::New { claude } => self.open(claude, None),
+            SidebarEvent::New { claude } => self.show_launcher(claude, window, cx),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
             SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
@@ -1166,9 +1167,41 @@ impl WorkspaceView {
     }
 
     fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_launcher(true, window, cx);
+    }
+
+    /// The folders with live panes, in tab order, for the launcher's "Open now".
+    fn open_folders(&self, cx: &Context<Self>) -> Vec<OpenFolder> {
+        let sessions = self.sidebar.read(cx).sessions();
+        let panes: Vec<OpenPane> = self
+            .workspace
+            .tabs
+            .iter()
+            .filter(|tab| !tab.settings)
+            .flat_map(|tab| tab.root.leaves())
+            .filter_map(|id| {
+                let leaf = self.workspace.leaves.get(&id).filter(|leaf| leaf.pane.is_some())?;
+                let status = leaf
+                    .session
+                    .as_deref()
+                    .and_then(|session| sessions.get(session))
+                    .and_then(|info| info.status.as_ref());
+                Some(OpenPane {
+                    cwd: leaf.launch.cwd.clone(),
+                    claude: leaf.launch.is_claude(),
+                    tone: status_tone(status, self.unseen.contains_key(&id)),
+                })
+            })
+            .collect();
+        launcher::open_folders(&panes)
+    }
+
+    /// Open the launcher; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
+    fn show_launcher(&mut self, claude_first: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.recents = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
-        let view = cx.new(|cx| LauncherView::new(sessions, cx));
+        let open = self.open_folders(cx);
+        let view = cx.new(|cx| LauncherView::new(open, sessions, claude_first, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &LauncherEvent, window, cx| {
             this.on_launcher_event(event.clone(), window, cx)
         });
@@ -1628,7 +1661,7 @@ impl WorkspaceView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .child("New Claude session")
-                        .on_click(cx.listener(|this, _, _, _| this.open(true, None))),
+                        .on_click(cx.listener(|this, _, window, cx| this.show_launcher(true, window, cx))),
                 )
                 .child(
                     div()
@@ -1645,7 +1678,7 @@ impl WorkspaceView {
                         .cursor_pointer()
                         .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                         .child("New shell")
-                        .on_click(cx.listener(|this, _, _, _| this.open(false, None))),
+                        .on_click(cx.listener(|this, _, window, cx| this.show_launcher(false, window, cx))),
                 )
                 .into_any_element();
         };

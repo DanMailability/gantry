@@ -58,7 +58,7 @@ pub enum SidebarEvent {
         /// Where the menu opens.
         position: Point<Pixels>,
     },
-    /// Open a new Claude (or shell) tab where the focused pane is.
+    /// Open the launcher (Claude first, or shell first).
     New {
         /// Claude (true) or a shell.
         claude: bool,
