@@ -166,7 +166,7 @@ fn liveness(record: &LiveRecord, host: &impl Host) -> Option<(IndexState, Option
 
 /// `projects/<folder>/<id>.jsonl` files with their mtime and size. Deeper files (subagent
 /// transcripts) are not sessions.
-fn transcripts(projects: &Path) -> Vec<(PathBuf, SystemTime, u64)> {
+pub fn transcripts(projects: &Path) -> Vec<(PathBuf, SystemTime, u64)> {
     let Ok(folders) = std::fs::read_dir(projects) else { return Vec::new() };
     folders
         .flatten()

@@ -6,5 +6,6 @@ pub mod containers;
 pub mod host;
 pub mod index;
 pub mod live;
+pub mod search;
 pub mod transcript;
 pub mod watch;
