@@ -422,7 +422,7 @@ fn text_box(theme: &Theme, width: f32, content: Div) -> Div {
         .border_1()
         .border_color(rgb(theme.tokens.line))
         .bg(rgb(theme.tokens.ground))
-        .child(content)
+        .child(content.flex_1().h_full())
 }
 
 impl SetupView {
