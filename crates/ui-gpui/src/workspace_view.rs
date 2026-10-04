@@ -1890,6 +1890,7 @@ fn prompt_card(text: String, multiple: bool, theme: &Theme) -> Div {
         .flex()
         .items_start()
         .gap(theme.ui(10.))
+        .overflow_hidden()
         .rounded(px(RADIUS_SMALL))
         .bg(rgb(theme.tokens.surface))
         .border_1()
