@@ -14,9 +14,13 @@ gpui_platform.workspace = true
 app-core.workspace = true
 daemon.workspace = true
 protocol.workspace = true
+claude-index.workspace = true
 async-channel.workspace = true
 notify.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 notify-rust.workspace = true
 rodio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -128,7 +128,7 @@ fn dir_rows(settings: &Settings, daemon_dir: Option<&Path>, home: Option<&Path>)
 }
 
 /// Make the implicit Default a real entry, so it can be edited or sit beside others.
-fn materialize(settings: &mut Settings, daemon_dir: Option<&Path>, home: Option<&Path>) {
+pub(crate) fn materialize(settings: &mut Settings, daemon_dir: Option<&Path>, home: Option<&Path>) {
     if settings.claude_dirs.is_empty() {
         settings.claude_dirs = dir_rows(settings, daemon_dir, home);
     }
@@ -604,6 +604,20 @@ impl SettingsView {
             theme,
             muted(theme, "Dev containers always run plain claude; the arguments still apply. Gantry never writes inside these folders."),
             add,
+            empty_slot(theme),
+        ));
+        let detect = self.button(
+            "dir-detect",
+            0,
+            "Detect Claude dirs…",
+            window,
+            cx,
+            handler(|_, _, cx| cx.emit(SettingsEvent::DetectClaudeDirs)),
+        );
+        rows.push(row_shell(
+            theme,
+            muted(theme, "Looks for Claude config dirs on this machine that are not in the list yet."),
+            detect,
             empty_slot(theme),
         ));
         let remembered = settings.folder_claude_dirs.len();

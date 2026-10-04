@@ -6671,6 +6671,7 @@ version = "0.1.0"
 dependencies = [
  "app-core",
  "async-channel",
+ "claude-index",
  "daemon",
  "gpui",
  "gpui_platform",
@@ -6679,6 +6680,7 @@ dependencies = [
  "protocol",
  "rodio",
  "serde_json",
+ "tempfile",
  "tracing",
 ]
 

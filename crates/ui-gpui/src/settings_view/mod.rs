@@ -13,9 +13,9 @@ use app_core::settings::{Problem, Settings, hex};
 use app_core::snapshot::Rgb;
 use app_core::text_field::TextField;
 use gpui::{
-    App, Bounds, Context, DispatchPhase, Div, ElementId, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, SharedString, Stateful,
-    Subscription, Window, canvas, deferred, div, point, prelude::*, px, relative, rgb, rgba,
+    App, Bounds, Context, DispatchPhase, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle,
+    SharedString, Stateful, Subscription, Window, canvas, deferred, div, point, prelude::*, px, relative, rgb, rgba,
 };
 
 use crate::field;
@@ -24,7 +24,7 @@ use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, theme};
 
 mod alerts;
 mod appearance;
-mod sessions;
+pub(crate) mod sessions;
 mod shortcuts;
 mod terminal;
 mod window;
@@ -177,6 +177,15 @@ fn handler(f: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>
 fn change(f: impl Fn(&mut Settings) + 'static) -> Handler {
     handler(move |_, _, cx| SettingsStore::update(cx, |settings| f(settings)))
 }
+
+/// What the Settings page asks the workspace to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsEvent {
+    /// Open the setup wizard to look for Claude config dirs.
+    DetectClaudeDirs,
+}
+
+impl EventEmitter<SettingsEvent> for SettingsView {}
 
 /// The Settings page, shown in the pane area while the Settings tab is active.
 pub(crate) struct SettingsView {
