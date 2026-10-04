@@ -480,6 +480,7 @@ mod tests {
             status_since_ms: 0,
             container: None,
             claude_dir: None,
+            last_prompt: None,
         }
     }
 

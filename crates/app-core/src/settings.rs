@@ -239,6 +239,8 @@ pub struct WindowSettings {
     pub scrollback: u32,
     /// Reorder right-to-left text for display.
     pub right_to_left: bool,
+    /// Show your last prompt above each Claude pane.
+    pub last_prompt: bool,
 }
 
 /// `~/x` becomes `<home>/x`; other paths are unchanged.
@@ -344,6 +346,7 @@ impl Default for Settings {
                 sidebar_at_start: SidebarAtStart::Remember,
                 scrollback: 10_000,
                 right_to_left: true,
+                last_prompt: true,
             },
             project_colors: ProjectColors::default(),
             animate_working: true,
@@ -738,6 +741,7 @@ impl Reader {
             ),
             scrollback: self.number(&map, "window.", "scrollback", 10_000.0, (1000.0, 100_000.0)).round() as u32,
             right_to_left: self.bool(&map, "window.", "rightToLeft", defaults.window.right_to_left),
+            last_prompt: self.bool(&map, "window.", "lastPrompt", defaults.window.last_prompt),
         };
 
         let map = self.object(raw, "", "projectColors");
@@ -882,6 +886,7 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     );
     add(&["window", "scrollback"], window.scrollback.into(), window.scrollback != base.scrollback);
     add(&["window", "rightToLeft"], window.right_to_left.into(), window.right_to_left != base.right_to_left);
+    add(&["window", "lastPrompt"], window.last_prompt.into(), window.last_prompt != base.last_prompt);
     add(
         &["projectColors", "enabled"],
         settings.project_colors.enabled.into(),
@@ -1188,6 +1193,7 @@ mod tests {
             sidebar_at_start: SidebarAtStart::Hidden,
             scrollback: 50000,
             right_to_left: false,
+            last_prompt: false,
         };
         settings.animate_working = false;
         settings
@@ -1211,7 +1217,8 @@ mod tests {
                 restore_layout: true,
                 sidebar_at_start: SidebarAtStart::Remember,
                 scrollback: 10000,
-                right_to_left: true
+                right_to_left: true,
+                last_prompt: true
             }
         );
     }
@@ -1223,6 +1230,16 @@ mod tests {
             assert!(SidebarAtStart::Shown.visible(saved));
             assert!(!SidebarAtStart::Hidden.visible(saved));
         }
+    }
+
+    #[test]
+    fn last_prompt_defaults_on_and_a_bad_value_falls_back_with_a_problem() {
+        assert!(parse("{}").settings.unwrap().window.last_prompt);
+        let off = parse(r#"{"window": {"lastPrompt": false}}"#);
+        assert!(!off.settings.unwrap().window.last_prompt);
+        let bad = parse(r#"{"window": {"lastPrompt": "yes"}}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert!(bad.settings.unwrap().window.last_prompt);
     }
 
     #[test]

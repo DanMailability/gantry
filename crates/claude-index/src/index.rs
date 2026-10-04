@@ -51,6 +51,8 @@ pub struct SessionRecord {
     pub container_id: Option<String>,
     /// The config directory it was found in.
     pub claude_dir: Option<PathBuf>,
+    /// Your newest prompt, from the transcript's `last-prompt` record; `None` when there is none.
+    pub last_prompt: Option<String>,
 }
 
 struct Cached {
@@ -80,10 +82,15 @@ impl<H: Host> Index<H> {
             seen.insert(path.clone());
             let fresh = self.cache.get(&path).is_some_and(|cached| cached.modified == modified && cached.len == len);
             if !fresh {
-                let summary = summarize(&path).unwrap_or_else(|err| {
+                let mut summary = summarize(&path).unwrap_or_else(|err| {
                     tracing::debug!("skipping transcript {}: {err}", path.display());
                     None
                 });
+                // The tail window can lose the last prompt in a long turn; the file only grows, so keep the old one.
+                let earlier = self.cache.get(&path).and_then(|cached| cached.summary.as_ref()?.last_prompt.clone());
+                if let Some(summary) = summary.as_mut() {
+                    summary.last_prompt = summary.last_prompt.take().or(earlier);
+                }
                 self.cache.insert(path.clone(), Cached { modified, len, summary });
             }
             let Some(summary) = &self.cache[&path].summary else { continue };
@@ -99,6 +106,7 @@ impl<H: Host> Index<H> {
                 proc_start: None,
                 container_id: None,
                 claude_dir: Some(self.config.clone()),
+                last_prompt: summary.last_prompt.clone(),
             };
             // The same id in two folders: keep the newer.
             if records.get(&record.id).is_none_or(|old| old.last_active_ms < record.last_active_ms) {
@@ -120,6 +128,7 @@ impl<H: Host> Index<H> {
                 proc_start: None,
                 container_id: None,
                 claude_dir: Some(self.config.clone()),
+                last_prompt: None,
             });
             // A host process beats a container entry for the same session.
             if !matches!(record.state, IndexState::Running { .. }) {
@@ -343,6 +352,31 @@ mod tests {
         let host = FakeHost { running: HashMap::from([(42, "777".to_string())]), ..FakeHost::default() };
         let record = Index::new(dir.path().into(), host).scan().remove(0);
         assert_eq!((record.id.as_str(), record.title.as_str(), record.last_active_ms), ("fresh", "", 1000));
+    }
+
+    #[test]
+    fn the_last_prompt_survives_the_transcript_growing_past_the_tail_window() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = transcript(dir.path(), "-r", "s1", "/r", "hello", 10);
+        let record = serde_json::json!({"type": "last-prompt", "lastPrompt": "what next", "sessionId": "s1"});
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(format!("{record}\n").as_bytes())
+            .unwrap();
+        let mut index = Index::new(dir.path().into(), FakeHost::default());
+        assert_eq!(index.scan()[0].last_prompt.as_deref(), Some("what next"));
+        // A long turn: tool output pushes the record out of the tail window before Claude writes the next one.
+        let filler = format!(r#"{{"type":"assistant","pad":"{}"}}"#, "y".repeat(300 << 10));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(format!("{filler}\n").as_bytes())
+            .unwrap();
+        assert_eq!(index.scan()[0].last_prompt.as_deref(), Some("what next"));
     }
 
     #[test]

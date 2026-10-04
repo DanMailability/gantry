@@ -111,6 +111,7 @@ mod tests {
             status_since_ms: 0,
             container: None,
             claude_dir: None,
+            last_prompt: None,
         }
     }
 
@@ -127,6 +128,7 @@ mod tests {
             proc_start: start.map(Into::into),
             container_id: None,
             claude_dir: None,
+            last_prompt: None,
         }
     }
 

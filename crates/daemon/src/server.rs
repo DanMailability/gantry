@@ -1030,6 +1030,7 @@ mod tests {
             proc_start: None,
             container_id: None,
             claude_dir: None,
+            last_prompt: None,
         };
         state.records = Some(Arc::new(vec![record]));
         state.publish_sessions(true);

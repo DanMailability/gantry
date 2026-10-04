@@ -185,6 +185,7 @@ mod tests {
             status_since_ms: since,
             container: None,
             claude_dir: None,
+            last_prompt: None,
         }
     }
 
