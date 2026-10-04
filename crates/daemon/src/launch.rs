@@ -78,6 +78,7 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
                 idle_timeout: options.idle_timeout,
                 claude_dir,
                 containers_file,
+                search_dir: Some(paths.search_dir.clone()),
                 docker,
             },
         )

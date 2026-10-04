@@ -46,6 +46,8 @@ pub struct Paths {
     pub layout_file: PathBuf,
     /// Dev container mappings the daemon remembers (beside the layout).
     pub containers_file: PathBuf,
+    /// Conversation search index (daemon-owned, beside the layout).
+    pub search_dir: PathBuf,
     /// User settings, shared by every profile.
     pub settings_file: PathBuf,
     socket: SocketLocation,
@@ -105,6 +107,7 @@ impl Paths {
         #[cfg(windows)]
         let socket = SocketLocation::Pipe(format!("gantry-{profile}-{unique}"));
         let containers_file = layout_file.with_file_name("containers.json");
+        let search_dir = layout_file.with_file_name("search");
         Paths {
             profile: profile.into(),
             lock_file: runtime_dir.join("daemon.lock"),
@@ -112,6 +115,7 @@ impl Paths {
             log_dir,
             layout_file,
             containers_file,
+            search_dir,
             settings_file,
             socket,
         }

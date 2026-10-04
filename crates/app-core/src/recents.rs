@@ -2,9 +2,10 @@
 //! unless searching or looking at one project; chips for the most recently used projects.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use protocol::message::{SessionInfo, SessionState};
+use protocol::message::{SearchHit, SessionInfo, SessionState, Speaker};
 
 use crate::fuzzy::Fuzzy;
 use crate::session_tree::{age, display_path, keep, labels, newest_first, session_title};
@@ -31,6 +32,65 @@ pub struct RecentsInput<'a> {
     pub per_project: usize,
     /// Project chips shown before "More…".
     pub chips: usize,
+    /// Conversation search hits for `query`, best first (the latest reply; may be for a slightly older query).
+    pub hits: &'a [SearchHit],
+    /// Where conversation search stands.
+    pub content: ContentState,
+}
+
+/// Fewest non-space characters that also search inside conversations.
+pub const CONTENT_MIN_CHARS: usize = 3;
+
+/// Whether `query` also searches inside conversations.
+pub fn searches_content(query: &str) -> bool {
+    query.trim().chars().count() >= CONTENT_MIN_CHARS
+}
+
+/// Where conversation search stands for the pop-up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentState {
+    /// No reply for the current query yet.
+    Waiting,
+    /// The reply for the current query arrived.
+    Ready,
+    /// The daemon is still building the index (percent done).
+    Indexing(u8),
+    /// The daemon cannot search.
+    Unavailable,
+}
+
+/// The matching message a conversation hit shows under its title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snippet {
+    /// Who wrote it.
+    pub speaker: Speaker,
+    /// One line of it.
+    pub text: String,
+    /// Byte ranges of `text` to draw in bold: on character boundaries, in order, not overlapping.
+    pub highlights: Vec<Range<usize>>,
+}
+
+impl Snippet {
+    /// The snippet of `hit`, keeping only highlight ranges that can be drawn (a bad range would panic the renderer).
+    pub fn from_hit(hit: &SearchHit) -> Snippet {
+        let text = hit.snippet.clone();
+        let mut ranges: Vec<Range<usize>> = hit
+            .highlights
+            .iter()
+            .map(|&(start, end)| start as usize..end as usize)
+            .filter(|r| r.start < r.end && r.end <= text.len())
+            .filter(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        let mut highlights: Vec<Range<usize>> = Vec::new();
+        for range in ranges {
+            match highlights.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => highlights.push(range),
+            }
+        }
+        Snippet { speaker: hit.speaker, text, highlights }
+    }
 }
 
 /// One row of the pop-up's list.
@@ -53,6 +113,10 @@ pub enum RecentItem {
         age: String,
         /// The project it is listed under.
         project: PathBuf,
+        /// The matching message, for a conversation hit (`None` = a title match).
+        snippet: Option<Snippet>,
+        /// Whether a leaf of the layout shows it (Enter focuses it).
+        open: bool,
     },
     /// "Show N more" under a project.
     More {
@@ -61,12 +125,22 @@ pub enum RecentItem {
         /// Sessions not shown.
         hidden: usize,
     },
+    /// The heading of the conversation hits.
+    Section {
+        /// Its text.
+        label: String,
+    },
+    /// A line about the conversation search's state.
+    Note {
+        /// Its text.
+        text: String,
+    },
 }
 
 impl RecentItem {
     /// Whether the selection can land here (headings are skipped).
     pub fn selectable(&self) -> bool {
-        !matches!(self, RecentItem::Heading { .. })
+        !matches!(self, RecentItem::Heading { .. } | RecentItem::Section { .. } | RecentItem::Note { .. })
     }
 }
 
@@ -127,8 +201,66 @@ fn in_scope(input: &RecentsInput<'_>, path: &Path) -> bool {
     input.project.is_none_or(|picked| picked == path)
 }
 
-/// The pop-up's list.
+/// The pop-up's list: title matches by project, then (for a long enough query) the conversation hits. Merging the
+/// two later only changes this function.
 pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
+    let mut items = title_items(input);
+    if searches_content(input.query) {
+        let rows = content_items(input, &items);
+        items.extend(rows);
+    }
+    items
+}
+
+/// "Found in conversations": one row per hit not already listed, in the picked project, closed or open in a leaf
+/// (sessions running outside Gantry are in the Active list), then a note on the search's state.
+fn content_items(input: &RecentsInput<'_>, listed: &[RecentItem]) -> Vec<RecentItem> {
+    let mut shown: HashSet<String> = listed
+        .iter()
+        .filter_map(|item| match item {
+            RecentItem::Session { session, .. } => Some(session.id.clone()),
+            _ => None,
+        })
+        .collect();
+    let by_id: HashMap<&str, &SessionInfo> = input.sessions.iter().map(|s| (s.id.as_str(), *s)).collect();
+    let mut rows = Vec::new();
+    for hit in input.hits {
+        let Some(session) = by_id.get(hit.session_id.as_str()).copied() else { continue };
+        let open = input.open.contains(&session.id);
+        if !(open || session.state == SessionState::Closed) || !shown.insert(session.id.clone()) {
+            continue;
+        }
+        let project = (input.project_of)(&session.cwd);
+        if !in_scope(input, &project) {
+            continue;
+        }
+        rows.push(RecentItem::Session {
+            session: Box::new(session.clone()),
+            age: age(input.now_ms, session.last_active_ms),
+            project,
+            snippet: Some(Snippet::from_hit(hit)),
+            open,
+        });
+    }
+    let note = match input.content {
+        ContentState::Indexing(percent) => Some(format!("Indexing conversations… {percent}%")),
+        ContentState::Unavailable => Some("Conversation search is unavailable — see the daemon log".to_string()),
+        // Hits that are all listed above (title matches, another project) leave no note: saying no conversation
+        // mentions the query would be false.
+        ContentState::Ready if input.hits.is_empty() => Some("No conversations mention this".to_string()),
+        _ => None,
+    };
+    if rows.is_empty() && note.is_none() {
+        return Vec::new();
+    }
+    let mut items = vec![RecentItem::Section { label: "Found in conversations".into() }];
+    items.extend(rows);
+    items.extend(note.map(|text| RecentItem::Note { text }));
+    items
+}
+
+/// The title matches, by project.
+fn title_items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
     let grouped = grouped(input);
     let paths: Vec<PathBuf> = grouped.iter().map(|(path, _)| path.clone()).collect();
     let labels = labels(&paths, input.home);
@@ -152,6 +284,8 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
                 session: Box::new((*session).clone()),
                 age: age(input.now_ms, session.last_active_ms),
                 project: path.clone(),
+                snippet: None,
+                open: false,
             });
         }
         if matching.len() > cap {
@@ -253,6 +387,8 @@ mod tests {
         expanded: HashSet<PathBuf>,
         per_project: usize,
         chips: usize,
+        hits: Vec<SearchHit>,
+        content: ContentState,
     }
 
     impl Default for Fixture {
@@ -265,6 +401,8 @@ mod tests {
                 expanded: HashSet::new(),
                 per_project: 5,
                 chips: 6,
+                hits: Vec::new(),
+                content: ContentState::Waiting,
             }
         }
     }
@@ -287,6 +425,8 @@ mod tests {
                 now_ms: NOW,
                 per_project: self.per_project,
                 chips: self.chips,
+                hits: &self.hits,
+                content: self.content,
             })
         }
 
@@ -295,6 +435,12 @@ mod tests {
                 .iter()
                 .map(|item| match item {
                     RecentItem::Heading { label, .. } => format!("# {label}"),
+                    RecentItem::Session { session, snippet: Some(_), open: true, .. } => {
+                        format!("~{} open", session.id)
+                    }
+                    RecentItem::Session { session, snippet: Some(_), .. } => format!("~{}", session.id),
+                    RecentItem::Section { label } => format!("## {label}"),
+                    RecentItem::Note { text } => format!("! {text}"),
                     RecentItem::Session { session, .. } => session.id.clone(),
                     RecentItem::More { hidden, .. } => format!("+{hidden}"),
                 })
@@ -335,7 +481,7 @@ mod tests {
             match item {
                 RecentItem::Heading { path, .. } => heading = Some(path.clone()),
                 RecentItem::Session { project, .. } => assert_eq!(Some(project), heading.as_ref()),
-                RecentItem::More { .. } => {}
+                RecentItem::More { .. } | RecentItem::Section { .. } | RecentItem::Note { .. } => {}
             }
         }
         assert!(
@@ -430,5 +576,125 @@ mod tests {
         assert_eq!(one.outline(), vec!["# a", "s0", "+3", "# b", "t"]);
         let no_chips = Fixture { chips: 0, ..Fixture::of(sessions) };
         assert_eq!(no_chips.chip_labels(), vec!["All projects 5", "More… 0"]);
+    }
+
+    fn hit(id: &str, text: &str, highlights: Vec<(u32, u32)>) -> SearchHit {
+        SearchHit {
+            session_id: id.into(),
+            claude_dir: "/home/me/.claude".into(),
+            speaker: Speaker::You,
+            snippet: text.into(),
+            highlights,
+        }
+    }
+
+    #[test]
+    fn content_hits_follow_the_title_matches_without_repeating_them() {
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1), closed("b1", "/r/b", 2), closed("b2", "/r/b", 3)]);
+        fixture.query = "title a1".into();
+        fixture.hits = vec![hit("b2", "x", vec![]), hit("a1", "y", vec![]), hit("b1", "z", vec![])];
+        fixture.content = ContentState::Ready;
+        assert_eq!(fixture.outline(), vec!["# a", "a1", "## Found in conversations", "~b2", "~b1"]);
+    }
+
+    #[test]
+    fn no_content_section_for_short_queries() {
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1)]);
+        fixture.query = "a".into();
+        fixture.hits = vec![hit("a1", "x", vec![])];
+        fixture.content = ContentState::Ready;
+        assert!(!fixture.outline().iter().any(|row| row.starts_with("##")));
+        assert!(!searches_content(" a "));
+        assert!(!searches_content("in"), "two letters would list half the history");
+        assert!(searches_content("abc"));
+    }
+
+    #[test]
+    fn content_hits_respect_the_picked_project() {
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1), closed("b1", "/r/b", 2)]);
+        fixture.query = "zzz".into();
+        fixture.project = Some("/r/b".into());
+        fixture.hits = vec![hit("a1", "x", vec![]), hit("b1", "y", vec![])];
+        fixture.content = ContentState::Ready;
+        assert_eq!(fixture.outline(), vec!["## Found in conversations", "~b1"]);
+    }
+
+    #[test]
+    fn open_sessions_are_hits_and_external_ones_are_not() {
+        let mut tab = closed("tab", "/r/a", 1);
+        tab.state = SessionState::Managed { pane: 2 };
+        let mut elsewhere = closed("elsewhere", "/r/a", 1);
+        elsewhere.state = SessionState::External { pid: Some(9) };
+        let mut fixture = Fixture::of(vec![tab, elsewhere, closed("unknown-to-hits", "/r/a", 1)]);
+        fixture.open.insert("tab".into());
+        fixture.query = "zzz".into();
+        fixture.hits = vec![hit("tab", "x", vec![]), hit("elsewhere", "y", vec![]), hit("not-listed", "z", vec![])];
+        fixture.content = ContentState::Ready;
+        assert_eq!(fixture.outline(), vec!["## Found in conversations", "~tab open"]);
+    }
+
+    #[test]
+    fn hits_that_are_all_title_matches_leave_no_section() {
+        // "No conversations mention this" would be false: the conversation is listed above.
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1)]);
+        fixture.query = "title a1".into();
+        fixture.hits = vec![hit("a1", "x", vec![])];
+        fixture.content = ContentState::Ready;
+        assert_eq!(fixture.outline(), vec!["# a", "a1"]);
+    }
+
+    #[test]
+    fn the_section_explains_its_state() {
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1)]);
+        fixture.query = "zzz".into();
+        fixture.content = ContentState::Waiting;
+        assert!(fixture.outline().is_empty(), "nothing until the first reply");
+        fixture.content = ContentState::Ready;
+        assert_eq!(fixture.outline(), vec!["## Found in conversations", "! No conversations mention this"]);
+        fixture.content = ContentState::Indexing(40);
+        fixture.hits = vec![hit("a1", "x", vec![])];
+        assert_eq!(fixture.outline(), vec!["## Found in conversations", "~a1", "! Indexing conversations… 40%"]);
+        fixture.content = ContentState::Unavailable;
+        fixture.hits.clear();
+        assert_eq!(
+            fixture.outline(),
+            vec!["## Found in conversations", "! Conversation search is unavailable — see the daemon log"]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn title_matches_have_no_snippet_and_hits_carry_theirs() {
+        let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1), closed("b1", "/r/b", 2)]);
+        fixture.query = "title a1".into();
+        fixture.hits = vec![hit("b1", "the fallback", vec![(4, 12)])];
+        fixture.content = ContentState::Ready;
+        let items = fixture.with(items);
+        let snippets: Vec<Option<&Snippet>> = items
+            .iter()
+            .filter_map(|item| match item {
+                RecentItem::Session { snippet, .. } => Some(snippet.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snippets[0], None);
+        let snippet = snippets[1].unwrap();
+        assert_eq!(
+            (snippet.speaker, snippet.text.as_str(), snippet.highlights.clone()),
+            (Speaker::You, "the fallback", vec![4..12])
+        );
+    }
+
+    #[test]
+    fn highlights_off_char_boundaries_are_dropped() {
+        // "שלום" is 8 bytes; 1..3 cuts a character, 0..8 does not; 20..30 is past the end; 6..2 is backwards.
+        let snippet = Snippet::from_hit(&hit("s", "שלום fallback", vec![(1, 3), (0, 8), (20, 30), (6, 2), (9, 17)]));
+        assert_eq!(snippet.highlights, vec![0..8, 9..17]);
+    }
+
+    #[test]
+    fn overlapping_highlights_are_merged_in_order() {
+        let snippet = Snippet::from_hit(&hit("s", "abcdefghij", vec![(5, 8), (0, 2), (1, 4)]));
+        assert_eq!(snippet.highlights, vec![0..4, 5..8]);
     }
 }

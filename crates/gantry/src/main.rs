@@ -65,7 +65,10 @@ fn daemon_main() -> ExitCode {
     let paths = Paths::for_profile(&current_profile());
     let appender = tracing_appender::rolling::daily(&paths.log_dir, "daemon.log");
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // Tantivy logs every commit and merge at info: keep its warnings only.
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tantivy=warn".into()),
+        )
         .with_writer(appender)
         .with_ansi(false)
         .init();

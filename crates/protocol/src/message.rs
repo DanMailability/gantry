@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -253,8 +253,42 @@ pub enum ClientMessage {
         /// Directory a new session would start in.
         dir: PathBuf,
     },
+    /// Search the conversations' text; answered by `SearchResults` (or `SearchUnavailable`).
+    SearchConversations {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// What the user typed.
+        query: String,
+        /// Most sessions to return.
+        limit: u32,
+    },
     /// Terminate every pane and stop the daemon (frozen).
     StopAll,
+}
+
+/// Who wrote the message a search hit shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Speaker {
+    /// The user.
+    You,
+    /// Claude.
+    Claude,
+}
+
+/// A session whose conversation matches a search, shown by its best-matching message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// Session id.
+    pub session_id: String,
+    /// Claude config dir the transcript is in.
+    pub claude_dir: PathBuf,
+    /// Who wrote the matching message.
+    pub speaker: Speaker,
+    /// About 160 characters of it around the match, on one line.
+    pub snippet: String,
+    /// Byte ranges of `snippet` that matched (start inclusive, end exclusive), in order.
+    pub highlights: Vec<(u32, u32)>,
 }
 
 /// Daemon → GUI.
@@ -338,6 +372,26 @@ pub enum DaemonMessage {
         request: u64,
         /// The container that mounts the directory, if any.
         container: Option<ContainerChoice>,
+    },
+    /// The answer to `SearchConversations`: one hit per session, best first.
+    SearchResults {
+        /// Echoed request id.
+        request: u64,
+        /// Matching sessions.
+        hits: Vec<SearchHit>,
+    },
+    /// The conversation index is being built: `done` of `total` files (sent about once a second, and once with
+    /// `done == total` at the end).
+    SearchIndexing {
+        /// Files indexed so far.
+        done: u64,
+        /// Files in this pass.
+        total: u64,
+    },
+    /// Conversation search does not work in this daemon run.
+    SearchUnavailable {
+        /// Why (also in the daemon log).
+        reason: String,
     },
     /// Another GUI connected; this connection is closed next.
     TakenOver,
@@ -499,7 +553,31 @@ mod tests {
         assert_eq!((spec.claude, spec.env.len(), spec.scrollback), (false, 0, None));
         let pane = r#"{"pane":1,"program":"sh","args":[],"cwd":"/","last_focused":0}"#;
         assert!(!serde_json::from_str::<PaneInfo>(pane).unwrap().claude);
-        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(PROTOCOL_VERSION, 7);
+    }
+
+    #[test]
+    fn search_messages_round_trip() {
+        let request = ClientMessage::SearchConversations { request: 4, query: "font \"fall back\"".into(), limit: 200 };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.starts_with(r#"{"type":"search_conversations","#), "{json}");
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), request);
+        let hit = SearchHit {
+            session_id: "s1".into(),
+            claude_dir: "/home/me/.claude".into(),
+            speaker: Speaker::Claude,
+            snippet: "the font fallback".into(),
+            highlights: vec![(4, 8), (9, 17)],
+        };
+        for reply in [
+            DaemonMessage::SearchResults { request: 4, hits: vec![hit] },
+            DaemonMessage::SearchIndexing { done: 10, total: 40 },
+            DaemonMessage::SearchUnavailable { reason: "disk".into() },
+        ] {
+            let json = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
+        }
+        assert!(serde_json::to_string(&Speaker::You).unwrap() == r#""you""#);
     }
 
     #[test]

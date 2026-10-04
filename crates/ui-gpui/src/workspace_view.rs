@@ -35,7 +35,7 @@ use crate::alerts::{self, Notice};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
-use crate::recents_view::{RecentsEvent, RecentsView};
+use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::SettingsView;
 use crate::sidebar_view::{SidebarEvent, SidebarView};
@@ -159,6 +159,10 @@ pub struct WorkspaceView {
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
+    /// Percent of the conversation index built while the daemon builds it.
+    search_indexing: Option<u8>,
+    /// Whether the daemon said conversation search does not work.
+    search_unavailable: bool,
     client: DaemonClient,
     layout_file: PathBuf,
     default_cwd: PathBuf,
@@ -266,6 +270,8 @@ impl WorkspaceView {
             slots: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
+            search_indexing: None,
+            search_unavailable: false,
             client,
             layout_file,
             default_cwd,
@@ -426,6 +432,20 @@ impl WorkspaceView {
                 }
                 ClientEvent::ContainerFound { request, container } => {
                     self.on_container_found(*request, container.clone(), window, cx)
+                }
+                ClientEvent::SearchResults { request, hits } => {
+                    if let Some((view, _)) = &self.recents {
+                        let hits = hits.clone();
+                        view.update(cx, |view, cx| view.set_hits(*request, hits, cx));
+                    }
+                }
+                ClientEvent::SearchIndexing { done, total } => {
+                    self.search_indexing = (done < total).then(|| (done * 100 / (*total).max(1)) as u8);
+                    self.push_search_state(cx);
+                }
+                ClientEvent::SearchUnavailable { .. } => {
+                    self.search_unavailable = true;
+                    self.push_search_state(cx);
                 }
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
@@ -1227,14 +1247,32 @@ impl WorkspaceView {
         });
         view.focus_handle(cx).focus(window, cx);
         self.recents = Some((view, subscription));
+        self.push_search_state(cx);
         cx.notify();
     }
 
+    /// Tell an open recent sessions pop-up where conversation search stands.
+    fn push_search_state(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.recents {
+            let (indexing, unavailable) = (self.search_indexing, self.search_unavailable);
+            view.update(cx, |view, cx| view.set_index_state(indexing, unavailable, cx));
+        }
+    }
+
     fn on_recents_event(&mut self, event: RecentsEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.recents = None;
         match event {
-            RecentsEvent::Resume { session, cwd, split } => self.resume_session(session, cwd, split, window, cx),
-            RecentsEvent::Dismiss => self.focus_current(window, cx),
+            RecentsEvent::Search { request, query } => {
+                self.client.search(request, &query, SEARCH_LIMIT);
+                return;
+            }
+            RecentsEvent::Resume { session, cwd, split } => {
+                self.recents = None;
+                self.resume_session(session, cwd, split, window, cx);
+            }
+            RecentsEvent::Dismiss => {
+                self.recents = None;
+                self.focus_current(window, cx);
+            }
         }
         cx.notify();
     }
