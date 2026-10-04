@@ -606,6 +606,20 @@ impl SettingsView {
             add,
             empty_slot(theme),
         ));
+        let detect = self.button(
+            "dir-detect",
+            0,
+            "Detect Claude dirs…",
+            window,
+            cx,
+            handler(|_, _, cx| cx.emit(SettingsEvent::DetectClaudeDirs)),
+        );
+        rows.push(row_shell(
+            theme,
+            muted(theme, "Looks for Claude config dirs on this machine that are not in the list yet."),
+            detect,
+            empty_slot(theme),
+        ));
         let remembered = settings.folder_claude_dirs.len();
         if remembered > 0 {
             let forget = self.button(

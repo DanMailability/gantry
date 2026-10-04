@@ -37,7 +37,7 @@ use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
-use crate::settings_view::SettingsView;
+use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
@@ -193,6 +193,8 @@ pub struct WorkspaceView {
     setup: Option<(Entity<SetupView>, Subscription)>,
     /// The Settings page, while its tab is open.
     settings: Option<Entity<SettingsView>>,
+    /// Listens to the open Settings page.
+    _settings_events: Option<Subscription>,
     /// The leaf that had focus when Settings opened; closing Settings goes back to it.
     before_settings: Option<NodeId>,
     /// The open right-click menu of a tab.
@@ -297,6 +299,7 @@ impl WorkspaceView {
             recents: None,
             setup: None,
             settings: None,
+            _settings_events: None,
             before_settings: None,
             tab_menu: None,
             take_overs: HashMap::new(),
@@ -1428,7 +1431,12 @@ impl WorkspaceView {
         }
         self.workspace.open_settings();
         if self.settings.is_none() {
-            self.settings = Some(cx.new(|cx| SettingsView::new(self.daemon_dir.clone(), window, cx)));
+            let view = cx.new(|cx| SettingsView::new(self.daemon_dir.clone(), window, cx));
+            self._settings_events =
+                Some(cx.subscribe_in(&view, window, |this, _, event: &SettingsEvent, window, cx| match event {
+                    SettingsEvent::DetectClaudeDirs => this.show_setup(SetupMode::Rerun, window, cx),
+                }));
+            self.settings = Some(view);
         }
         self.focus_current(window, cx);
         self.save(cx);
