@@ -24,7 +24,7 @@ use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, theme};
 
 mod alerts;
 mod appearance;
-mod sessions;
+pub(crate) mod sessions;
 mod shortcuts;
 mod terminal;
 mod window;

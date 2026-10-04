@@ -9,6 +9,7 @@ pub mod launcher_view;
 pub mod recents_view;
 mod settings_store;
 mod settings_view;
+mod setup_view;
 pub mod sidebar_view;
 pub mod terminal_view;
 mod theme;

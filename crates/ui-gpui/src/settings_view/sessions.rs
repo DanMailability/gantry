@@ -128,7 +128,7 @@ fn dir_rows(settings: &Settings, daemon_dir: Option<&Path>, home: Option<&Path>)
 }
 
 /// Make the implicit Default a real entry, so it can be edited or sit beside others.
-fn materialize(settings: &mut Settings, daemon_dir: Option<&Path>, home: Option<&Path>) {
+pub(crate) fn materialize(settings: &mut Settings, daemon_dir: Option<&Path>, home: Option<&Path>) {
     if settings.claude_dirs.is_empty() {
         settings.claude_dirs = dir_rows(settings, daemon_dir, home);
     }
