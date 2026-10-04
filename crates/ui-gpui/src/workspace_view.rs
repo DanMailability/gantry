@@ -18,7 +18,7 @@ use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
-    Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb,
+    Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
 };
 use protocol::message::{
     ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
@@ -38,6 +38,7 @@ use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::SettingsView;
+use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
 use crate::sidebar_view::{SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
@@ -188,6 +189,8 @@ pub struct WorkspaceView {
     launcher: Option<(Entity<LauncherView>, Subscription)>,
     /// The open recent sessions overlay.
     recents: Option<(Entity<RecentsView>, Subscription)>,
+    /// The open setup wizard overlay.
+    setup: Option<(Entity<SetupView>, Subscription)>,
     /// The Settings page, while its tab is open.
     settings: Option<Entity<SettingsView>>,
     /// The leaf that had focus when Settings opened; closing Settings goes back to it.
@@ -292,6 +295,7 @@ impl WorkspaceView {
             _sidebar_events: sidebar_events,
             launcher: None,
             recents: None,
+            setup: None,
             settings: None,
             before_settings: None,
             tab_menu: None,
@@ -329,6 +333,10 @@ impl WorkspaceView {
         // Every connection starts with the GUI's colours: the daemon outlives the GUI.
         this.apply_settings(cx);
         this.save(cx);
+        let store = cx.global::<SettingsStore>();
+        if opens_by_itself(store.settings(), store.broken()) {
+            this.show_setup(SetupMode::FirstRun, window, cx);
+        }
         this
     }
 
@@ -1232,6 +1240,23 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Open the setup wizard; `mode`: it opened by itself on the first start, or from Settings.
+    fn show_setup(&mut self, mode: SetupMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.launcher = None;
+        self.recents = None;
+        let view = cx.new(|cx| SetupView::new(mode, self.daemon_dir.clone(), cx));
+        let subscription = cx.subscribe_in(&view, window, |this, _, event: &SetupEvent, window, cx| match event {
+            SetupEvent::Close => {
+                this.setup = None;
+                this.focus_current(window, cx);
+                cx.notify();
+            }
+        });
+        view.focus_handle(cx).focus(window, cx);
+        self.setup = Some((view, subscription));
+        cx.notify();
+    }
+
     fn open_recents(&mut self, _: &OpenRecents, window: &mut Window, cx: &mut Context<Self>) {
         self.show_recents(None, window, cx);
     }
@@ -2049,6 +2074,23 @@ impl Render for WorkspaceView {
                         .flex_col()
                         .items_center()
                         .pt(theme.ui(72.))
+                        .child(view),
+                )
+            })
+            .when_some(self.setup.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div()
+                        .id("setup-overlay")
+                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(theme.ui(16.))
+                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
                         .child(view),
                 )
             })

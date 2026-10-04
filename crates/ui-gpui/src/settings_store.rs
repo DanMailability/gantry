@@ -109,6 +109,11 @@ impl SettingsStore {
         &self.path
     }
 
+    /// The last read of the file was not JSON, so changes are not saved.
+    pub fn broken(&self) -> bool {
+        self.broken
+    }
+
     /// Change the settings from the UI: apply, save (skipped if unchanged), refresh every window.
     pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
         let store = cx.global_mut::<SettingsStore>();
