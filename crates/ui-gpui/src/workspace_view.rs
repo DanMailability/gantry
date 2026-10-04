@@ -1999,7 +1999,8 @@ impl WorkspaceView {
 }
 
 /// Your last prompt in a card above a Claude pane's terminal: a fixed two lines, clipped with an ellipsis, on a
-/// tint of `color` (the theme's accent when unset) with a bar of it on the left. `size` is the text size.
+/// tint of `color` (the theme's accent when unset) with a rounded bar of it inset on the left (GPUI clips to a
+/// rectangle, so a bar at the edge would poke out of the rounded corners). `size` is the text size.
 fn prompt_card(text: String, multiple: bool, size: f32, color: Option<u32>, theme: &Theme) -> Div {
     let color = color.unwrap_or(theme.tokens.accent);
     let line = (size * 1.38).round();
@@ -2019,7 +2020,7 @@ fn prompt_card(text: String, multiple: bool, size: f32, color: Option<u32>, them
         .bg(rgb(mix(color, theme.tokens.surface, 0.18)))
         .border_1()
         .border_color(rgb(mix(color, theme.tokens.line, 0.55)))
-        .child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(rgb(color)))
+        .child(div().absolute().left(px(5.)).top(px(8.)).bottom(px(8.)).w(px(3.)).rounded_full().bg(rgb(color)))
         .child(svg().path(PROMPT_ICON).flex_none().size(theme.ui(size)).text_color(rgb(color)))
         .child(
             div()
