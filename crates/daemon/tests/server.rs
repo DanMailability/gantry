@@ -28,6 +28,7 @@ async fn start_server(idle_timeout: Duration) -> Harness {
         idle_timeout,
         claude_dir: None,
         containers_file: None,
+        search_dir: None,
         docker: None,
     };
     let server = tokio::spawn(serve(listener, options));
@@ -341,6 +342,68 @@ async fn without_docker_container_launches_fail_and_lookups_find_nothing() {
     loop {
         if let DaemonMessage::ContainerFound { request, container } = c.control().await {
             assert_eq!((request, container), (8, None));
+            break;
+        }
+    }
+}
+
+async fn start_search_server(claude: &std::path::Path, data: &std::path::Path) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "test");
+    std::fs::create_dir_all(&paths.runtime_dir).unwrap();
+    let listener = ListenerOptions::new().name(paths.socket_name().unwrap()).create_tokio().unwrap();
+    let options = ServerOptions {
+        base_env: std::env::vars().collect(),
+        owner_uid: None,
+        idle_timeout: Duration::from_secs(30),
+        claude_dir: Some(claude.to_path_buf()),
+        containers_file: None,
+        docker: None,
+        search_dir: Some(data.join("search")),
+    };
+    let server = tokio::spawn(serve(listener, options));
+    Harness { paths, server, _dir: dir }
+}
+
+#[tokio::test]
+async fn conversations_are_searchable() {
+    let root = tempfile::tempdir().unwrap();
+    let claude = root.path().join("claude");
+    let folder = claude.join("projects").join("-r");
+    std::fs::create_dir_all(&folder).unwrap();
+    let lines = [
+        serde_json::json!({"type": "user", "cwd": "/r", "message": {"content": "where is the quokka config"}}),
+        serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "in quokka.toml"}]}}),
+    ];
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(folder.join("s-quokka.jsonl"), text).unwrap();
+    let harness = start_search_server(&claude, root.path()).await;
+    let mut client = TestClient::connect(&harness.paths).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    for request in 1.. {
+        client.send(&ClientMessage::SearchConversations { request, query: "quokka".into(), limit: 10 }).await;
+        let hits = loop {
+            match client.control().await {
+                DaemonMessage::SearchResults { request: r, hits } if r == request => break hits,
+                _ => {}
+            }
+        };
+        if let Some(hit) = hits.first() {
+            assert_eq!(hit.session_id, "s-quokka");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no hit in time");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test]
+async fn without_a_search_dir_search_is_unavailable() {
+    let harness = start_server(Duration::from_secs(30)).await;
+    let mut client = TestClient::connect(&harness.paths).await;
+    client.send(&ClientMessage::SearchConversations { request: 1, query: "x".into(), limit: 10 }).await;
+    loop {
+        if let DaemonMessage::SearchUnavailable { .. } = client.control().await {
             break;
         }
     }

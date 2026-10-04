@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 use crate::containers::{self, PANE_MARKER, Registry, marker};
 use crate::outbox::Outbox;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
+use crate::search::{Search, SearchEvent};
 use crate::sessions::{ContainerView, Gone, PaneSession, diff, merge_records, resolve, spawn_indexer, still_claimed};
 use crate::take_over::{self, FORCE_WAIT, GRACE};
 
@@ -48,6 +49,8 @@ pub struct ServerOptions {
     pub claude_dir: Option<PathBuf>,
     /// Where dev container mappings are remembered; `None` keeps them in memory only.
     pub containers_file: Option<PathBuf>,
+    /// Where the conversation search index lives; `None` turns search off.
+    pub search_dir: Option<PathBuf>,
     /// The `docker` program; `None` turns dev container features off.
     pub docker: Option<String>,
 }
@@ -133,6 +136,8 @@ struct Shared {
     docker: Option<String>,
     /// The daemon's default Claude config dir.
     claude_dir: Option<PathBuf>,
+    /// Conversation search; `None` = off.
+    search: Option<Search>,
 }
 
 impl Shared {
@@ -293,6 +298,8 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         registry: Registry::load(options.containers_file),
         ..State::default()
     };
+    let (search_events, mut search_rx) = tokio::sync::mpsc::unbounded_channel();
+    let search = options.search_dir.map(|dir| Search::spawn(dir, search_events));
     let shared = Arc::new(Shared {
         state: Mutex::new(state),
         shutdown: Notify::new(),
@@ -301,6 +308,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         instance,
         docker: options.docker,
         claude_dir: claude_dir.clone(),
+        search,
     });
     refresh_containers(&shared);
     let probes = shared.docker.is_some().then(|| {
@@ -337,6 +345,18 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
             }
         })
     };
+    let search_task = {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            while let Some(event) = search_rx.recv().await {
+                let message = match event {
+                    SearchEvent::Indexing { done, total } => DaemonMessage::SearchIndexing { done, total },
+                    SearchEvent::Unavailable { reason } => DaemonMessage::SearchUnavailable { reason },
+                };
+                shared.lock().control(&message);
+            }
+        })
+    };
     set_claude_dirs(&shared, Vec::new());
     loop {
         tokio::select! {
@@ -349,6 +369,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
     }
     idle.abort();
     ticker.abort();
+    search_task.abort();
     for task in shared.lock().indexers.values() {
         task.abort();
     }
@@ -651,8 +672,8 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         }
         ClientMessage::TakeOver { session, force } => take_over_session(shared, session, force),
         ClientMessage::FindContainer { request, dir } => find_container(shared, request, dir),
-        ClientMessage::SearchConversations { .. } => {
-            shared.lock().control(&DaemonMessage::SearchUnavailable { reason: "conversation search is off".into() });
+        ClientMessage::SearchConversations { request, query, limit } => {
+            search_conversations(shared, request, query, limit)
         }
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
@@ -680,6 +701,9 @@ fn set_claude_dirs(shared: &Arc<Shared>, dirs: Vec<PathBuf>) {
         if !wanted.contains(&dir) {
             wanted.push(dir);
         }
+    }
+    if let Some(search) = &shared.search {
+        search.set_dirs(wanted.clone());
     }
     let mut state = shared.lock();
     state.sessions_enabled = !wanted.is_empty();
@@ -762,6 +786,29 @@ fn cached_answer(
         }));
     }
     failed_at.filter(|at| now.duration_since(*at) < DOCKER_RETRY).map(|_| None)
+}
+
+/// Answer `SearchConversations` off the async threads: hits for sessions the index lists, then the indexing
+/// progress while a large pass runs (a GUI that connected mid-build learns it this way).
+fn search_conversations(shared: &Arc<Shared>, request: u64, query: String, limit: u32) {
+    let Some(search) = shared.search.clone() else {
+        shared.lock().control(&DaemonMessage::SearchUnavailable { reason: "conversation search is off".into() });
+        return;
+    };
+    let records = shared.lock().records.clone();
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let known: HashSet<&str> = records.iter().flat_map(|records| records.iter()).map(|r| r.id.as_str()).collect();
+        let reply = match search.search(&query, limit as usize, &|id| known.contains(id)) {
+            Ok(hits) => DaemonMessage::SearchResults { request, hits },
+            Err(reason) => DaemonMessage::SearchUnavailable { reason },
+        };
+        let state = shared.lock();
+        state.control(&reply);
+        if let Some((done, total)) = search.indexing() {
+            state.control(&DaemonMessage::SearchIndexing { done, total });
+        }
+    });
 }
 
 /// Answer `FindContainer`: from the last lookup when it knows, else refresh the dev containers (off the async threads)
@@ -1005,6 +1052,7 @@ mod tests {
             instance: String::new(),
             docker: None,
             claude_dir: None,
+            search: None,
         });
         let spec = || SpawnRequest {
             program: "sleep".into(),
@@ -1044,6 +1092,7 @@ mod tests {
             instance: String::new(),
             docker: None,
             claude_dir: None,
+            search: None,
         });
         let spec = SpawnRequest {
             program: "sh".into(),
@@ -1088,6 +1137,7 @@ mod tests {
             instance: String::new(),
             docker: None,
             claude_dir: None,
+            search: None,
         });
         let poisoner = shared.clone();
         let _ = std::thread::spawn(move || {

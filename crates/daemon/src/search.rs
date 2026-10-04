@@ -5,6 +5,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
+
 use anyhow::Context as _;
 use claude_index::search::{Speaker as MessageSpeaker, read_messages};
 use protocol::message::{SearchHit, Speaker};
@@ -422,6 +427,169 @@ impl ConversationSearcher {
     }
 }
 
+/// Time between indexing passes (the most a new message waits to become searchable).
+const PASS_EVERY: Duration = Duration::from_secs(30);
+/// A pass over at least this many files reports its progress.
+const PROGRESS_FROM: usize = 20;
+/// Least time between progress reports.
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+
+/// What the search thread tells the server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchEvent {
+    /// A large pass is running: `done` of `total` files (once with `done == total` at its end).
+    Indexing {
+        /// Files done.
+        done: u64,
+        /// Files in the pass.
+        total: u64,
+    },
+    /// Search stopped working for this daemon run.
+    Unavailable {
+        /// Why.
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Status {
+    Ready,
+    Indexing { done: u64, total: u64 },
+    Unavailable(String),
+}
+
+struct Inner {
+    searcher: Option<ConversationSearcher>,
+    status: Status,
+}
+
+/// The server's handle on conversation search (cheap to clone).
+#[derive(Clone)]
+pub struct Search {
+    dirs: Sender<Vec<PathBuf>>,
+    inner: Arc<Mutex<Inner>>,
+}
+
+fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
+    inner.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Search {
+    /// Open the index in `dir` and keep it current on a thread of its own, at the lowest priority. Problems go to
+    /// `events` (and the log); they never reach the panes.
+    pub fn spawn(dir: PathBuf, events: UnboundedSender<SearchEvent>) -> Search {
+        let (dirs, dirs_rx) = std::sync::mpsc::channel();
+        let inner = Arc::new(Mutex::new(Inner { searcher: None, status: Status::Ready }));
+        let thread_inner = inner.clone();
+        let thread_events = events.clone();
+        let spawned = std::thread::Builder::new().name("conversation-search".into()).spawn(move || {
+            lower_priority();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(&dir, &dirs_rx, &thread_inner, &thread_events)
+            }));
+            let reason = match outcome {
+                Ok(Ok(())) => return,
+                Ok(Err(err)) => format!("{err:#}"),
+                Err(_) => "the indexer panicked".to_string(),
+            };
+            unavailable(&thread_inner, &thread_events, reason);
+        });
+        if let Err(err) = spawned {
+            unavailable(&inner, &events, format!("could not start the indexer: {err}"));
+        }
+        Search { dirs, inner }
+    }
+
+    /// Index these Claude config dirs from now on.
+    pub fn set_dirs(&self, dirs: Vec<PathBuf>) {
+        let _ = self.dirs.send(dirs);
+    }
+
+    /// Hits for `query` (see `ConversationSearcher::search`); none while the index is still opening. `Err` with the
+    /// reason once search is unavailable.
+    pub fn search(&self, query: &str, limit: usize, known: &dyn Fn(&str) -> bool) -> Result<Vec<SearchHit>, String> {
+        let (searcher, status) = {
+            let inner = lock(&self.inner);
+            (inner.searcher.clone(), inner.status.clone())
+        };
+        if let Status::Unavailable(reason) = status {
+            return Err(reason);
+        }
+        let Some(searcher) = searcher else { return Ok(Vec::new()) };
+        Ok(searcher.search(query, limit, known).unwrap_or_else(|err| {
+            tracing::warn!("conversation search failed: {err:#}");
+            Vec::new()
+        }))
+    }
+
+    /// Progress of a large pass while it runs.
+    pub fn indexing(&self) -> Option<(u64, u64)> {
+        match lock(&self.inner).status {
+            Status::Indexing { done, total } => Some((done, total)),
+            _ => None,
+        }
+    }
+}
+
+fn unavailable(inner: &Mutex<Inner>, events: &UnboundedSender<SearchEvent>, reason: String) {
+    tracing::error!("conversation search is off: {reason}");
+    lock(inner).status = Status::Unavailable(reason.clone());
+    let _ = events.send(SearchEvent::Unavailable { reason });
+}
+
+/// The search thread: open, then a pass over the current dirs every `PASS_EVERY` or when they change. Ends when
+/// the `Search` handles are gone.
+fn run(
+    dir: &Path,
+    dirs_rx: &Receiver<Vec<PathBuf>>,
+    inner: &Mutex<Inner>,
+    events: &UnboundedSender<SearchEvent>,
+) -> anyhow::Result<()> {
+    let mut index = ConversationIndex::open(dir)?;
+    lock(inner).searcher = Some(index.searcher());
+    let Ok(mut dirs) = dirs_rx.recv() else { return Ok(()) };
+    loop {
+        while let Ok(newer) = dirs_rx.try_recv() {
+            dirs = newer;
+        }
+        let changes = index.pending(&dirs);
+        let report = changes.len() >= PROGRESS_FROM;
+        let total = changes.len() as u64;
+        let mut last: Option<Instant> = None;
+        let result = index.apply(&changes, &mut |done, total| {
+            if report && done < total && last.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
+                last = Some(Instant::now());
+                lock(inner).status = Status::Indexing { done, total };
+                let _ = events.send(SearchEvent::Indexing { done, total });
+            }
+        });
+        if report {
+            lock(inner).status = Status::Ready;
+            let _ = events.send(SearchEvent::Indexing { done: total, total });
+        }
+        if let Err(err) = result {
+            tracing::warn!("conversation indexing failed, retrying next pass: {err:#}");
+        }
+        match dirs_rx.recv_timeout(PASS_EVERY) {
+            Ok(newer) => dirs = newer,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+/// Run this thread (and the merge threads it starts) at the lowest priority: indexing must never slow the panes.
+#[cfg(target_os = "linux")]
+fn lower_priority() {
+    // On Linux, `who = 0` with PRIO_PROCESS is the calling thread only.
+    if let Err(err) = rustix::process::setpriority_process(None, 19) {
+        tracing::debug!("could not lower the indexer's priority: {err}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lower_priority() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,5 +870,47 @@ mod tests {
         let mut seen = Vec::new();
         f.index.apply(&changes, &mut |done, total| seen.push((done, total))).unwrap();
         assert_eq!(seen, vec![(1, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn searching_before_the_first_pass_finds_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let search = Search::spawn(root.path().join("search"), events);
+        // No folders sent yet: the thread waits, and searching answers at once.
+        assert_eq!(search.search("anything", 10, &|_| true), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn the_thread_indexes_the_dirs_it_is_given() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude");
+        transcript(&claude, "s1", &[("you", "persimmon")]);
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let search = Search::spawn(root.path().join("search"), events);
+        search.set_dirs(vec![claude]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let hits = search.search("persimmon", 10, &|_| true).unwrap();
+            if !hits.is_empty() {
+                assert_eq!(hits[0].session_id, "s1");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "not indexed in time");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn an_index_that_cannot_open_makes_search_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        // A file where the index folder should be: neither opening nor creating can work.
+        let blocked = root.path().join("search");
+        std::fs::write(&blocked, "not a folder").unwrap();
+        let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let search = Search::spawn(blocked.join("inner"), events);
+        let event = rx.blocking_recv().expect("an event");
+        assert!(matches!(event, SearchEvent::Unavailable { .. }), "{event:?}");
+        assert!(search.search("x", 10, &|_| true).is_err());
     }
 }
