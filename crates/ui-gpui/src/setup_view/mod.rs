@@ -14,7 +14,7 @@ use app_core::workspace::DirBadge;
 use claude_index::discovery::{self, Candidate, Source};
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyDownEvent, PathPromptOptions, Render, Stateful, Window, div, prelude::*, px, rgb,
+    KeyDownEvent, PathPromptOptions, Render, SharedString, Stateful, Window, div, prelude::*, px, rgb,
 };
 
 use crate::field;
@@ -149,9 +149,19 @@ impl SetupView {
 
     /// Look again; the list is rebuilt from scratch.
     fn scan(&mut self, cx: &App) {
-        let env: Vec<(String, String)> = std::env::vars().collect();
+        let mut env: Vec<(String, String)> = std::env::vars().collect();
+        // The daemon's dir comes from the login shell, which the GUI's own environment may not have.
+        let home_default = self.home.as_ref().map(|home| home.join(".claude"));
+        if let Some(dir) = self.daemon_dir.as_ref().filter(|dir| Some(*dir) != home_default.as_ref()) {
+            env.retain(|(key, _)| key != "CLAUDE_CONFIG_DIR");
+            env.push(("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned()));
+        }
         self.now_ms = now_ms();
         let settings = cx.global::<SettingsStore>().settings();
+        let mut taken: Vec<String> = settings.claude_dirs.iter().map(|dir| dir.name.clone()).collect();
+        if taken.is_empty() && self.mode == Mode::Rerun {
+            taken.push("Default".into());
+        }
         self.listed = import::listed_paths(settings, self.mode, self.daemon_dir.as_deref(), self.home.as_deref());
         let found: Vec<Candidate> = discovery::discover(&env, self.now_ms)
             .into_iter()
@@ -164,11 +174,12 @@ impl SetupView {
             .map(|(index, candidate)| Row {
                 ticked: !candidate.stale,
                 default: default == Some(index),
-                name: text(&candidate.name),
+                name: text(&discovery::unique_name(&candidate.name, &|name| taken.iter().any(|taken| taken == name))),
                 command: text("claude"),
                 candidate,
             })
             .collect();
+        self.fix_default();
         self.checked = checked(&env, self.home.as_deref());
         self.show_install = self.listed.iter().all(|path| !path.exists());
         self.active = None;
@@ -194,6 +205,9 @@ impl SetupView {
 
     fn toggle(&mut self, index: usize) {
         self.rows[index].ticked = !self.rows[index].ticked;
+        if !self.rows[index].ticked && matches!(self.active, Some(Active::Name(i) | Active::Command(i)) if i == index) {
+            self.active = None;
+        }
         self.message = None;
         self.fix_default();
     }
@@ -349,7 +363,7 @@ fn check_box(theme: &Theme, on: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.))
+        .rounded(px(RADIUS_SMALL / 2.))
         .border_1()
         .border_color(rgb(if on { theme.tokens.accent } else { theme.tokens.line }))
         .text_size(theme.ui(11.))
@@ -371,7 +385,13 @@ fn radio(theme: &Theme, on: bool) -> Div {
 }
 
 /// A button; attach `on_click` for the ones that do something. `enabled = false` draws it faded.
-fn button(id: &'static str, label: &'static str, primary: bool, enabled: bool, theme: &Theme) -> Stateful<Div> {
+fn button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    primary: bool,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -388,7 +408,7 @@ fn button(id: &'static str, label: &'static str, primary: bool, enabled: bool, t
         .when(!primary, |b| b.bg(rgb(theme.tokens.raised)))
         .when(enabled, |b| b.cursor_pointer().hover(|style| style.border_color(rgb(theme.tokens.accent))))
         .when(!enabled, |b| b.opacity(0.45))
-        .child(label)
+        .child(label.into())
 }
 
 fn text_box(theme: &Theme, width: f32, content: Div) -> Div {
@@ -606,12 +626,10 @@ impl Render for SetupView {
         });
         let body = (!found).then(|| self.render_empty(cx));
         let skip_label = if self.mode == Mode::FirstRun { "Skip for now" } else { "Close" };
-        let import_label: &'static str = match ticked {
-            0 => "Import",
-            1 => "Import 1 dir",
-            2 => "Import 2 dirs",
-            3 => "Import 3 dirs",
-            _ => "Import dirs",
+        let import_label = match ticked {
+            0 => "Import".to_string(),
+            1 => "Import 1 dir".to_string(),
+            n => format!("Import {n} dirs"),
         };
         let footer = div()
             .flex()
@@ -659,6 +677,7 @@ impl Render for SetupView {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.skip(cx)))
             .w(theme.ui(640.))
             .max_w_full()
+            .max_h_full()
             .flex()
             .flex_col()
             .bg(rgb(theme.tokens.surface))

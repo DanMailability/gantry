@@ -269,7 +269,9 @@ mod tests {
         let missing = h.join("nope");
         let a_file = h.join("file");
         std::fs::write(&a_file, "x").unwrap();
-        for value in [&missing, &a_file, Path::new("")] {
+        let plain = h.join("plain");
+        std::fs::create_dir_all(&plain).unwrap(); // exists, but holds no projects/ or sessions/
+        for value in [&missing, &a_file, &plain, Path::new("")] {
             let found = discover(&env(&[("HOME", h), ("CLAUDE_CONFIG_DIR", value)]), NOW);
             assert_eq!(names(&found), ["Default"], "{value:?}");
         }

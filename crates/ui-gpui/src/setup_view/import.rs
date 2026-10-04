@@ -176,6 +176,14 @@ mod tests {
     }
 
     #[test]
+    fn the_default_follows_its_row_when_the_name_is_made_unique() {
+        let mut settings = Settings::default();
+        apply_import(&mut settings, &[row("/a", "Work", false), row("/b", "Work", true)], Mode::FirstRun, None, home());
+        assert_eq!(names(&settings), ["Work", "Work 2"]);
+        assert_eq!(settings.default_claude_dir.as_deref(), Some("Work 2"));
+    }
+
+    #[test]
     fn equal_names_are_made_unique_and_names_are_trimmed() {
         let mut settings = Settings::default();
         let rows = [row("/a", " Work ", false), row("/b", "Work", false), row("/c", "Work", false)];

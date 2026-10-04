@@ -888,6 +888,10 @@ impl WorkspaceView {
 
     /// Give keyboard focus to the workspace's focused leaf (or the empty window).
     fn focus_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((setup, _)) = &self.setup {
+            setup.focus_handle(cx).focus(window, cx);
+            return;
+        }
         let (open, active) = (self.workspace.settings_tab().is_some(), self.settings_active());
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_settings(open, active, cx));
         let settings =
@@ -1231,6 +1235,9 @@ impl WorkspaceView {
 
     /// Open the launcher; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
     fn show_launcher(&mut self, claude_first: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.setup.is_some() {
+            return;
+        }
         self.recents = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
         let open = self.open_folders(cx);
@@ -1266,6 +1273,9 @@ impl WorkspaceView {
 
     /// Open the recent sessions pop-up, on `project`'s sessions when given.
     fn show_recents(&mut self, project: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.setup.is_some() {
+            return;
+        }
         self.launcher = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
         let open: HashSet<String> = self.workspace.leaves.values().filter_map(|leaf| leaf.session.clone()).collect();
@@ -1451,6 +1461,7 @@ impl WorkspaceView {
             self.workspace.focus(leaf);
         }
         self.settings = None;
+        self._settings_events = None;
         self.focus_current(window, cx);
         self.save(cx);
         cx.notify();
