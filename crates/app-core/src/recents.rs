@@ -47,8 +47,8 @@ pub enum RecentItem {
     },
     /// A closed session.
     Session {
-        /// The session.
-        session: SessionInfo,
+        /// The session (boxed: it is far bigger than the other variants).
+        session: Box<SessionInfo>,
         /// Time since last activity.
         age: String,
         /// The project it is listed under.
@@ -149,7 +149,7 @@ pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
         items.push(RecentItem::Heading { label: labels[&path].clone(), display, path: path.clone() });
         for session in matching.iter().take(cap) {
             items.push(RecentItem::Session {
-                session: (*session).clone(),
+                session: Box::new((*session).clone()),
                 age: age(input.now_ms, session.last_active_ms),
                 project: path.clone(),
             });

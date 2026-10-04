@@ -4,6 +4,15 @@ on:
   pull_request:
   # macOS and Windows run only from here (Actions → CI → Run workflow): their minutes cost 10× and 2×.
   workflow_dispatch:
+    inputs:
+      linux:
+        description: Also run Linux (fmt, deny, tests)
+        type: boolean
+        default: true
+      smoke:
+        description: "macOS/Windows: start Gantry after the tests, screenshot it, upload as an artifact"
+        type: boolean
+        default: false
 
 # A newer push to the same branch cancels the run still going.
 concurrency:
@@ -16,6 +25,7 @@ env:
 
 jobs:
   fmt:
+    if: github.event_name != 'workflow_dispatch' || inputs.linux
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -28,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["ubuntu-24.04", "macos-15", "windows-2025"]') || fromJSON('["ubuntu-24.04"]') }}
+        os: ${{ github.event_name != 'workflow_dispatch' && fromJSON('["ubuntu-24.04"]') || inputs.linux && fromJSON('["ubuntu-24.04", "macos-15", "windows-2025"]') || fromJSON('["macos-15", "windows-2025"]') }}
     runs-on: ${{ matrix.os }}
     # A cold build (no cache) takes about 30 min on Linux; a hang must not run for the default 6 hours.
     timeout-minutes: 60
@@ -47,10 +57,58 @@ jobs:
         with:
           # Keep the built dependencies even when clippy or a test fails (first macOS/Windows runs).
           cache-on-failure: true
+          # A key is saved only once. Windows' first save held only clippy's build, so its key is new (v1); bump it
+          # again if a cache ever stays partial (a step that rebuilds the dependencies on every run).
+          prefix-key: ${{ runner.os == 'Windows' && 'v1-rust' || 'v0-rust' }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Every crate's failures in one run, not just the first crate's.
+      - run: cargo test --workspace --no-fail-fast
+      # Smoke run: does the app start and draw? A plain shell tab (no Claude), its own profile, 20 s, one screenshot.
+      - name: Smoke run (macOS)
+        if: inputs.smoke && runner.os == 'macOS'
+        env:
+          GANTRY_PROFILE: smoke
+          RUST_LOG: info
+        run: |
+          cargo build -p gantry
+          mkdir -p smoke
+          ./target/debug/gantry > smoke/gantry.log 2>&1 &
+          sleep 20
+          screencapture -x smoke/screen.png || echo "screencapture failed" >> smoke/gantry.log
+          alive=0; pgrep -f "target/debug/gantry$" > /dev/null && alive=1
+          find ~/Library -path '*gantry*' -name 'daemon.log*' -exec cp {} smoke/ \; || true
+          pkill -f target/debug/gantry || true
+          test "$alive" = 1 || { echo "Gantry exited within 20 s"; cat smoke/gantry.log; exit 1; }
+      - name: Smoke run (Windows)
+        if: inputs.smoke && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GANTRY_PROFILE: smoke
+          RUST_LOG: info
+        run: |
+          cargo build -p gantry
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          $app = Start-Process target\debug\gantry.exe -PassThru -RedirectStandardOutput smoke\gantry.log -RedirectStandardError smoke\gantry.err
+          Start-Sleep -Seconds 20
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          [System.Drawing.Graphics]::FromImage($bitmap).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bitmap.Save((Join-Path $PWD "smoke\screen.png"))
+          $alive = -not $app.HasExited
+          Get-ChildItem $env:APPDATA, $env:LOCALAPPDATA -Recurse -Filter 'daemon.log*' -ErrorAction SilentlyContinue | Copy-Item -Destination smoke
+          Get-Process gantry -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $alive) { Write-Output "Gantry exited within 20 s"; Get-Content smoke\gantry.log, smoke\gantry.err; exit 1 }
+      - name: Upload the smoke run
+        if: always() && inputs.smoke && runner.os != 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ runner.os }}
+          path: smoke/
+          if-no-files-found: ignore
 
   deny:
+    if: github.event_name != 'workflow_dispatch' || inputs.linux
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

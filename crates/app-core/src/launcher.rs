@@ -101,6 +101,8 @@ mod tests {
         assert_eq!(dirs(&items(&refs, "", None, &[])), vec!["/a", "/b", "Browse"]);
     }
 
+    // Unix-style paths: Windows joins them with `\`.
+    #[cfg(unix)]
     #[test]
     fn a_query_filters_by_the_displayed_path() {
         let sessions = [info("/home/me/code/devops", 50, true), info("/home/me/Private/rust_terminal", 10, true)];

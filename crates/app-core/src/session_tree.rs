@@ -1139,6 +1139,8 @@ mod tests {
         assert_eq!(by(RowKey::Project("/r/p".into())), Activation::ToggleProject("/r/p".into()));
     }
 
+    // Unix-style paths: Windows joins them with `\`.
+    #[cfg(unix)]
     #[test]
     fn projects_with_the_same_name_show_their_paths() {
         let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/api"), shell_pane(2, "/home/me/work/api")]);
@@ -1182,6 +1184,8 @@ mod tests {
         assert_eq!(root("/tmp/x"), Path::new("/tmp/x"));
     }
 
+    // Unix-style paths: Windows joins them with `\`.
+    #[cfg(unix)]
     #[test]
     fn helpers_format_titles_paths_and_ages() {
         let mut untitled = closed("u", "/", 0);

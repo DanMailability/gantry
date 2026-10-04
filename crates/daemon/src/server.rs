@@ -124,6 +124,8 @@ struct Shared {
     state: Mutex<State>,
     shutdown: Notify,
     base_env: Vec<(String, String)>,
+    /// Checked against the peer's uid on Unix only.
+    #[cfg_attr(not(unix), allow(dead_code))]
     owner_uid: Option<u32>,
     /// Identifies this daemon process (sent in `Welcome`).
     instance: String,

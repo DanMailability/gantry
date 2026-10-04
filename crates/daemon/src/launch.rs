@@ -9,6 +9,7 @@ use interprocess::local_socket::tokio::{Stream, prelude::*};
 
 use crate::paths::Paths;
 use crate::server::{ServerOptions, serve};
+#[cfg(unix)]
 use crate::shell_env::{resolve_login_env, shell_quote};
 
 /// How `run_daemon` ended.
@@ -88,7 +89,9 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
 
 fn listener_options(paths: &Paths) -> std::io::Result<ListenerOptions<'static>> {
     let options = ListenerOptions::new().name(paths.socket_name()?).try_overwrite(true);
-    #[cfg(unix)]
+    // interprocess cannot set a socket's mode on macOS (it returns `Unsupported`); the runtime dir is 0700 on every
+    // Unix, which keeps other users out either way.
+    #[cfg(target_os = "linux")]
     let options = {
         use interprocess::os::unix::local_socket::ListenerOptionsExt;
         options.mode(0o600)

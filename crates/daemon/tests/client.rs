@@ -1,5 +1,5 @@
-#![cfg(unix)]
 //! DaemonClient against a real daemon.
+#![cfg(unix)]
 
 use std::time::Duration;
 

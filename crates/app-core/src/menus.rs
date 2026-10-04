@@ -255,7 +255,8 @@ pub fn vscode_args(folder: &Path, container: Option<&ContainerPlace>, pane_conta
         (Some(ContainerPlace { host_folder: Some(host), path }), _) => Some((host.as_path(), path.clone())),
         (_, Some(host)) => {
             let name = host.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            Some((host, PathBuf::from("/workspaces").join(name)))
+            // A path inside the (Linux) container: always `/`, whatever the host's separator.
+            Some((host, PathBuf::from(format!("/workspaces/{name}"))))
         }
         _ => None,
     };

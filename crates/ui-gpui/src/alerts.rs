@@ -46,7 +46,7 @@ fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
         }
     });
     #[cfg(target_os = "macos")]
-    let _ = (handle, clicked);
+    let _ = (handle, clicked, notice.leaf);
 }
 
 /// The embedded recording of `tone`.
