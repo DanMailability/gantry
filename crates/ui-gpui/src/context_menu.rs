@@ -40,6 +40,8 @@ fn shortcut_text(shortcut: Shortcut, settings: &Settings) -> String {
     let action = match shortcut {
         Shortcut::SplitRight => "splitRightClaude",
         Shortcut::SplitDown => "splitDownClaude",
+        Shortcut::SplitRightShell => "splitRightShell",
+        Shortcut::SplitDownShell => "splitDownShell",
         Shortcut::Close => "closePane",
         Shortcut::Recents => "openRecents",
     };

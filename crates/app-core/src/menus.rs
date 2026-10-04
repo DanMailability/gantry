@@ -17,6 +17,10 @@ pub enum Shortcut {
     SplitRight,
     /// Split the tab down.
     SplitDown,
+    /// Split the tab right with a shell.
+    SplitRightShell,
+    /// Split the tab down with a shell.
+    SplitDownShell,
     /// Close the pane or tab.
     Close,
     /// Recent sessions pop-up.
@@ -32,6 +36,15 @@ pub enum MenuAction {
         tab: usize,
         /// The split direction.
         axis: Axis,
+    },
+    /// Split the pane `leaf` along `axis`, with Claude (else a shell).
+    SplitPane {
+        /// The pane to split.
+        leaf: NodeId,
+        /// The split direction.
+        axis: Axis,
+        /// Claude (else a shell).
+        claude: bool,
     },
     /// Copy text to the clipboard.
     Copy(String),
@@ -294,6 +307,18 @@ pub fn tab_menu(
     items
 }
 
+/// The popup of a pane's split button: what the new pane runs, Claude or a terminal.
+pub fn split_menu(leaf: NodeId, axis: Axis) -> Vec<MenuItem> {
+    let (claude, shell) = match axis {
+        Axis::Horizontal => (Shortcut::SplitRight, Shortcut::SplitRightShell),
+        Axis::Vertical => (Shortcut::SplitDown, Shortcut::SplitDownShell),
+    };
+    vec![
+        with_shortcut("Claude", claude, MenuAction::SplitPane { leaf, axis, claude: true }),
+        with_shortcut("Terminal", shell, MenuAction::SplitPane { leaf, axis, claude: false }),
+    ]
+}
+
 /// What a middle click on a sidebar row does: a split tab's heading closes the tab, a pane's row closes the pane
 /// (and its tab with its last pane); rows without a pane do nothing.
 pub fn middle_click(row: &Row) -> Option<MenuAction> {
@@ -495,6 +520,34 @@ mod tests {
             middle_click(&Row::new(RowKind::Project { path: "/r/app".into(), label: "app".into(), expanded: true })),
             None
         );
+    }
+
+    #[test]
+    fn a_split_button_offers_claude_then_a_terminal() {
+        let entries: Vec<_> = split_menu(7, Axis::Vertical)
+            .into_iter()
+            .map(|item| {
+                let MenuItem::Entry(entry) = item else { panic!("only entries") };
+                (entry.label, entry.action, entry.shortcut)
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                (
+                    "Claude".to_string(),
+                    MenuAction::SplitPane { leaf: 7, axis: Axis::Vertical, claude: true },
+                    Some(Shortcut::SplitDown)
+                ),
+                (
+                    "Terminal".to_string(),
+                    MenuAction::SplitPane { leaf: 7, axis: Axis::Vertical, claude: false },
+                    Some(Shortcut::SplitDownShell)
+                ),
+            ]
+        );
+        let MenuItem::Entry(terminal) = &split_menu(7, Axis::Horizontal)[1] else { panic!() };
+        assert_eq!(terminal.shortcut, Some(Shortcut::SplitRightShell));
     }
 
     #[test]
