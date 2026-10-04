@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod containers;
+pub mod discovery;
 pub mod host;
 pub mod index;
 pub mod live;
