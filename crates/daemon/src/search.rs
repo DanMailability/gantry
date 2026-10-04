@@ -29,6 +29,8 @@ const WRITER_BUDGET: usize = 50_000_000;
 const COMMIT_EVERY: usize = 5_000;
 /// Longest snippet, in characters.
 const SNIPPET_CHARS: usize = 160;
+/// Fewest letters the last word needs to also match longer words.
+const MIN_PREFIX_CHARS: usize = 3;
 /// Most index terms the last word's prefix expands to.
 const PREFIX_TERMS: usize = 64;
 /// Documents read per requested session (one session can have many matching messages).
@@ -436,7 +438,8 @@ impl ConversationSearcher {
                         let Some(stem) = tokens(&mut stemmer, token).into_iter().next() else { continue };
                         marks.push(term(&stem));
                         let exact = term_query(term(&stem));
-                        if Some(i) == last_word && j + 1 == raw.len() {
+                        // Shorter prefixes ("in") would match most of the history.
+                        if Some(i) == last_word && j + 1 == raw.len() && token.chars().count() >= MIN_PREFIX_CHARS {
                             let mut either = vec![(Occur::Should, exact)];
                             for word in self.prefix_words(searcher, token)? {
                                 either
@@ -534,7 +537,8 @@ impl Search {
     /// `events` (and the log); they never reach the panes.
     pub fn spawn(dir: PathBuf, events: UnboundedSender<SearchEvent>) -> Search {
         let (dirs, dirs_rx) = std::sync::mpsc::channel();
-        let inner = Arc::new(Mutex::new(Inner { searcher: None, status: Status::Ready }));
+        // "Indexing" until the first pass ends, so the pop-up doesn't claim no conversation matches before any was read.
+        let inner = Arc::new(Mutex::new(Inner { searcher: None, status: Status::Indexing { done: 0, total: 1 } }));
         let thread_inner = inner.clone();
         let thread_events = events.clone();
         let spawned = std::thread::Builder::new().name("conversation-search".into()).spawn(move || {
@@ -571,13 +575,22 @@ impl Search {
             return Err(reason);
         }
         let Some(searcher) = searcher else { return Ok(Vec::new()) };
-        Ok(searcher.search(query, limit, known).unwrap_or_else(|err| {
-            tracing::warn!("conversation search failed: {err:#}");
-            Vec::new()
-        }))
+        // A panic in one search finds nothing; the pop-up must not wait forever for a reply.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| searcher.search(query, limit, known)));
+        Ok(match outcome {
+            Ok(Ok(hits)) => hits,
+            Ok(Err(err)) => {
+                tracing::warn!("conversation search failed: {err:#}");
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::error!("conversation search panicked on {query:?}");
+                Vec::new()
+            }
+        })
     }
 
-    /// Progress of a large pass while it runs.
+    /// Progress while the first pass or a large one runs (`(0, 1)` before the first pass has started).
     pub fn indexing(&self) -> Option<(u64, u64)> {
         match lock(&self.inner).status {
             Status::Indexing { done, total } => Some((done, total)),
@@ -603,6 +616,7 @@ fn run(
     let mut index = ConversationIndex::open(dir)?;
     lock(inner).searcher = Some(index.searcher());
     let Ok(mut dirs) = dirs_rx.recv() else { return Ok(()) };
+    let mut first = true;
     loop {
         while let Ok(newer) = dirs_rx.try_recv() {
             dirs = newer;
@@ -618,9 +632,12 @@ fn run(
                 let _ = events.send(SearchEvent::Indexing { done, total });
             }
         });
-        if report {
+        if report || first {
+            // The end of the first pass is always announced (as at least 1 of 1): the GUI re-sends its query.
+            let total = total.max(1);
             lock(inner).status = Status::Ready;
             let _ = events.send(SearchEvent::Indexing { done: total, total });
+            first = false;
         }
         if let Err(err) = result {
             tracing::warn!("conversation indexing failed, retrying next pass: {err:#}");
@@ -738,6 +755,16 @@ mod tests {
     }
 
     #[test]
+    fn a_last_word_shorter_than_three_letters_is_not_a_prefix() {
+        let mut f = Fixture::new();
+        transcript(&f.claude, "s1", &[("you", "the index was installed in a minute")]);
+        transcript(&f.claude, "s2", &[("you", "an inbox")]);
+        f.sync();
+        assert_eq!(f.ids("in"), vec!["s1"], "only the word itself");
+        assert_eq!(f.ids("inb"), vec!["s2"]);
+    }
+
+    #[test]
     fn every_typed_prefix_of_a_word_finds_it() {
         // Stemming shortens these ("terminal" → "termin", "running" → "run"); a partly typed word must still match
         // while the user types it out.
@@ -850,9 +877,9 @@ mod tests {
         transcript(&f.claude, "s1", &[("you", "שלום עולם fallback 🎉 עוד טקסט")]);
         f.sync();
         let hit = &f.index.searcher().search("fallback", 50, &|_| true).unwrap()[0];
-        for (start, end) in &hit.highlights {
-            assert!(hit.snippet.get(*start as usize..*end as usize).is_some());
-        }
+        let marked: Vec<&str> =
+            hit.highlights.iter().filter_map(|&(s, e)| hit.snippet.get(s as usize..e as usize)).collect();
+        assert_eq!(marked, vec!["fallback"], "{:?} {:?}", hit.snippet, hit.highlights);
     }
 
     #[test]
@@ -974,6 +1001,67 @@ mod tests {
         let mut seen = Vec::new();
         f.index.apply(&changes, &mut |done, total| seen.push((done, total))).unwrap();
         assert_eq!(seen, vec![(1, 2), (2, 2)]);
+    }
+
+    /// The next event within 10 s.
+    fn next_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<SearchEvent>) -> Option<SearchEvent> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(event) = rx.try_recv() {
+                return Some(event);
+            }
+            if std::time::Instant::now() > deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Waits until `search.indexing()` is `None`.
+    fn wait_until_indexed(search: &Search) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while search.indexing().is_some() {
+            assert!(std::time::Instant::now() < deadline, "first pass did not end");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn search_reports_indexing_until_the_first_pass_ends() {
+        // Otherwise the pop-up would say "No conversations mention this" before anything was indexed.
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude");
+        transcript(&claude, "s1", &[("you", "papaya")]);
+        let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let search = Search::spawn(root.path().join("search"), events);
+        assert_eq!(search.indexing(), Some((0, 1)));
+        search.set_dirs(vec![claude]);
+        wait_until_indexed(&search);
+        assert_eq!(next_event(&mut rx), Some(SearchEvent::Indexing { done: 1, total: 1 }), "the end is announced");
+        assert_eq!(search.search("papaya", 10, &|_| true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_first_pass_with_nothing_to_do_also_ends_indexing() {
+        let root = tempfile::tempdir().unwrap();
+        let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let search = Search::spawn(root.path().join("search"), events);
+        search.set_dirs(vec![root.path().join("no-such-claude-dir")]);
+        wait_until_indexed(&search);
+        assert_eq!(next_event(&mut rx), Some(SearchEvent::Indexing { done: 1, total: 1 }));
+    }
+
+    #[test]
+    fn a_panic_during_a_search_finds_nothing_and_search_goes_on() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude");
+        transcript(&claude, "s1", &[("you", "guava")]);
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let search = Search::spawn(root.path().join("search"), events);
+        search.set_dirs(vec![claude]);
+        wait_until_indexed(&search);
+        assert_eq!(search.search("guava", 10, &|_| panic!("boom")), Ok(Vec::new()));
+        assert_eq!(search.search("guava", 10, &|_| true).unwrap().len(), 1);
     }
 
     #[test]

@@ -342,11 +342,15 @@ impl RecentsView {
             }
             "escape" => cx.emit(RecentsEvent::Dismiss),
             _ => {
+                let before = self.query.text().to_string();
                 if !field::edit(&mut self.query, keystroke, cx) {
                     return;
                 }
-                self.query_changed(cx);
-                self.refresh();
+                // Cursor moves and copying change nothing to search for.
+                if self.query.text() != before {
+                    self.query_changed(cx);
+                    self.refresh();
+                }
             }
         }
         self.list_state.scroll_to_reveal_item(self.selected);

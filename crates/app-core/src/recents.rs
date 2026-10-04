@@ -39,7 +39,7 @@ pub struct RecentsInput<'a> {
 }
 
 /// Fewest non-space characters that also search inside conversations.
-pub const CONTENT_MIN_CHARS: usize = 2;
+pub const CONTENT_MIN_CHARS: usize = 3;
 
 /// Whether `query` also searches inside conversations.
 pub fn searches_content(query: &str) -> bool {
@@ -605,13 +605,14 @@ mod tests {
         fixture.content = ContentState::Ready;
         assert!(!fixture.outline().iter().any(|row| row.starts_with("##")));
         assert!(!searches_content(" a "));
-        assert!(searches_content("ab"));
+        assert!(!searches_content("in"), "two letters would list half the history");
+        assert!(searches_content("abc"));
     }
 
     #[test]
     fn content_hits_respect_the_picked_project() {
         let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1), closed("b1", "/r/b", 2)]);
-        fixture.query = "zz".into();
+        fixture.query = "zzz".into();
         fixture.project = Some("/r/b".into());
         fixture.hits = vec![hit("a1", "x", vec![]), hit("b1", "y", vec![])];
         fixture.content = ContentState::Ready;
@@ -626,7 +627,7 @@ mod tests {
         elsewhere.state = SessionState::External { pid: Some(9) };
         let mut fixture = Fixture::of(vec![tab, elsewhere, closed("unknown-to-hits", "/r/a", 1)]);
         fixture.open.insert("tab".into());
-        fixture.query = "zz".into();
+        fixture.query = "zzz".into();
         fixture.hits = vec![hit("tab", "x", vec![]), hit("elsewhere", "y", vec![]), hit("not-listed", "z", vec![])];
         fixture.content = ContentState::Ready;
         assert_eq!(fixture.outline(), vec!["## Found in conversations", "~tab open"]);
@@ -645,7 +646,7 @@ mod tests {
     #[test]
     fn the_section_explains_its_state() {
         let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1)]);
-        fixture.query = "zz".into();
+        fixture.query = "zzz".into();
         fixture.content = ContentState::Waiting;
         assert!(fixture.outline().is_empty(), "nothing until the first reply");
         fixture.content = ContentState::Ready;
