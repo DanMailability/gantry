@@ -1,10 +1,11 @@
-//! The directory launcher overlay (`Ctrl+Shift+O`): recent Claude directories, fuzzy filtered, then Browse….
+//! The directory launcher overlay (`Ctrl+Shift+O`, and the New buttons): folders open now, then favorites and recent
+//! Claude directories, fuzzy filtered, with a Browse… button.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use app_core::launcher::{self, LauncherItem};
+use app_core::launcher::{self, LauncherItem, OpenFolder};
 use app_core::session_tree::display_path;
 use app_core::text_field::TextField;
 use app_core::workspace::ClaudeDirs;
@@ -44,7 +45,10 @@ pub enum LauncherEvent {
 /// The launcher overlay.
 pub struct LauncherView {
     focus_handle: FocusHandle,
+    open: Vec<OpenFolder>,
     sessions: Vec<SessionInfo>,
+    /// Enter starts Claude and Alt+Enter a shell; false swaps them.
+    claude_first: bool,
     home: Option<PathBuf>,
     query: TextField,
     items: Vec<LauncherItem>,
@@ -70,14 +74,17 @@ impl Focusable for LauncherView {
 }
 
 impl LauncherView {
-    /// A launcher over the directories of `sessions`.
-    pub fn new(sessions: Vec<SessionInfo>, cx: &mut Context<Self>) -> Self {
+    /// A launcher over the `open` folders and the directories of `sessions`. `claude_first`: Enter starts Claude,
+    /// Alt+Enter a shell; false swaps them.
+    pub fn new(open: Vec<OpenFolder>, sessions: Vec<SessionInfo>, claude_first: bool, cx: &mut Context<Self>) -> Self {
         let settings = cx.global::<SettingsStore>().settings();
         let (favorites, memory) = (settings.favorites.clone(), settings.folder_claude_dirs.clone());
         let dirs = ClaudeDirs::from_settings(settings, None, None);
         let mut launcher = LauncherView {
             focus_handle: cx.focus_handle(),
+            open,
             sessions,
+            claude_first,
             home: std::env::home_dir(),
             query: TextField::default(),
             items: Vec::new(),
@@ -95,16 +102,13 @@ impl LauncherView {
 
     fn refresh(&mut self) {
         let sessions: Vec<&SessionInfo> = self.sessions.iter().collect();
-        self.items = launcher::items(&sessions, self.query.text(), self.home.as_deref(), &self.favorites);
-        self.selected = 0;
+        self.items = launcher::items(&self.open, &sessions, self.query.text(), self.home.as_deref(), &self.favorites);
+        self.selected = launcher::first_selectable(&self.items);
     }
 
     /// The folder the highlighted item opens, if it is one.
     fn highlighted_folder(&self) -> Option<&PathBuf> {
-        match self.items.get(self.selected) {
-            Some(LauncherItem::Dir { path, .. }) => Some(path),
-            _ => None,
-        }
+        self.items.get(self.selected).and_then(LauncherItem::folder)
     }
 
     /// The index of the dir the highlighted folder resolves to without a pick (the default for Browse).
@@ -125,19 +129,21 @@ impl LauncherView {
         claude.then(|| self.dirs.dirs[pick].name.clone())
     }
 
-    fn choose(&mut self, index: usize, claude: bool, cx: &mut Context<Self>) {
-        match self.items.get(index) {
-            Some(LauncherItem::Dir { path, exists: true, .. }) => {
-                let dir_pick = self.dir_pick_for(Some(path), claude);
-                cx.emit(LauncherEvent::Open { dir: path.clone(), claude, dir_pick });
-            }
-            Some(LauncherItem::Dir { .. }) => {}
-            Some(LauncherItem::Browse) => {
-                let dir_pick = self.dir_pick_for(None, claude);
-                cx.emit(LauncherEvent::Browse { claude, dir_pick });
-            }
-            None => {}
-        }
+    fn choose(&mut self, index: usize, alt: bool, cx: &mut Context<Self>) {
+        let claude = self.claude_first != alt;
+        let folder = match self.items.get(index) {
+            Some(LauncherItem::Open(folder)) => &folder.path,
+            Some(LauncherItem::Dir { path, exists: true, .. }) => path,
+            _ => return,
+        };
+        let dir_pick = self.dir_pick_for(Some(folder), claude);
+        cx.emit(LauncherEvent::Open { dir: folder.clone(), claude, dir_pick });
+    }
+
+    fn browse(&mut self, alt: bool, cx: &mut Context<Self>) {
+        let claude = self.claude_first != alt;
+        let dir_pick = self.dir_pick_for(None, claude);
+        cx.emit(LauncherEvent::Browse { claude, dir_pick });
     }
 
     /// Move the chip's pick one dir on (or back).
@@ -154,11 +160,12 @@ impl LauncherView {
         let keystroke = &event.keystroke;
         match keystroke.key.as_str() {
             "tab" if self.dirs.dirs.len() > 1 => self.cycle_dir(keystroke.modifiers.shift),
-            "up" => self.selected = self.selected.saturating_sub(1),
-            "down" => self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1)),
-            "enter" => self.choose(self.selected, !keystroke.modifiers.alt, cx),
+            "up" => self.selected = launcher::step(&self.items, self.selected, false),
+            "down" => self.selected = launcher::step(&self.items, self.selected, true),
+            "enter" => self.choose(self.selected, keystroke.modifiers.alt, cx),
             "escape" if self.chip_open => self.chip_open = false,
             "escape" => cx.emit(LauncherEvent::Dismiss),
+            "o" if keystroke.modifiers.secondary() => self.browse(keystroke.modifiers.alt, cx),
             _ => {
                 if !field::edit(&mut self.query, keystroke, cx) {
                     return;
@@ -172,7 +179,22 @@ impl LauncherView {
     }
 
     fn render_item(&self, index: usize, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
-        let (label, star, note, muted) = match &self.items[index] {
+        let theme = theme(cx).clone();
+        if let LauncherItem::Header { label, count } = &self.items[index] {
+            return div()
+                .id(index)
+                .w_full()
+                .h(theme.ui(34.))
+                .pl(px(20.))
+                .pr(px(20.))
+                .flex()
+                .items_center()
+                .text_xs()
+                .text_color(rgb(theme.tokens.muted))
+                .child(div().flex_1().child(label.to_uppercase()))
+                .child(div().flex_none().children(count.map(|count| count.to_string())));
+        }
+        let (label, lead, note, muted, folder_open) = match &self.items[index] {
             LauncherItem::Dir { path, favorite, exists } => {
                 let shown = display_path(path, self.home.as_deref());
                 let note = match (favorite, exists) {
@@ -180,12 +202,19 @@ impl LauncherView {
                     (true, false) => "not found",
                     (false, _) => "",
                 };
-                (shown, *favorite, note, !exists)
+                let star = div().text_color(rgb(theme.tokens.accent)).child(if *favorite { "★" } else { "" });
+                (shown, star, note.to_string(), !exists, false)
             }
-            LauncherItem::Browse => ("Browse…".to_string(), false, "", false),
+            LauncherItem::Open(folder) => {
+                let dot = div().size(theme.ui(8.)).rounded_full().map(|dot| match folder.tone {
+                    Some(tone) => dot.bg(rgb(theme.tone(tone).dot)),
+                    None => dot.border_1().border_color(rgb(theme.tokens.muted)),
+                });
+                (display_path(&folder.path, self.home.as_deref()), dot, folder.note(), false, true)
+            }
+            LauncherItem::Header { .. } => unreachable!("headers return above"),
         };
         let selected = index == self.selected;
-        let theme = theme(cx).clone();
         div()
             .id(index)
             .w_full()
@@ -204,19 +233,13 @@ impl LauncherView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .when(selected, |el| el.bg(rgb(theme.tokens.raised)))
-                    .when(!selected || muted, |el| el.text_color(rgb(theme.tokens.muted)))
+                    .when((!selected && !folder_open) || muted, |el| el.text_color(rgb(theme.tokens.muted)))
                     .when(!selected && !muted, |el| el.hover(|style| style.text_color(rgb(theme.tokens.text))))
-                    .child(div().flex_none().w(theme.ui(14.)).text_color(rgb(theme.tokens.accent)).child(if star {
-                        "★"
-                    } else {
-                        ""
-                    }))
+                    .child(div().flex_none().w(theme.ui(14.)).flex().items_center().child(lead))
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(note)),
             )
-            .on_click(
-                cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, !event.modifiers().alt, cx)),
-            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, event.modifiers().alt, cx)))
     }
 
     /// "Claude: <name> ▾" and where the choice comes from; with a list of the dirs under it while open.
@@ -346,7 +369,8 @@ impl Render for LauncherView {
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(theme.tokens.line))
-                    .child(field::render(
+                    .gap(theme.ui(10.))
+                    .child(div().flex_1().min_w_0().child(field::render(
                         &self.query,
                         "Open a directory…",
                         true,
@@ -355,7 +379,33 @@ impl Render for LauncherView {
                             this.query.press(offset, clicks);
                             cx.notify();
                         }),
-                    )),
+                    )))
+                    .child(
+                        div()
+                            .id("launcher-browse")
+                            .flex_none()
+                            .h(theme.ui(28.))
+                            .px(theme.ui(12.))
+                            .flex()
+                            .items_center()
+                            .gap(theme.ui(8.))
+                            .rounded(px(RADIUS_SMALL))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .bg(rgb(theme.tokens.raised))
+                            .hover(|style| style.border_color(rgb(theme.tokens.accent)))
+                            .cursor_pointer()
+                            .child("Browse…")
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.tokens.muted))
+                                    .child(if cfg!(target_os = "macos") { "Cmd+O" } else { "Ctrl+O" }),
+                            )
+                            .on_click(
+                                cx.listener(|this, event: &ClickEvent, _, cx| this.browse(event.modifiers().alt, cx)),
+                            ),
+                    ),
             )
             .when(self.dirs.dirs.len() > 1, |launcher| launcher.child(self.render_chip(cx)))
             .child(
@@ -379,10 +429,11 @@ impl Render for LauncherView {
                     .text_color(rgb(theme.tokens.muted))
                     .border_t_1()
                     .border_color(rgb(theme.tokens.line))
-                    .child(if self.dirs.dirs.len() > 1 {
-                        "Enter: Claude · Alt+Enter: shell · Tab: config dir · Esc: close"
-                    } else {
-                        "Enter: Claude · Alt+Enter: shell · Esc: close"
+                    .child(match (self.claude_first, self.dirs.dirs.len() > 1) {
+                        (true, true) => "Enter: Claude · Alt+Enter: shell · Tab: config dir · Esc: close",
+                        (true, false) => "Enter: Claude · Alt+Enter: shell · Esc: close",
+                        (false, true) => "Enter: shell · Alt+Enter: Claude · Tab: config dir · Esc: close",
+                        (false, false) => "Enter: shell · Alt+Enter: Claude · Esc: close",
                     }),
             )
     }
