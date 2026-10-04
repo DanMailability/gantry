@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Run cargo for Gantry the way every session on this machine must: one build at a time (a machine-wide lock shared
+# by all checkouts and worktrees), in the main checkout's target dir (worktrees reuse its built dependencies instead
+# of compiling GPUI from scratch), capped in memory and CPU at the lowest priority.
+# Usage: scripts/cargo <cargo arguments>, e.g. scripts/cargo test -p daemon
+set -euo pipefail
+
+common=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(dirname "$common")/target}"
+
+lock="${XDG_RUNTIME_DIR:-/tmp}/gantry-cargo.lock"
+exec 9>"$lock"
+if ! flock -n 9; then
+    echo "scripts/cargo: waiting for another Gantry build to finish…" >&2
+    flock 9
+fi
+
+systemd-run --user --scope --quiet -p MemoryMax=8G -p CPUQuota=600% \
+    nice -n 19 env CARGO_BUILD_JOBS=4 cargo "$@"
