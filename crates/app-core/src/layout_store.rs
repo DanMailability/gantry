@@ -49,14 +49,6 @@ pub fn save(path: &Path, workspace: &Workspace) -> io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
-/// Delete the saved workspace, if any.
-pub fn clear(path: &Path) -> io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-        _ => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,16 +105,6 @@ mod tests {
         save(&path, &workspace).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("settings"));
         assert_eq!(load(&path).unwrap().unwrap().tabs, sample().tabs);
-    }
-
-    #[test]
-    fn clear_removes_the_file_and_tolerates_absence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("layout.json");
-        save(&path, &sample()).unwrap();
-        clear(&path).unwrap();
-        assert!(!path.exists());
-        clear(&path).unwrap();
     }
 
     #[test]

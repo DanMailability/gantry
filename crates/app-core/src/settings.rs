@@ -233,6 +233,8 @@ pub struct RecentsSettings {
 pub struct WindowSettings {
     /// Restore tabs and panes on start.
     pub restore_layout: bool,
+    /// Resume finished sessions by themselves on start (instead of waiting for Continue).
+    pub resume_sessions: bool,
     /// Sidebar state at start.
     pub sidebar_at_start: SidebarAtStart,
     /// Scrollback lines for new panes (1000 to 100000).
@@ -343,6 +345,7 @@ impl Default for Settings {
             favorites: Vec::new(),
             window: WindowSettings {
                 restore_layout: true,
+                resume_sessions: true,
                 sidebar_at_start: SidebarAtStart::Remember,
                 scrollback: 10_000,
                 right_to_left: true,
@@ -732,6 +735,7 @@ impl Reader {
         let map = self.object(raw, "", "window");
         let window = WindowSettings {
             restore_layout: self.bool(&map, "window.", "restoreLayout", defaults.window.restore_layout),
+            resume_sessions: self.bool(&map, "window.", "resumeSessions", defaults.window.resume_sessions),
             sidebar_at_start: self.choice(
                 &map,
                 "window.",
@@ -879,6 +883,7 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     add(&["favorites"], Value::Array(favorites), !settings.favorites.is_empty());
     let (window, base) = (&settings.window, &default.window);
     add(&["window", "restoreLayout"], window.restore_layout.into(), window.restore_layout != base.restore_layout);
+    add(&["window", "resumeSessions"], window.resume_sessions.into(), window.resume_sessions != base.resume_sessions);
     add(
         &["window", "sidebarAtStart"],
         window.sidebar_at_start.name().into(),
@@ -1190,6 +1195,7 @@ mod tests {
         settings.favorites = vec!["/a".into(), "/b".into()];
         settings.window = WindowSettings {
             restore_layout: false,
+            resume_sessions: false,
             sidebar_at_start: SidebarAtStart::Hidden,
             scrollback: 50000,
             right_to_left: false,
@@ -1215,6 +1221,7 @@ mod tests {
             s.window,
             WindowSettings {
                 restore_layout: true,
+                resume_sessions: true,
                 sidebar_at_start: SidebarAtStart::Remember,
                 scrollback: 10000,
                 right_to_left: true,
