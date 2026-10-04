@@ -657,6 +657,17 @@ impl Workspace {
         session.status.as_ref()
     }
 
+    /// The newest prompt of the session `leaf`'s pane runs, if it has one.
+    pub fn leaf_last_prompt<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s str> {
+        let leaf = self.leaves.get(&leaf)?;
+        let pane = leaf.pane?;
+        let session = sessions.get(leaf.session.as_deref()?)?;
+        if session.state != (SessionState::Managed { pane }) {
+            return None;
+        }
+        session.last_prompt.as_deref().filter(|prompt| !prompt.is_empty())
+    }
+
     /// The most urgent status among tab `index`'s leaves.
     pub fn tab_status<'s>(&self, index: usize, sessions: &'s SessionStore) -> Option<&'s SessionStatus> {
         let tab = self.tabs.get(index).filter(|tab| !tab.settings)?;
@@ -1274,6 +1285,32 @@ mod tests {
         store.replace(vec![]);
         let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(launch.env.len(), 1, "falls back to the leaf's own dir when the session is unknown");
+    }
+
+    #[test]
+    fn a_leaf_shows_the_last_prompt_of_the_session_its_pane_runs() {
+        use protocol::message::{SessionInfo, SessionState};
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(PaneLaunch::resume("a", "/r".into(), None));
+        ws.pane_started(a, 1, "/r".into());
+        let sh = ws.new_tab(shell("/r"));
+        ws.pane_started(sh, 2, "/r".into());
+        let with = |pane, prompt: Option<&str>| SessionInfo {
+            last_prompt: prompt.map(Into::into),
+            ..session_info("a", SessionState::Managed { pane })
+        };
+        let mut store = SessionStore::default();
+        store.replace(vec![with(1, Some("what next"))]);
+        assert_eq!(ws.leaf_last_prompt(a, &store), Some("what next"));
+        assert_eq!(ws.leaf_last_prompt(sh, &store), None, "a shell has no session");
+        store.replace(vec![with(1, None)]);
+        assert_eq!(ws.leaf_last_prompt(a, &store), None, "nothing yet");
+        store.replace(vec![with(1, Some(""))]);
+        assert_eq!(ws.leaf_last_prompt(a, &store), None, "empty text is nothing");
+        store.replace(vec![with(9, Some("old"))]);
+        assert_eq!(ws.leaf_last_prompt(a, &store), None, "the session moved to another pane");
+        store.replace(vec![SessionInfo { last_prompt: Some("old".into()), ..session_info("a", SessionState::Closed) }]);
+        assert_eq!(ws.leaf_last_prompt(a, &store), None, "an ended pane shows Continue, not a prompt");
     }
 
     #[test]
