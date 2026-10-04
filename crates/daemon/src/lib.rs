@@ -6,6 +6,7 @@ pub mod launch;
 pub mod outbox;
 pub mod paths;
 pub mod pty;
+pub mod search;
 pub mod server;
 pub mod sessions;
 pub mod shell_env;
