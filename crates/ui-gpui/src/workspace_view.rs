@@ -18,7 +18,7 @@ use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
-    Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
+    Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba, svg,
 };
 use protocol::message::{
     ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
@@ -32,6 +32,7 @@ use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
+use crate::assets::{SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
@@ -199,6 +200,8 @@ pub struct WorkspaceView {
     before_settings: Option<NodeId>,
     /// The open right-click menu of a tab.
     tab_menu: Option<OpenMenu>,
+    /// The open popup of a pane's split button (Claude or Terminal).
+    pane_menu: Option<OpenMenu>,
     /// Take-over requests waiting for the daemon, by session.
     take_overs: HashMap<String, TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
@@ -302,6 +305,7 @@ impl WorkspaceView {
             _settings_events: None,
             before_settings: None,
             tab_menu: None,
+            pane_menu: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -988,6 +992,14 @@ impl WorkspaceView {
                     self.open(true, Some(axis));
                 }
             }
+            MenuAction::SplitPane { leaf, axis, claude } => {
+                // The pane whose button was clicked, which takes focus before it splits (it may be gone by now).
+                if self.workspace.focus(leaf) {
+                    self.focus_current(window, cx);
+                    self.save(cx);
+                    self.open(claude, Some(axis));
+                }
+            }
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
@@ -1098,6 +1110,80 @@ impl WorkspaceView {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         self.tab_menu = Some(OpenMenu::new(items, position, focus));
+        cx.notify();
+    }
+
+    /// The split right and split down buttons in the top right corner of a pane's terminal area (so under its
+    /// header): visible while the pane is hovered or focused, or while its popup is open.
+    fn split_buttons(
+        &self,
+        leaf: NodeId,
+        index: usize,
+        focused: bool,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let settings = cx.global::<SettingsStore>().settings();
+        let popup_open = self.pane_menu.as_ref().is_some_and(|menu| {
+            matches!(
+                menu.items.first(),
+                Some(MenuItem::Entry(MenuEntry { action: MenuAction::SplitPane { leaf: open, .. }, .. })) if *open == leaf
+            )
+        });
+        let group = format!("pane-card-{index}");
+        let button = |axis: Axis, label: &'static str, shortcut: &'static str, icon: &'static str| {
+            let platform = Platform::current();
+            let title = match shortcuts::current(shortcut, &settings.shortcuts, platform) {
+                Some(keystroke) => format!("{label} ({})", shortcuts::label(Some(&keystroke), platform)),
+                None => label.to_string(),
+            };
+            let card = HoverCard { title, status: None, dir: None, container: false, folder: None };
+            div()
+                .id((label, index))
+                .flex_none()
+                .size(theme.ui(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_SMALL - 2.))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                .tooltip(hover_card::tooltip(card))
+                .child(svg().path(icon).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.open_pane_menu(leaf, axis, event.position + gpui::point(px(0.), px(14.)), window, cx);
+                        // Keep focus on the popup: the workspace's tracked focus must not take it back.
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }),
+                )
+        };
+        div()
+            .absolute()
+            .top(px(2.))
+            .right(px(4.))
+            .flex()
+            .gap(px(2.))
+            .opacity(if focused || popup_open { 1. } else { 0. })
+            .group_hover(group, |style| style.opacity(1.))
+            .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
+            .child(button(Axis::Vertical, "Split down", "splitDownClaude", SPLIT_DOWN_ICON))
+    }
+
+    /// Open the Claude / Terminal popup of pane `leaf`'s split button at `position`.
+    fn open_pane_menu(
+        &mut self,
+        leaf: NodeId,
+        axis: Axis,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        self.pane_menu = Some(OpenMenu::new(menus::split_menu(leaf, axis), position, focus));
         cx.notify();
     }
 
@@ -1814,6 +1900,7 @@ impl WorkspaceView {
                                 .size_full()
                                 .flex()
                                 .flex_col()
+                                .group(format!("pane-card-{index}"))
                                 .p(px(6.))
                                 .rounded(px(RADIUS_LARGE))
                                 .bg(rgb(theme.tokens.terminal))
@@ -1828,7 +1915,14 @@ impl WorkspaceView {
                                         index, title, status, unseen, animate, container, dir, folder, project, &theme,
                                     ))
                                 })
-                                .child(div().flex_1().min_h_0().child(view)),
+                                .child(
+                                    div()
+                                        .relative()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .child(view)
+                                        .child(self.split_buttons(leaf, index, focused, &theme, cx)),
+                                ),
                         ),
                 )
             }))
@@ -2112,6 +2206,27 @@ impl Render for WorkspaceView {
                         .bg(rgba((theme.tokens.ground << 8) | 0xcc))
                         .child(view),
                 )
+            })
+            .when_some(self.pane_menu.as_ref(), |root, menu| {
+                let pick = cx.listener(|this, action: &MenuAction, window, cx| {
+                    this.pane_menu = None;
+                    this.focus_current(window, cx);
+                    this.run_menu_action(action.clone(), window, cx);
+                    cx.notify();
+                });
+                let dismiss = cx.listener(|this, _: &(), window, cx| {
+                    this.pane_menu = None;
+                    this.focus_current(window, cx);
+                    cx.notify();
+                });
+                root.child(context_menu::render(
+                    "pane-menu",
+                    menu,
+                    &theme,
+                    cx.global::<SettingsStore>().settings(),
+                    move |action, window, cx| pick(action, window, cx),
+                    move |window, cx| dismiss(&(), window, cx),
+                ))
             })
             .when_some(self.tab_menu.as_ref(), |root, menu| {
                 let pick = cx.listener(|this, action: &MenuAction, window, cx| {
