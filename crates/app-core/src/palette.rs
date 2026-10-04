@@ -45,7 +45,7 @@ pub const DARK: Palette = Palette {
     ],
 };
 
-/// Light theme: dark text on a pale background, ANSI colours darkened to read on it.
+/// Light theme: dark text on a pale background, ANSI colors darkened to read on it.
 pub const LIGHT: Palette = Palette {
     foreground: Rgb::hex(0x1c2333),
     background: Rgb::hex(0xf8f9fc),

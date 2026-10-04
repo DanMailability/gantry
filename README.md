@@ -8,7 +8,7 @@ waiting for you, and jump straight to the one that needs input.
 
 ## Features
 
-- **Sessions at a glance.** A sidebar lists every active session by project. A session's status colours its row, its
+- **Sessions at a glance.** A sidebar lists every active session by project. A session's status colors its row, its
   title-bar chip and its pane header: working, idle, needs input, done. Working rows glow.
 - **Alerts.** A native notification and a chime when a session finishes or needs input while you are looking elsewhere.
   Per-event badge, notification, sound, tone and volume are configurable.
@@ -19,13 +19,13 @@ waiting for you, and jump straight to the one that needs input.
   Claude's replies, indexed with Tantivy).
 - **Last prompt card.** Each Claude pane shows its newest prompt above the terminal, so you remember what you asked.
 - **Several Claude config dirs.** Work with more than one `CLAUDE_CONFIG_DIR` (personal, work, ...), each with its own
-  badge and colour. A first-run wizard finds them for you.
+  badge and color. A first-run wizard finds them for you.
 - **Dev containers.** Sessions that run in a dev container are listed under their host folder and resumed inside it.
 - **Take over.** Sessions running outside Gantry show up too, and can be taken over into a pane.
 - **Right-to-left text.** Hebrew and Arabic display in the right order, as a display-only layer (selection, copy and
   links stay logical).
-- **Everything rebindable.** Shortcuts, theme (Mist, Mist light, follow system), fonts, status colours and project
-  colours live in a Settings tab and in a hand-editable `settings.json` that applies live.
+- **Everything rebindable.** Shortcuts, theme (Mist, Mist light, follow system), fonts, status colors and project
+  colors live in a Settings tab and in a hand-editable `settings.json` that applies live.
 
 Gantry only reads Claude's config directory. It never writes to it, and it uses no Claude hooks: status comes from the
 pid files Claude already writes.

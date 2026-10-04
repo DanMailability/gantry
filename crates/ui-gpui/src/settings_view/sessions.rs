@@ -442,7 +442,7 @@ impl SettingsView {
                 });
                 let badge_button = self
                     .pressable(
-                        "dir-colour",
+                        "dir-color",
                         index,
                         Some(if open { theme.tokens.accent } else { theme.tokens.line }),
                         window,
@@ -508,7 +508,7 @@ impl SettingsView {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(theme.tokens.muted))
-                                    .child(format!("Colour for {}", dir.name)),
+                                    .child(format!("Color for {}", dir.name)),
                             )
                             .child(div().grid().grid_cols(4).gap(theme.ui(6.)).children(swatches)),
                     )
@@ -651,7 +651,7 @@ impl SettingsView {
             theme,
             "Claude config dirs",
             Some(
-                "New folders use the default. A dir picked in the launcher is remembered for that folder. The letter and colour mark its sessions.",
+                "New folders use the default. A dir picked in the launcher is remembered for that folder. The letter and color mark its sessions.",
             ),
             rows,
         )
@@ -773,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn picking_a_colour_for_the_implicit_default_lists_it_first() {
+    fn picking_a_color_for_the_implicit_default_lists_it_first() {
         let mut settings = Settings::default();
         set_dir_color(&mut settings, 0, ProjectColor::Lime, Some(Path::new("/d/claude")), None);
         assert_eq!(settings.claude_dirs.len(), 1);
@@ -781,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn picking_a_colour_changes_only_that_dir() {
+    fn picking_a_color_changes_only_that_dir() {
         let mut settings = Settings {
             claude_dirs: vec![
                 ClaudeDir { name: "A".into(), path: "/a".into(), command: "claude".into(), args: vec![], color: None },

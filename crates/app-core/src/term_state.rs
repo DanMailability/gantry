@@ -132,7 +132,7 @@ impl TermState {
         }
     }
 
-    /// Use `palette` from now on, including for colour query answers.
+    /// Use `palette` from now on, including for color query answers.
     pub fn set_palette(&mut self, palette: Palette) {
         self.palette = palette;
     }

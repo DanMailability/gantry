@@ -1,4 +1,4 @@
-//! A right-click menu: entries in groups, a hint for the entry's shortcut, the row's main action in the accent colour.
+//! A right-click menu: entries in groups, a hint for the entry's shortcut, the row's main action in the accent color.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -100,7 +100,7 @@ pub(crate) fn render(
             let open = open_sub == Some(index);
             let bounds = menu.sub_bounds.clone();
             let children = open.then(|| {
-                // Colour swatches are drawn together as a 4-column grid, the other entries below it.
+                // Color swatches are drawn together as a 4-column grid, the other entries below it.
                 let swatches: Vec<_> = items
                     .iter()
                     .enumerate()

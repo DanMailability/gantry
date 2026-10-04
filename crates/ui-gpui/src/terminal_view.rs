@@ -93,7 +93,7 @@ pub(crate) fn pane_font(family: Option<&str>) -> Font {
     pane_font
 }
 
-/// An empty terminal of the given size, in the current theme's colours.
+/// An empty terminal of the given size, in the current theme's colors.
 fn new_term(cols: u16, rows: u16, cx: &App) -> TermState {
     let lines = cx.global::<SettingsStore>().settings().window.scrollback as usize;
     let mut term = TermState::with_scrollback(cols, rows, lines);
@@ -245,7 +245,7 @@ impl TerminalView {
         }
     }
 
-    /// The theme changed: use its terminal colours.
+    /// The theme changed: use its terminal colors.
     pub fn apply_theme(&mut self, cx: &mut Context<Self>) {
         self.term.set_palette(terminal_palette(theme(cx).preset));
         cx.notify();

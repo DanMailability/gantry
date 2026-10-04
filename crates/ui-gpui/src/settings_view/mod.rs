@@ -36,7 +36,7 @@ use terminal::installed_monospace;
 /// A group of settings, chosen in the left menu.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
-    /// Theme, status colours and fonts.
+    /// Theme, status colors and fonts.
     Appearance,
     /// Terminal font, scrollback, text direction and shell.
     Terminal,
@@ -196,7 +196,7 @@ pub(crate) struct SettingsView {
     /// Installed monospace families (without the platform default), found when the page opened.
     families: Vec<String>,
     popover: Option<Popover>,
-    /// The colour picker's hex field.
+    /// The color picker's hex field.
     hex: TextField,
     hex_focus: FocusHandle,
     /// The volume being dragged, written when the button is released.
@@ -294,7 +294,7 @@ impl SettingsView {
     }
 
     /// A focusable, clickable box: Space or Enter presses it like a click. The ring is `border` (none: invisible)
-    /// and turns to the text colour while focused.
+    /// and turns to the text color while focused.
     fn pressable(
         &mut self,
         name: &'static str,

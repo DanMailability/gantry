@@ -556,13 +556,13 @@ impl RecentsView {
         let on = self.is_current(&chip.target);
         let theme = theme(cx).clone();
         let target = chip.target.clone();
-        // A project's chip is drawn in its colour (the other chips in the accent); without colours, as before.
+        // A project's chip is drawn in its color (the other chips in the accent); without colors, as before.
         let color = match &chip.target {
             ChipTarget::Project(path) => theme.project(path),
             _ => None,
         }
         .unwrap_or(theme.tokens.accent);
-        let coloured = matches!(&chip.target, ChipTarget::Project(path) if theme.project(path).is_some());
+        let colored = matches!(&chip.target, ChipTarget::Project(path) if theme.project(path).is_some());
         div()
             .id(("chip", index))
             .h(theme.ui(28.))
@@ -574,18 +574,18 @@ impl RecentsView {
             .border_1()
             .border_color(if on {
                 rgb(color)
-            } else if coloured {
+            } else if colored {
                 gpui::rgba((color << 8) | 0x80)
             } else {
                 rgb(theme.tokens.line)
             })
             .when(on, |chip| {
                 chip.bg(rgb(color))
-                    .text_color(rgb(if coloured { theme.tokens.ground } else { theme.tokens.on_accent }))
+                    .text_color(rgb(if colored { theme.tokens.ground } else { theme.tokens.on_accent }))
                     .font_weight(FontWeight::SEMIBOLD)
             })
             .when(!on, |chip| {
-                chip.text_color(rgb(if coloured { color } else { theme.tokens.text }))
+                chip.text_color(rgb(if colored { color } else { theme.tokens.text }))
                     .hover(|style| style.bg(rgb(theme.tokens.raised)))
             })
             .cursor_pointer()
