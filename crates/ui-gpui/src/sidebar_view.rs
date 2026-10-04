@@ -776,7 +776,15 @@ impl Render for SidebarView {
             .when(self.settings_open, |this| {
                 let inset = if self.settings_active { RING + RING_GAP } else { 0. };
                 let ring = self.settings_active.then(|| {
-                    div().absolute().size_full().rounded(px(RADIUS)).border_2().border_color(rgb(theme.selection()))
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .rounded(px(RADIUS))
+                        .border_2()
+                        .border_color(rgb(theme.selection()))
                 });
                 this.child(
                     div()
