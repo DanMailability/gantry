@@ -9,8 +9,8 @@ use std::time::Duration;
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaletteColors, PaneId, PaneInfo, SessionInfo,
-    SpawnRequest, TakeOverOutcome,
+    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaletteColors, PaneId, PaneInfo, SearchHit,
+    SessionInfo, SpawnRequest, TakeOverOutcome,
 };
 use tokio::sync::mpsc;
 
@@ -87,6 +87,25 @@ pub enum ClientEvent {
         request: u64,
         /// The dev container that mounts the directory, if any.
         container: Option<ContainerChoice>,
+    },
+    /// The answer to `search`.
+    SearchResults {
+        /// Echoed request id.
+        request: u64,
+        /// One hit per session, best first.
+        hits: Vec<SearchHit>,
+    },
+    /// The conversation index is being built.
+    SearchIndexing {
+        /// Files done.
+        done: u64,
+        /// Files in this pass.
+        total: u64,
+    },
+    /// Conversation search does not work in this daemon run.
+    SearchUnavailable {
+        /// Why.
+        reason: String,
     },
     /// Another GUI took over the daemon.
     TakenOver,
@@ -201,6 +220,11 @@ impl DaemonClient {
         self.send(&ClientMessage::FindContainer { request, dir: dir.into() });
     }
 
+    /// Search the conversations' text; answered by `SearchResults` with the same `request`.
+    pub fn search(&self, request: u64, query: &str, limit: u32) {
+        self.send(&ClientMessage::SearchConversations { request, query: query.into(), limit });
+    }
+
     /// Send keyboard/paste input to a pane.
     pub fn input(&self, pane: PaneId, bytes: &[u8]) {
         let _ = self.outgoing.send(Outgoing::Frame(Frame::Data { pane, bytes: bytes.to_vec() }));
@@ -296,6 +320,11 @@ async fn run_connection(
                 Some(Ok(DaemonMessage::ContainerFound { request, container })) => {
                     ClientEvent::ContainerFound { request, container }
                 }
+                Some(Ok(DaemonMessage::SearchResults { request, hits })) => {
+                    ClientEvent::SearchResults { request, hits }
+                }
+                Some(Ok(DaemonMessage::SearchIndexing { done, total })) => ClientEvent::SearchIndexing { done, total },
+                Some(Ok(DaemonMessage::SearchUnavailable { reason })) => ClientEvent::SearchUnavailable { reason },
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");

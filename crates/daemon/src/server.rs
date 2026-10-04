@@ -651,6 +651,9 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         }
         ClientMessage::TakeOver { session, force } => take_over_session(shared, session, force),
         ClientMessage::FindContainer { request, dir } => find_container(shared, request, dir),
+        ClientMessage::SearchConversations { .. } => {
+            shared.lock().control(&DaemonMessage::SearchUnavailable { reason: "conversation search is off".into() });
+        }
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             let inside = state

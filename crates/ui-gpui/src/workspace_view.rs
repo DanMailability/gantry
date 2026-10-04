@@ -424,6 +424,9 @@ impl WorkspaceView {
                 ClientEvent::ContainerFound { request, container } => {
                     self.on_container_found(*request, container.clone(), window, cx)
                 }
+                ClientEvent::SearchResults { .. }
+                | ClientEvent::SearchIndexing { .. }
+                | ClientEvent::SearchUnavailable { .. } => {}
                 ClientEvent::TakenOver => cx.quit(),
                 ClientEvent::Disconnected => {
                     for slot in self.slots.values() {
