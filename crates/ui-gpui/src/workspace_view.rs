@@ -16,9 +16,9 @@ use app_core::workspace::{ClaudeDirs, DirBadge, PaneLaunch, Rerun, Restored, Wor
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
-    Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba,
+    Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba, svg,
 };
 use protocol::message::{
     ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
@@ -32,6 +32,7 @@ use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
+use crate::assets::PROMPT_ICON;
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
@@ -1800,6 +1801,11 @@ impl WorkspaceView {
                     .leaves
                     .get(&leaf)
                     .map(|entry| display_path(&entry.launch.cwd, std::env::home_dir().as_deref()));
+                let last_prompt = if cx.global::<SettingsStore>().settings().window.last_prompt {
+                    self.workspace.leaf_last_prompt(leaf, self.sidebar.read(cx).sessions()).map(str::to_string)
+                } else {
+                    None
+                };
                 Some(
                     div()
                         .absolute()
@@ -1828,6 +1834,7 @@ impl WorkspaceView {
                                         index, title, status, unseen, animate, container, dir, folder, project, &theme,
                                     ))
                                 })
+                                .when_some(last_prompt, |pane, text| pane.child(prompt_card(text, multiple, &theme)))
                                 .child(div().flex_1().min_h_0().child(view)),
                         ),
                 )
@@ -1869,6 +1876,43 @@ impl WorkspaceView {
             )
             .into_any_element()
     }
+}
+
+/// Your last prompt in a card above a Claude pane's terminal: a fixed two lines, clipped with an ellipsis.
+fn prompt_card(text: String, multiple: bool, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .h(theme.ui(56.))
+        .mb(px(6.))
+        .when(multiple, |card| card.mt(px(6.)))
+        .px(theme.ui(14.))
+        .py(theme.ui(9.))
+        .flex()
+        .items_start()
+        .gap(theme.ui(10.))
+        .rounded(px(RADIUS_SMALL))
+        .bg(rgb(theme.tokens.surface))
+        .border_1()
+        .border_color(rgb(theme.tokens.line))
+        .child(
+            svg()
+                .path(PROMPT_ICON)
+                .flex_none()
+                .mt(theme.ui(2.))
+                .size(theme.ui(14.))
+                .text_color(rgb(theme.tokens.accent)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(theme.ui(13.))
+                .line_height(theme.ui(18.))
+                .text_color(rgb(theme.tokens.text))
+                .line_clamp(2)
+                .text_ellipsis()
+                .child(text),
+        )
 }
 
 /// A split pane's header: filled like its tab, with the session's status in words.
