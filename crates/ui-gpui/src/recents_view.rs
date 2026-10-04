@@ -1,6 +1,7 @@
 //! The recent sessions overlay (`Ctrl+Shift+R`): closed sessions by project, searchable, with project chips.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -410,7 +411,7 @@ impl RecentsView {
                     );
                 }
                 // While searching the list is one ranked list without headings, so each row names its project.
-                RecentItem::Session { session, age, project, snippet: None, .. } => row.child(
+                RecentItem::Session { session, age, project, marks, snippet: None, .. } => row.child(
                     pill()
                         .when_some(theme.project(project), |pill, color| {
                             pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme))
@@ -423,7 +424,7 @@ impl RecentsView {
                                 .border_1()
                                 .border_color(rgb(theme.tokens.muted)),
                         )
-                        .child(div().flex_1().min_w_0().truncate().child(session_title(session).to_string()))
+                        .child(div().flex_1().min_w_0().truncate().child(title_text(session, marks)))
                         .when(session.container.is_some(), |pill| pill.child(container_icon(theme.tokens.text, &theme)))
                         .children(
                             dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
@@ -442,7 +443,7 @@ impl RecentsView {
                                 .child(if session.cwd_exists { age.clone() } else { "Folder missing".into() }),
                         ),
                 ),
-                RecentItem::Session { session, age, project, snippet: Some(snippet), open } => {
+                RecentItem::Session { session, age, project, marks, snippet: Some(snippet), open } => {
                     let project_name =
                         project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
                     row.h(theme.ui(HIT_ROW_HEIGHT)).child(
@@ -460,9 +461,7 @@ impl RecentsView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        div().flex_1().min_w_0().truncate().child(session_title(session).to_string()),
-                                    )
+                                    .child(div().flex_1().min_w_0().truncate().child(title_text(session, marks)))
                                     .when(*open, |line| {
                                         line.child(
                                             div()
@@ -505,18 +504,6 @@ impl RecentsView {
                                     .child(snippet_text(snippet, &theme)),
                             ),
                     )
-                }
-                RecentItem::Section { label } => {
-                    return row.child(
-                        div()
-                            .size_full()
-                            .px_3()
-                            .flex()
-                            .items_end()
-                            .pb(theme.ui(4.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(label.clone()),
-                    );
                 }
                 RecentItem::Note { text } => {
                     return row.child(
@@ -722,6 +709,12 @@ impl Render for RecentsView {
 }
 
 /// "You: …" / "Claude: …" with the matched ranges in bold.
+/// A session's title with the typed word starts in bold.
+fn title_text(session: &SessionInfo, marks: &[Range<usize>]) -> StyledText {
+    let bold = HighlightStyle { font_weight: Some(FontWeight::BOLD), ..HighlightStyle::default() };
+    StyledText::new(session_title(session).to_string()).with_highlights(marks.iter().map(|r| (r.clone(), bold)))
+}
+
 fn snippet_text(snippet: &Snippet, theme: &Theme) -> StyledText {
     let prefix = match snippet.speaker {
         Speaker::You => "You: ",

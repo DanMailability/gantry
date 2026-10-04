@@ -149,7 +149,13 @@ pub fn items(
         let last = latest.entry(session.cwd.as_path()).or_default();
         *last = (*last).max(session.last_active_ms);
     }
-    let mut fuzzy = Fuzzy::new(query);
+    let texts = open
+        .iter()
+        .map(|folder| folder.path.as_path())
+        .chain(favorites.iter().map(PathBuf::as_path))
+        .chain(latest.keys().copied())
+        .map(|path| display_path(path, home));
+    let mut fuzzy = Fuzzy::new(query, texts);
     let open_items: Vec<LauncherItem> = open
         .iter()
         .filter(|folder| fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&display_path(&folder.path, home)).is_some()))

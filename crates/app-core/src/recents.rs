@@ -1,7 +1,8 @@
 //! The recent sessions pop-up (`Ctrl+Shift+R`): closed sessions by project, newest first, a few per project
-//! unless looking at one project; while searching, one list of the matches, best first; chips for the most recently
-//! used projects.
+//! unless looking at one project; while searching, one list of the sessions matching by title, conversation or folder;
+//! chips for the most recently used projects.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 use protocol::message::{SearchHit, SessionInfo, SessionState, Speaker};
 
 use crate::fuzzy::Fuzzy;
-use crate::session_tree::{age, display_path, keep, labels, newest_first, session_title};
+use crate::session_tree::{age, display_path, keep, keep_text, labels, newest_first, session_title};
 
 /// Everything the pop-up is built from.
 pub struct RecentsInput<'a> {
@@ -114,7 +115,9 @@ pub enum RecentItem {
         age: String,
         /// The project it is listed under.
         project: PathBuf,
-        /// The matching message, for a conversation hit (`None` = a title match).
+        /// Byte ranges of its title to draw in bold (the typed word starts), in order.
+        marks: Vec<Range<usize>>,
+        /// The matching message, for a conversation hit (`None` = not found in its conversation).
         snippet: Option<Snippet>,
         /// Whether a leaf of the layout shows it (Enter focuses it).
         open: bool,
@@ -126,11 +129,6 @@ pub enum RecentItem {
         /// Sessions not shown.
         hidden: usize,
     },
-    /// The heading of the conversation hits.
-    Section {
-        /// Its text.
-        label: String,
-    },
     /// A line about the conversation search's state.
     Note {
         /// Its text.
@@ -141,7 +139,7 @@ pub enum RecentItem {
 impl RecentItem {
     /// Whether the selection can land here (headings are skipped).
     pub fn selectable(&self) -> bool {
-        !matches!(self, RecentItem::Heading { .. } | RecentItem::Section { .. } | RecentItem::Note { .. })
+        !matches!(self, RecentItem::Heading { .. } | RecentItem::Note { .. })
     }
 }
 
@@ -202,70 +200,139 @@ fn in_scope(input: &RecentsInput<'_>, path: &Path) -> bool {
     input.project.is_none_or(|picked| picked == path)
 }
 
-/// The pop-up's list: title matches by project, then (for a long enough query) the conversation hits. Merging the
-/// two later only changes this function.
+/// The pop-up's list: by project without a search; with one, one list in tiers (see `matches`).
 pub fn items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
-    let mut items = title_items(input);
-    if searches_content(input.query) {
-        let rows = content_items(input, &items);
-        items.extend(rows);
-    }
-    items
+    let words = typed_words(input.query);
+    if words.is_empty() { by_project(input) } else { matches(input, &words) }
 }
 
-/// "Found in conversations": one row per hit not already listed, in the picked project, closed or open in a leaf
-/// (sessions running outside Gantry are in the Active list), then a note on the search's state.
-fn content_items(input: &RecentsInput<'_>, listed: &[RecentItem]) -> Vec<RecentItem> {
-    let mut shown: HashSet<String> = listed
-        .iter()
-        .filter_map(|item| match item {
-            RecentItem::Session { session, .. } => Some(session.id.clone()),
-            _ => None,
-        })
-        .collect();
-    let by_id: HashMap<&str, &SessionInfo> = input.sessions.iter().map(|s| (s.id.as_str(), *s)).collect();
-    let mut rows = Vec::new();
-    for hit in input.hits {
-        let Some(session) = by_id.get(hit.session_id.as_str()).copied() else { continue };
-        let open = input.open.contains(&session.id);
-        if !(open || session.state == SessionState::Closed) || !shown.insert(session.id.clone()) {
-            continue;
+/// The search's words: lowercase runs of letters and digits ("rust_terminal" is two).
+fn typed_words(query: &str) -> Vec<String> {
+    query.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_lowercase).collect()
+}
+
+/// Where each typed word starts a word of `text` (case ignored; a word starts after a non-alphanumeric character or
+/// at a lowercase-to-uppercase step), as merged byte ranges in order; `None` unless every word does.
+fn word_starts(words: &[String], text: &str) -> Option<Vec<Range<usize>>> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let starts_word = |i: usize| {
+        chars[i].1.is_alphanumeric()
+            && (i == 0
+                || !chars[i - 1].1.is_alphanumeric()
+                || (chars[i - 1].1.is_lowercase() && chars[i].1.is_uppercase()))
+    };
+    let mut ranges = Vec::new();
+    for word in words {
+        let found = (0..chars.len()).filter(|&i| starts_word(i)).find_map(|i| {
+            let mut rest = chars[i..].iter();
+            for wanted in word.chars() {
+                let &(_, have) = rest.next()?;
+                if !have.to_lowercase().eq(wanted.to_lowercase()) {
+                    return None;
+                }
+            }
+            let end = rest.next().map_or(text.len(), |&(at, _)| at);
+            Some(chars[i].0..end)
+        })?;
+        ranges.push(found);
+    }
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
         }
+    }
+    Some(merged)
+}
+
+/// How a session matched: by title or only by its folder, and the title marks.
+fn title_match(input: &RecentsInput<'_>, words: &[String], session: &SessionInfo) -> Option<(bool, Vec<Range<usize>>)> {
+    let title = session_title(session);
+    if let Some(marks) = word_starts(words, title) {
+        return Some((true, marks));
+    }
+    let marks = word_starts(words, &format!("{title} {}", display_path(&session.cwd, input.home)))?;
+    Some((false, marks.into_iter().filter(|r| r.end <= title.len()).collect()))
+}
+
+/// Where a row of the search's list goes: tier, conversation rank, newest first.
+type Order = (u8, usize, Reverse<u64>);
+
+/// The search's list, without headings: sessions matching by title and in their conversation (conversation order),
+/// by title only (newest first), in their conversation only (conversation order), then by folder only (newest first);
+/// then a note on the conversation search. Closed sessions, plus open ones found in their conversation (sessions
+/// running outside Gantry are in the Active list); all in the picked project.
+fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
+    let content = searches_content(input.query);
+    let hits: &[SearchHit] = if content { input.hits } else { &[] };
+    let mut hit_of: HashMap<&str, (usize, &SearchHit)> = HashMap::new();
+    for (rank, hit) in hits.iter().enumerate() {
+        hit_of.entry(hit.session_id.as_str()).or_insert((rank, hit));
+    }
+    let mut candidates: Vec<&SessionInfo> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let open_hits = input.sessions.iter().filter(|s| hit_of.contains_key(s.id.as_str()) && input.open.contains(&s.id));
+    for session in grouped(input).into_iter().flat_map(|(_, sessions)| sessions).chain(open_hits.copied()) {
+        if seen.insert(session.id.as_str()) {
+            candidates.push(session);
+        }
+    }
+    let mut rows: Vec<(Order, RecentItem)> = Vec::new();
+    for session in candidates {
         let project = (input.project_of)(&session.cwd);
         if !in_scope(input, &project) {
             continue;
         }
-        rows.push(RecentItem::Session {
-            session: Box::new(session.clone()),
-            age: age(input.now_ms, session.last_active_ms),
-            project,
-            snippet: Some(Snippet::from_hit(hit)),
-            open,
-        });
+        let hit = hit_of.get(session.id.as_str());
+        let (by_title, marks) = match title_match(input, words, session) {
+            Some(found) => found,
+            None if hit.is_some() => (false, Vec::new()),
+            None => continue,
+        };
+        let newest = Reverse(session.last_active_ms);
+        let key = match (by_title, hit) {
+            (true, Some(&(rank, _))) => (0, rank, newest),
+            (true, None) => (1, 0, newest),
+            (false, Some(&(rank, _))) => (2, rank, newest),
+            (false, None) => (3, 0, newest),
+        };
+        rows.push((
+            key,
+            RecentItem::Session {
+                session: Box::new(session.clone()),
+                age: age(input.now_ms, session.last_active_ms),
+                project,
+                marks,
+                snippet: hit.map(|&(_, hit)| Snippet::from_hit(hit)),
+                open: input.open.contains(&session.id),
+            },
+        ));
     }
+    rows.sort_by(|(a, a_item), (b, b_item)| a.cmp(b).then_with(|| item_id(a_item).cmp(item_id(b_item))));
+    let mut items: Vec<RecentItem> = rows.into_iter().map(|(_, item)| item).collect();
     let note = match input.content {
+        _ if !content => None,
         ContentState::Indexing(percent) => Some(format!("Indexing conversations… {percent}%")),
         ContentState::Unavailable => Some("Conversation search is unavailable — see the daemon log".to_string()),
-        // Hits that are all listed above (title matches, another project) leave no note: saying no conversation
-        // mentions the query would be false.
         ContentState::Ready if input.hits.is_empty() => Some("No conversations mention this".to_string()),
         _ => None,
     };
-    if rows.is_empty() && note.is_none() {
-        return Vec::new();
-    }
-    let mut items = vec![RecentItem::Section { label: "Found in conversations".into() }];
-    items.extend(rows);
     items.extend(note.map(|text| RecentItem::Note { text }));
     items
 }
 
-/// The title matches: by project without a search, else one list, best match first.
-fn title_items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
-    let grouped = grouped(input);
-    if let Some(fuzzy) = Fuzzy::new(input.query) {
-        return ranked(input, grouped, fuzzy);
+fn item_id(item: &RecentItem) -> &str {
+    match item {
+        RecentItem::Session { session, .. } => &session.id,
+        _ => "",
     }
+}
+
+/// No search: closed sessions by project, a few per project unless expanded or looking at one project.
+fn by_project(input: &RecentsInput<'_>) -> Vec<RecentItem> {
+    let grouped = grouped(input);
     let paths: Vec<PathBuf> = grouped.iter().map(|(path, _)| path.clone()).collect();
     let labels = labels(&paths, input.home);
     let mut items = Vec::new();
@@ -282,6 +349,7 @@ fn title_items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
                 session: Box::new((*session).clone()),
                 age: age(input.now_ms, session.last_active_ms),
                 project: path.clone(),
+                marks: Vec::new(),
                 snippet: None,
                 open: false,
             });
@@ -291,40 +359,6 @@ fn title_items(input: &RecentsInput<'_>) -> Vec<RecentItem> {
         }
     }
     items
-}
-
-/// Sessions matching the search, best first: title matches, then those matching only with their folder; equal
-/// scores newest first.
-fn ranked(input: &RecentsInput<'_>, grouped: Vec<(PathBuf, Vec<&SessionInfo>)>, mut fuzzy: Fuzzy) -> Vec<RecentItem> {
-    let mut matches: Vec<(bool, u32, &SessionInfo, PathBuf)> = Vec::new();
-    for (path, sessions) in grouped {
-        if !in_scope(input, &path) {
-            continue;
-        }
-        for session in sessions {
-            let title = session_title(session);
-            let rank = match fuzzy.score(title) {
-                Some(score) => Some((true, score)),
-                None => fuzzy
-                    .score(&format!("{title} {}", display_path(&session.cwd, input.home)))
-                    .map(|score| (false, score)),
-            };
-            if let Some((in_title, score)) = rank {
-                matches.push((in_title, score, session, path.clone()));
-            }
-        }
-    }
-    matches.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then_with(|| newest_first(&a.2, &b.2)));
-    matches
-        .into_iter()
-        .map(|(_, _, session, project)| RecentItem::Session {
-            session: Box::new(session.clone()),
-            age: age(input.now_ms, session.last_active_ms),
-            project,
-            snippet: None,
-            open: false,
-        })
-        .collect()
 }
 
 /// The project chips: All, the `input.chips` projects with the newest sessions (plus the picked one), then More….
@@ -360,7 +394,7 @@ pub fn projects(input: &RecentsInput<'_>) -> Vec<ProjectItem> {
     let grouped = grouped(input);
     let paths: Vec<PathBuf> = grouped.iter().map(|(path, _)| path.clone()).collect();
     let labels = labels(&paths, input.home);
-    let mut fuzzy = Fuzzy::new(input.query);
+    let mut fuzzy = Fuzzy::new(input.query, paths.iter().map(|path| keep_text(&labels[path], path, input.home)));
     grouped
         .into_iter()
         .filter(|(path, _)| keep(&mut fuzzy, &labels[path], path, input.home))
@@ -375,13 +409,13 @@ pub fn projects(input: &RecentsInput<'_>) -> Vec<ProjectItem> {
 
 /// Sessions matching the search, and sessions in scope (the picked project, else all).
 pub fn counts(input: &RecentsInput<'_>) -> (usize, usize) {
-    let mut fuzzy = Fuzzy::new(input.query);
+    let words = typed_words(input.query);
     let scoped: Vec<&SessionInfo> = grouped(input)
         .into_iter()
         .filter(|(path, _)| in_scope(input, path))
         .flat_map(|(_, sessions)| sessions)
         .collect();
-    let matching = scoped.iter().filter(|s| keep(&mut fuzzy, session_title(s), &s.cwd, input.home)).count();
+    let matching = scoped.iter().filter(|s| words.is_empty() || title_match(input, &words, s).is_some()).count();
     (matching, scoped.len())
 }
 
@@ -471,7 +505,6 @@ mod tests {
                         format!("~{} open", session.id)
                     }
                     RecentItem::Session { session, snippet: Some(_), .. } => format!("~{}", session.id),
-                    RecentItem::Section { label } => format!("## {label}"),
                     RecentItem::Note { text } => format!("! {text}"),
                     RecentItem::Session { session, .. } => session.id.clone(),
                     RecentItem::More { hidden, .. } => format!("+{hidden}"),
@@ -513,7 +546,7 @@ mod tests {
             match item {
                 RecentItem::Heading { path, .. } => heading = Some(path.clone()),
                 RecentItem::Session { project, .. } => assert_eq!(Some(project), heading.as_ref()),
-                RecentItem::More { .. } | RecentItem::Section { .. } | RecentItem::Note { .. } => {}
+                RecentItem::More { .. } | RecentItem::Note { .. } => {}
             }
         }
         assert!(
@@ -547,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn searching_lists_title_matches_best_first_across_projects() {
+    fn searching_lists_sessions_whose_title_words_start_with_the_typed_words() {
         let mut fixture = Fixture::of(vec![
             titled("boundary", "Selected tab cyan boundary", "/r/a", 1),
             titled("gantry", "Gantry sounds", "/r/a", 2),
@@ -555,8 +588,43 @@ mod tests {
             titled("other", "Unrelated", "/r/b", 4),
         ]);
         fixture.query = "sound".into();
-        // No headings: a better match in an older project comes before a weak one in the newest; ties go newest first.
-        assert_eq!(fixture.outline(), vec!["gantry", "system", "boundary"]);
+        // One list without headings, newest first; "s…ound" in "Selected tab cyan boundary" is not the word.
+        assert_eq!(fixture.outline(), vec!["gantry", "system"]);
+        fixture.query = "SEL tab".into();
+        assert_eq!(fixture.outline(), vec!["boundary"]);
+        fixture.query = "ound".into();
+        assert_eq!(fixture.outline(), Vec::<String>::new(), "a word is matched from its start");
+    }
+
+    #[test]
+    fn the_typed_word_starts_are_marked_in_the_title() {
+        let mut fixture = Fixture::of(vec![titled("s", "System sounds", "/r/a", 1)]);
+        fixture.query = "sou sys".into();
+        let marks = fixture.with(items).into_iter().find_map(|item| match item {
+            RecentItem::Session { marks, .. } => Some(marks),
+            _ => None,
+        });
+        assert_eq!(marks, Some(vec![0..3, 7..10]));
+    }
+
+    #[test]
+    fn one_list_in_tiers_title_and_conversation_then_title_then_conversation_then_folder() {
+        let mut fixture = Fixture::of(vec![
+            titled("folder-new", "Notes", "/r/sound", 1),
+            titled("title-new", "Sound check", "/r/a", 2),
+            titled("both-weak", "Sound board", "/r/a", 3),
+            titled("talk", "Unrelated", "/r/a", 4),
+            titled("both-strong", "Sound fix", "/r/b", 5),
+            titled("title-old", "Sound old", "/r/b", 6),
+            titled("folder-old", "Other notes", "/r/sound", 7),
+        ]);
+        fixture.query = "sound".into();
+        fixture.hits = vec![hit("both-strong", "x", vec![]), hit("talk", "y", vec![]), hit("both-weak", "z", vec![])];
+        fixture.content = ContentState::Ready;
+        assert_eq!(
+            fixture.outline(),
+            vec!["~both-strong", "~both-weak", "title-new", "title-old", "~talk", "folder-new", "folder-old"]
+        );
     }
 
     #[test]
@@ -648,12 +716,12 @@ mod tests {
     }
 
     #[test]
-    fn content_hits_follow_the_title_matches_without_repeating_them() {
+    fn conversation_hits_follow_the_title_matches_in_one_list() {
         let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1), closed("b1", "/r/b", 2), closed("b2", "/r/b", 3)]);
         fixture.query = "title a1".into();
         fixture.hits = vec![hit("b2", "x", vec![]), hit("a1", "y", vec![]), hit("b1", "z", vec![])];
         fixture.content = ContentState::Ready;
-        assert_eq!(fixture.outline(), vec!["a1", "## Found in conversations", "~b2", "~b1"]);
+        assert_eq!(fixture.outline(), vec!["~a1", "~b2", "~b1"]);
     }
 
     #[test]
@@ -662,7 +730,7 @@ mod tests {
         fixture.query = "a".into();
         fixture.hits = vec![hit("a1", "x", vec![])];
         fixture.content = ContentState::Ready;
-        assert!(!fixture.outline().iter().any(|row| row.starts_with("##")));
+        assert_eq!(fixture.outline(), vec!["a1"], "no snippet and no note below 3 characters");
         assert!(!searches_content(" a "));
         assert!(!searches_content("in"), "two letters would list half the history");
         assert!(searches_content("abc"));
@@ -675,7 +743,7 @@ mod tests {
         fixture.project = Some("/r/b".into());
         fixture.hits = vec![hit("a1", "x", vec![]), hit("b1", "y", vec![])];
         fixture.content = ContentState::Ready;
-        assert_eq!(fixture.outline(), vec!["## Found in conversations", "~b1"]);
+        assert_eq!(fixture.outline(), vec!["~b1"]);
     }
 
     #[test]
@@ -689,17 +757,16 @@ mod tests {
         fixture.query = "zzz".into();
         fixture.hits = vec![hit("tab", "x", vec![]), hit("elsewhere", "y", vec![]), hit("not-listed", "z", vec![])];
         fixture.content = ContentState::Ready;
-        assert_eq!(fixture.outline(), vec!["## Found in conversations", "~tab open"]);
+        assert_eq!(fixture.outline(), vec!["~tab open"]);
     }
 
     #[test]
-    fn hits_that_are_all_title_matches_leave_no_section() {
-        // "No conversations mention this" would be false: the conversation is listed above.
+    fn a_title_match_with_a_hit_carries_its_snippet() {
         let mut fixture = Fixture::of(vec![closed("a1", "/r/a", 1)]);
         fixture.query = "title a1".into();
         fixture.hits = vec![hit("a1", "x", vec![])];
         fixture.content = ContentState::Ready;
-        assert_eq!(fixture.outline(), vec!["a1"]);
+        assert_eq!(fixture.outline(), vec!["~a1"]);
     }
 
     #[test]
@@ -709,16 +776,13 @@ mod tests {
         fixture.content = ContentState::Waiting;
         assert!(fixture.outline().is_empty(), "nothing until the first reply");
         fixture.content = ContentState::Ready;
-        assert_eq!(fixture.outline(), vec!["## Found in conversations", "! No conversations mention this"]);
+        assert_eq!(fixture.outline(), vec!["! No conversations mention this"]);
         fixture.content = ContentState::Indexing(40);
         fixture.hits = vec![hit("a1", "x", vec![])];
-        assert_eq!(fixture.outline(), vec!["## Found in conversations", "~a1", "! Indexing conversations… 40%"]);
+        assert_eq!(fixture.outline(), vec!["~a1", "! Indexing conversations… 40%"]);
         fixture.content = ContentState::Unavailable;
         fixture.hits.clear();
-        assert_eq!(
-            fixture.outline(),
-            vec!["## Found in conversations", "! Conversation search is unavailable — see the daemon log"]
-        );
+        assert_eq!(fixture.outline(), vec!["! Conversation search is unavailable — see the daemon log"]);
     }
 
     #[test]

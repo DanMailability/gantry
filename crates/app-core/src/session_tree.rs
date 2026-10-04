@@ -522,7 +522,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         groups.push(Group { tab, project: (input.project_of)(cwd), place, members: Vec::new() });
     }
 
-    let mut fuzzy = Fuzzy::new(input.filter);
+    let mut fuzzy = Fuzzy::new(input.filter, entries.iter().map(|entry| keep_text(entry.title, entry.cwd, input.home)));
     let filtering = fuzzy.is_some();
     let mut by_project: HashMap<PathBuf, Vec<Entry<'_>>> = HashMap::new();
     for entry in entries {
@@ -806,7 +806,12 @@ pub(crate) fn newest_first(a: &&SessionInfo, b: &&SessionInfo) -> std::cmp::Orde
 
 /// Whether an entry passes the filter (matched against its title and displayed directory).
 pub(crate) fn keep(fuzzy: &mut Option<Fuzzy>, title: &str, cwd: &Path, home: Option<&Path>) -> bool {
-    fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&format!("{title} {}", display_path(cwd, home))).is_some())
+    fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&keep_text(title, cwd, home)).is_some())
+}
+
+/// The text `keep` matches: the title and the displayed directory.
+pub(crate) fn keep_text(title: &str, cwd: &Path, home: Option<&Path>) -> String {
+    format!("{title} {}", display_path(cwd, home))
 }
 
 fn detail_text(session: &SessionInfo) -> Option<String> {

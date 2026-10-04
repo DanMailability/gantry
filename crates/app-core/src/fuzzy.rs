@@ -1,9 +1,10 @@
-//! Fuzzy matching (nucleo) shared by the sidebar filter and the launcher.
+//! Fuzzy matching (nucleo) shared by the sidebar filter, the launcher and the recent sessions project chooser.
 
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-/// A compiled query.
+/// A compiled query: each typed word matches unbroken (anywhere, case ignored) when some candidate contains them all;
+/// only when none does may its letters spread out ("jnkns" finds "Jenkins").
 pub struct Fuzzy {
     pattern: Pattern,
     matcher: Matcher,
@@ -11,16 +12,21 @@ pub struct Fuzzy {
 }
 
 impl Fuzzy {
-    /// A matcher for `query`; `None` when the query is blank (everything matches).
-    pub fn new(query: &str) -> Option<Fuzzy> {
+    /// A matcher for `query` over `texts` (every candidate the caller will score); `None` when the query is blank
+    /// (everything matches).
+    pub fn new<S: AsRef<str>>(query: &str, texts: impl IntoIterator<Item = S>) -> Option<Fuzzy> {
         if query.trim().is_empty() {
             return None;
         }
-        Some(Fuzzy {
-            pattern: Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart),
+        let mut fuzzy = Fuzzy {
+            pattern: Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Substring),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             buf: Vec::new(),
-        })
+        };
+        if !texts.into_iter().any(|text| fuzzy.score(text.as_ref()).is_some()) {
+            fuzzy.pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        }
+        Some(fuzzy)
     }
 
     /// Score of `text` (higher is better), or `None` if it does not match.
@@ -35,17 +41,29 @@ mod tests {
 
     #[test]
     fn blank_queries_match_everything_and_others_filter() {
-        assert!(Fuzzy::new("  ").is_none());
-        let mut fuzzy = Fuzzy::new("jnkns").unwrap();
+        assert!(Fuzzy::new("  ", [""]).is_none());
+        let mut fuzzy = Fuzzy::new("jnkns", ["Fix Jenkins lib", "Bump k8s chart"]).unwrap();
         assert!(fuzzy.score("Fix Jenkins lib").is_some());
         assert!(fuzzy.score("Bump k8s chart").is_none());
-        let mut exact = Fuzzy::new("rust").unwrap();
-        assert!(exact.score("~/Private/Repos/rust_terminal").unwrap() > exact.score("~/r/u/s/t").unwrap_or(0));
+        let paths = ["~/Private/Repos/rust_terminal", "~/r/u/s/t"];
+        let mut exact = Fuzzy::new("rust", paths).unwrap();
+        assert!(exact.score(paths[0]).unwrap() > exact.score(paths[1]).unwrap_or(0));
     }
 
     #[test]
     fn case_is_ignored() {
-        assert!(Fuzzy::new("Font").unwrap().score("font fallback").is_some());
-        assert!(Fuzzy::new("font").unwrap().score("Font Fallback").is_some());
+        assert!(Fuzzy::new("Font", ["font fallback"]).unwrap().score("font fallback").is_some());
+        assert!(Fuzzy::new("font", ["Font Fallback"]).unwrap().score("Font Fallback").is_some());
+    }
+
+    #[test]
+    fn typed_words_stay_whole_while_some_text_contains_them() {
+        let texts = ["System sounds", "Selected tab cyan boundary"];
+        let mut fuzzy = Fuzzy::new("sound", texts).unwrap();
+        assert!(fuzzy.score(texts[0]).is_some());
+        assert!(fuzzy.score(texts[1]).is_none(), "s…ound is not the word sound");
+        // Without any text holding the word, the letters may spread out again.
+        let mut fallback = Fuzzy::new("sound", [texts[1]]).unwrap();
+        assert!(fallback.score(texts[1]).is_some());
     }
 }
