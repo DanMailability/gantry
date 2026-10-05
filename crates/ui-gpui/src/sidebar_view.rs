@@ -31,7 +31,9 @@ use crate::theme::{
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
-const ROW_HEIGHT: f32 = 38.0;
+const ROW_HEIGHT: f32 = 39.0;
+/// Empty space above and below a row's fill inside its slot; two neighbours are twice this far apart.
+const ROW_PAD_Y: f32 = 2.0;
 /// Width of the ring around the selected row.
 const RING: f32 = 2.0;
 /// Empty space between the ring and the selected row's fill.
@@ -569,7 +571,7 @@ impl SidebarView {
             .min_h_0()
             .w_full()
             .px(theme.ui(10.))
-            .py(px(1.))
+            .py(px(ROW_PAD_Y))
             .flex()
             .flex_row()
             .items_center()
@@ -805,8 +807,8 @@ impl UniformListDecoration for SelectionRing {
             .absolute()
             .left(left)
             .right(side)
-            .top(top + px(1.) - out)
-            .h(bottom - top - px(2.) + out * 2.)
+            .top(top + px(ROW_PAD_Y) - out)
+            .h(bottom - top - px(ROW_PAD_Y * 2.) + out * 2.)
             .rounded(px(RADIUS) + out)
             .border_2()
             .border_color(rgb(color));
