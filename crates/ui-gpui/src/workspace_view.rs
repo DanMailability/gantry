@@ -241,6 +241,17 @@ pub struct WorkspaceView {
     _events: Task<()>,
 }
 
+/// Which finished leaves resume by themselves on start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resume {
+    /// None: they wait for Continue.
+    Nothing,
+    /// Every finished leaf (`window.resumeSessions`).
+    Finished,
+    /// Only these (`--resume-sessions`: what was running when Restart and update stopped everything).
+    Only(HashSet<NodeId>),
+}
+
 impl WorkspaceView {
     /// Show `restored`, attaching and spawning what it says, and start routing `connection`'s events.
     pub fn new(
@@ -248,7 +259,7 @@ impl WorkspaceView {
         restored: Restored,
         layout_file: PathBuf,
         default_cwd: PathBuf,
-        resume: bool,
+        resume: Resume,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -365,10 +376,12 @@ impl WorkspaceView {
                 slot.view.update(cx, |view, cx| view.exited(None, cx));
             }
         }
-        if resume {
-            // The session list decides how each one resumes, so they wait for it.
-            this.to_resume =
-                this.workspace.finished_leaves().into_iter().filter(|leaf| !restored.spawn.contains(leaf)).collect();
+        // The session list decides how each one resumes, so they wait for it.
+        let finished = this.workspace.finished_leaves().into_iter().filter(|leaf| !restored.spawn.contains(leaf));
+        match resume {
+            Resume::Nothing => {}
+            Resume::Finished => this.to_resume = finished.collect(),
+            Resume::Only(only) => this.to_resume = finished.filter(|leaf| only.contains(leaf)).collect(),
         }
         for leaf in restored.spawn {
             this.spawn_leaf(leaf, None, cx);

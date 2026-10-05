@@ -17,10 +17,12 @@ mod update_watch;
 mod window_frame;
 pub mod workspace_view;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use app_core::layout_store;
 use app_core::settings::WindowSettings;
+use app_core::split_tree::NodeId;
 use app_core::workspace::{Launch, restore};
 use daemon::client::{Connection, DaemonClient, StartError, restart_daemon};
 use daemon::launch::spawn_detached_daemon;
@@ -31,7 +33,7 @@ use gpui::{
 };
 
 use crate::settings_store::SettingsStore;
-use crate::workspace_view::WorkspaceView;
+use crate::workspace_view::{Resume, WorkspaceView};
 
 /// Placeholder shown while asking whether to restart a mismatched daemon.
 struct Notice;
@@ -45,13 +47,20 @@ impl Render for Notice {
 /// Freedesktop app id: Wayland app id / X11 class, desktop file and icon name.
 pub const APP_ID: &str = "io.github.idogrf.Gantry";
 
-/// `(restore_layout, resume)` for this start: `--resume-sessions` forces both on, else the settings decide.
-fn start_flags(window: &WindowSettings, resume_sessions: bool) -> (bool, bool) {
-    (window.restore_layout || resume_sessions, window.resume_sessions || resume_sessions)
+/// What to resume on this start: under `--resume-sessions` exactly the leaves that were running when the update
+/// stopped everything (`was_live`), else the settings decide.
+fn resume_mode(window: &WindowSettings, resume_sessions: bool, was_live: HashSet<NodeId>) -> Resume {
+    if resume_sessions {
+        Resume::Only(was_live)
+    } else if window.resume_sessions {
+        Resume::Finished
+    } else {
+        Resume::Nothing
+    }
 }
 
 /// Connect to (or start) the daemon, restore the layout, and run until the app quits. `resume_sessions` (the hidden
-/// `--resume-sessions` flag) restores the layout and resumes finished sessions whatever the settings say.
+/// `--resume-sessions` flag) brings back the panes that were running when Restart and update stopped them.
 pub fn run(launch: Launch, resume_sessions: bool) {
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         // Without this, the first notification makes macOS ask "Where is use_default?": mac-notification-sys looks up an
@@ -133,8 +142,16 @@ fn workspace(
         None
     });
     let window_settings = cx.global::<SettingsStore>().settings().window;
-    let (restore_layout, resume) = start_flags(&window_settings, resume_sessions);
-    let mut restored = restore(saved, &connection.instance, &connection.panes, launch, restore_layout);
+    let was_live: HashSet<NodeId> = saved
+        .iter()
+        .flat_map(|saved| saved.leaves.iter())
+        .filter(|(_, leaf)| leaf.pane.is_some())
+        .map(|(id, _)| *id)
+        .collect();
+    let keep = if resume_sessions { was_live.clone() } else { HashSet::new() };
+    let mut restored =
+        restore(saved, &connection.instance, &connection.panes, launch, window_settings.restore_layout, &keep);
+    let resume = resume_mode(&window_settings, resume_sessions, was_live);
     restored.workspace.sidebar.visible = window_settings.sidebar_at_start.visible(restored.workspace.sidebar.visible);
     let default_cwd: PathBuf = launch.default.cwd.clone();
     WorkspaceView::new(connection, restored, paths.layout_file.clone(), default_cwd, resume, window, cx)
@@ -154,20 +171,19 @@ fn install_should_close(window: &mut Window, cx: &mut App, view: gpui::Entity<Wo
 
 #[cfg(test)]
 mod tests {
-    use super::{APP_ID, start_flags};
+    use super::*;
 
     const DESKTOP: &str = include_str!("../../../packaging/linux/io.github.idogrf.Gantry.desktop");
 
     #[test]
-    fn resume_flag_restores_and_resumes_whatever_the_settings_say() {
+    fn resume_flag_resumes_only_what_was_live() {
         let mut window = app_core::settings::Settings::default().window;
-        window.restore_layout = false;
+        let live = HashSet::from([3]);
         window.resume_sessions = false;
-        assert_eq!(start_flags(&window, true), (true, true));
-        assert_eq!(start_flags(&window, false), (false, false));
-        window.restore_layout = true;
+        assert_eq!(resume_mode(&window, true, live.clone()), Resume::Only(live.clone()));
+        assert_eq!(resume_mode(&window, false, live.clone()), Resume::Nothing);
         window.resume_sessions = true;
-        assert_eq!(start_flags(&window, false), (true, true));
+        assert_eq!(resume_mode(&window, false, live), Resume::Finished);
     }
 
     #[test]

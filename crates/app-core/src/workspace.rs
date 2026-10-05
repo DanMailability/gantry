@@ -800,13 +800,15 @@ pub struct Restored {
 /// belongs to another daemon instance) become dead; live panes missing from the layout become new
 /// tabs (most recently focused last, and active); an explicit launch opens a new focused tab; an
 /// empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped from the workspace (live panes
-/// still reattach) but kept aside for `saveable`.
+/// still reattach) but kept aside for `saveable`; leaves in `keep` (the ones that were running when an update
+/// stopped everything) stay in the workspace as finished leaves instead.
 pub fn restore(
     saved: Option<Workspace>,
     instance: &str,
     live: &[PaneInfo],
     launch: &Launch,
     restore_layout: bool,
+    keep: &HashSet<NodeId>,
 ) -> Restored {
     let mut workspace = saved.unwrap_or_default();
     let same_daemon = workspace.instance == instance;
@@ -818,8 +820,12 @@ pub fn restore(
         }
     }
     if !restore_layout {
-        let dead: Vec<NodeId> =
-            workspace.leaves.iter().filter(|(_, leaf)| leaf.pane.is_none()).map(|(id, _)| *id).collect();
+        let dead: Vec<NodeId> = workspace
+            .leaves
+            .iter()
+            .filter(|(id, leaf)| leaf.pane.is_none() && !keep.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
         workspace.dropped = workspace.park(&dead);
         for leaf in dead {
             workspace.close(leaf);
@@ -1456,7 +1462,7 @@ mod tests {
             container: None,
             claude: false,
         }];
-        let restored = restore(None, "i", &live, &launch(), true);
+        let restored = restore(None, "i", &live, &launch(), true, &HashSet::new());
         let leaf = restored.attach[0].0;
         assert_eq!(restored.workspace.leaves[&leaf].session.as_deref(), Some("xyz"));
     }
@@ -1488,7 +1494,7 @@ mod tests {
 
     #[test]
     fn restore_with_nothing_spawns_the_default() {
-        let restored = restore(None, "i1", &[], &launch(), true);
+        let restored = restore(None, "i1", &[], &launch(), true, &HashSet::new());
         assert_eq!(restored.workspace.tabs.len(), 1);
         assert_eq!(restored.spawn, vec![restored.workspace.focused().unwrap()]);
         assert!(restored.attach.is_empty());
@@ -1502,7 +1508,7 @@ mod tests {
         saved.pane_started(a, 1, "/a".into());
         let b = saved.split(Axis::Vertical, shell("/b")).unwrap();
         saved.pane_started(b, 2, "/b".into());
-        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), true);
+        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), true, &HashSet::new());
         assert_eq!(restored.attach, vec![(a, 1)]);
         assert_eq!(restored.workspace.leaves[&b].pane, None, "pane 2 is gone");
         assert!(restored.spawn.is_empty(), "dead panes wait for Continue/Restart");
@@ -1524,7 +1530,7 @@ mod tests {
         let mut saved = Workspace { instance: "old".into(), ..Workspace::default() };
         let a = saved.new_tab(shell("/a"));
         saved.pane_started(a, 1, "/a".into());
-        let restored = restore(Some(saved), "new", &[info(1, "zsh", 1)], &launch(), true);
+        let restored = restore(Some(saved), "new", &[info(1, "zsh", 1)], &launch(), true, &HashSet::new());
         assert_eq!(restored.workspace.leaves[&a].pane, None);
         assert_eq!(restored.workspace.tabs.len(), 2, "the new daemon's pane 1 is adopted as its own tab");
         let (adopted, pane) = restored.attach[0];
@@ -1534,7 +1540,7 @@ mod tests {
 
     #[test]
     fn restore_adopts_live_panes_missing_from_the_layout_most_recent_last() {
-        let restored = restore(None, "i", &[info(5, "a", 9), info(4, "b", 2)], &launch(), true);
+        let restored = restore(None, "i", &[info(5, "a", 9), info(4, "b", 2)], &launch(), true, &HashSet::new());
         let ws = &restored.workspace;
         assert_eq!(restored.attach.iter().map(|(_, pane)| *pane).collect::<Vec<_>>(), vec![4, 5]);
         assert_eq!(ws.leaves[&ws.focused().unwrap()].pane, Some(5));
@@ -1547,7 +1553,7 @@ mod tests {
         let mut saved = Workspace::default();
         saved.new_tab(shell("/a"));
         let launch = Launch { explicit: Some(PaneLaunch::claude("/x".into())), default: shell("/home") };
-        let restored = restore(Some(saved), "i", &[], &launch, true);
+        let restored = restore(Some(saved), "i", &[], &launch, true, &HashSet::new());
         let focused = restored.workspace.focused().unwrap();
         assert_eq!(restored.spawn, vec![focused]);
         assert!(restored.workspace.leaves[&focused].launch.is_claude());
@@ -1727,14 +1733,41 @@ mod tests {
         saved.pane_started(b, 2, "/b".into());
         let c = saved.new_tab(shell("/c"));
         saved.pane_started(c, 3, "/c".into());
-        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false);
+        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false, &HashSet::new());
         assert_eq!(restored.attach, vec![(a, 1)]);
         assert_eq!(restored.workspace.leaves.keys().copied().collect::<Vec<_>>(), vec![a]);
         assert_eq!(restored.workspace.tabs.len(), 1);
         assert!(restored.spawn.is_empty() && restored.workspace.is_consistent());
-        let none =
-            restore(Some(Workspace { instance: "i1".into(), ..Workspace::default() }), "i1", &[], &launch(), false);
+        let none = restore(
+            Some(Workspace { instance: "i1".into(), ..Workspace::default() }),
+            "i1",
+            &[],
+            &launch(),
+            false,
+            &HashSet::new(),
+        );
         assert_eq!(none.spawn.len(), 1, "no tab left: one new tab");
+    }
+
+    #[test]
+    fn restore_keep_holds_the_listed_finished_leaves_when_the_layout_is_off() {
+        let mut saved = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let a = saved.new_tab(shell("/a"));
+        saved.pane_started(a, 1, "/a".into());
+        let b = saved.new_tab(shell("/b"));
+        let keep = HashSet::from([a]);
+        // A new daemon: every pane id is stale, so `a` is finished too.
+        let restored = restore(Some(saved.clone()), "i2", &[], &launch(), false, &keep);
+        assert_eq!(restored.workspace.leaves.keys().copied().collect::<Vec<_>>(), vec![a]);
+        assert_eq!(restored.workspace.finished_leaves(), vec![a]);
+        assert!(restored.spawn.is_empty() && restored.workspace.is_consistent());
+        let saved_back = restored.workspace.saveable();
+        assert_eq!(saved_back.leaves.keys().copied().collect::<Vec<_>>(), vec![a, b], "the other tab is parked");
+        // With the layout on, nothing changes.
+        let on = restore(Some(saved.clone()), "i2", &[], &launch(), true, &keep);
+        let plain = restore(Some(saved), "i2", &[], &launch(), true, &HashSet::new());
+        assert_eq!(on.workspace.leaves.len(), 2);
+        assert_eq!(on.workspace.tabs, plain.workspace.tabs);
     }
 
     #[test]
@@ -1753,7 +1786,8 @@ mod tests {
         let d = saved.split(Axis::Vertical, shell("/d")).unwrap();
         saved.pane_started(d, 4, "/d".into());
         saved.sidebar.visible = false;
-        let mut restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false).workspace;
+        let mut restored =
+            restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false, &HashSet::new()).workspace;
         restored.sidebar.width = 300.0;
         let kept = restored.saveable();
         assert!(kept.is_consistent());
@@ -1768,7 +1802,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("layout.json");
         crate::layout_store::save(&file, &restored).unwrap();
-        let back = restore(crate::layout_store::load(&file).unwrap(), "i1", &[info(1, "bash", 5)], &launch(), true);
+        let back = restore(
+            crate::layout_store::load(&file).unwrap(),
+            "i1",
+            &[info(1, "bash", 5)],
+            &launch(),
+            true,
+            &HashSet::new(),
+        );
         assert_eq!(back.workspace.leaves.len(), 4, "switching back restores the finished leaves");
         assert!(!back.workspace.sidebar.visible);
         assert_eq!(restored.leaves.len(), 1, "the running workspace only has the live leaf");
