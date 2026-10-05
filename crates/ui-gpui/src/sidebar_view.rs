@@ -261,18 +261,24 @@ impl SidebarView {
         }
     }
 
-    /// Edit the name of `target` in place on its row, starting from `current` (selected). Nothing happens when the
-    /// row is not in the list.
-    pub fn start_rename(&mut self, target: RenameTarget, current: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.rows.iter().any(|row| renames(&row.kind, target)) {
-            return;
-        }
+    /// Edit the name of `target` in place on its row, starting from `current` (selected). False, changing nothing
+    /// (focus stays), when the row is not in the drawn list (collapsed project, filter).
+    pub fn start_rename(
+        &mut self,
+        target: RenameTarget,
+        current: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.rows.iter().position(|row| renames(&row.kind, target)) else { return false };
+        self.scroll.scroll_to_item(index, ScrollStrategy::Center);
         let mut field = TextField::default();
         field.insert(current);
         field.select_all();
         self.renaming = Some((target, field));
         self.focus_handle.focus(window, cx);
         cx.notify();
+        true
     }
 
     /// The inline field standing in for the title of the row of `target`, while it is being renamed.
@@ -825,8 +831,8 @@ impl Render for SidebarView {
         self.animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let focused = self.focus_handle.is_focused(window);
         // Clicking elsewhere (focus left the sidebar) cancels a rename.
-        if !focused && self.renaming.take().is_some() {
-            cx.notify();
+        if !focused {
+            self.renaming = None;
         }
         let theme = theme(cx).clone();
         div()

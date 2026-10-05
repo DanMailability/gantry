@@ -945,8 +945,8 @@ impl WorkspaceView {
         self.sync_panes(cx);
     }
 
-    /// Tab `index`'s title as the title bar and the sidebar show it: the focused pane's, without the Claude glyph
-    /// while the tab has a session status.
+    /// Tab `index`'s title as the title bar shows it when no pane row gives one: the focused pane's, without the
+    /// Claude glyph while the tab has a session status.
     fn tab_title(&self, index: usize, cx: &App) -> String {
         let Some(tab) = self.workspace.tabs.get(index) else { return String::new() };
         if tab.settings {
@@ -1036,13 +1036,11 @@ impl WorkspaceView {
             }
             MenuAction::RenamePane(leaf) => {
                 let name = self.workspace.leaf_name(leaf).unwrap_or_default().to_string();
-                self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.start_rename(RenameTarget::Pane(leaf), &name, window, cx));
+                self.start_rename(RenameTarget::Pane(leaf), name, window, cx);
             }
             MenuAction::RenameTab(index) => {
                 let name = self.workspace.tab_name(index).unwrap_or_default().to_string();
-                self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.start_rename(RenameTarget::Tab(index), &name, window, cx));
+                self.start_rename(RenameTarget::Tab(index), name, window, cx);
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
@@ -1134,7 +1132,7 @@ impl WorkspaceView {
             });
             let unread = self.unseen.contains_key(&tab.focused);
             let mark = (idle || unread).then_some((tab.focused, unread));
-            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context, mark)
+            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context, mark, tab.root.leaves().len())
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -1298,6 +1296,16 @@ impl WorkspaceView {
                 }
             }
         }
+    }
+
+    /// Start the inline rename on the sidebar, showing the sidebar first if it is hidden.
+    fn start_rename(&mut self, target: RenameTarget, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.workspace.sidebar.visible {
+            self.workspace.sidebar.visible = true;
+            self.save(cx);
+            cx.notify();
+        }
+        self.sidebar.update(cx, |sidebar, cx| sidebar.start_rename(target, &name, window, cx));
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {

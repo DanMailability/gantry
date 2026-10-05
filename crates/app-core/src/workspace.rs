@@ -509,9 +509,9 @@ impl Workspace {
         }
     }
 
-    /// The name the user gave a pane, if any.
+    /// The name the user gave a shell pane, if any (a Claude pane never shows one, even from a hand-edited layout).
     pub fn leaf_name(&self, leaf: NodeId) -> Option<&str> {
-        self.leaves.get(&leaf)?.name.as_deref()
+        self.leaves.get(&leaf).filter(|leaf| !leaf.launch.is_claude())?.name.as_deref()
     }
 
     /// The name the user gave a tab, if any.
@@ -1200,6 +1200,8 @@ mod tests {
         assert!(!ws.rename_leaf(claude, "nope"));
         assert_eq!(ws.leaf_name(claude), None);
         assert!(!ws.rename_leaf(999, "x"));
+        ws.leaves.get_mut(&claude).unwrap().name = Some("hand edited".into());
+        assert_eq!(ws.leaf_name(claude), None);
     }
 
     #[test]
