@@ -735,7 +735,7 @@ impl WorkspaceView {
     /// Open a new Claude or shell pane — as a new tab, or splitting the focused pane along `axis` —
     /// in the focused pane's current directory.
     fn open(&mut self, claude: bool, axis: Option<Axis>) {
-        if axis.is_some() && self.settings_active() {
+        if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
@@ -872,7 +872,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if axis.is_some() && self.settings_active() {
+        if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
         let leaf = match axis.and_then(|axis| self.workspace.split(axis, launch.clone())) {
@@ -1147,12 +1147,14 @@ impl WorkspaceView {
             )
         });
         let group = format!("pane-card-{index}");
+        let can_split = self.workspace.can_split();
         let button = |axis: Axis, label: &'static str, shortcut: &'static str, icon: &'static str| {
             let platform = Platform::current();
             let title = match shortcuts::current(shortcut, &settings.shortcuts, platform) {
                 Some(keystroke) => format!("{label} ({})", shortcuts::label(Some(&keystroke), platform)),
                 None => label.to_string(),
             };
+            let title = if can_split { title } else { format!("{title} (4 panes max)") };
             let card = HoverCard { title, status: None, dir: None, container: false, folder: None };
             div()
                 .id((label, index))
@@ -1162,14 +1164,19 @@ impl WorkspaceView {
                 .items_center()
                 .justify_center()
                 .rounded(px(RADIUS_SMALL - 2.))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                .when(can_split, |button| button.cursor_pointer().hover(|style| style.bg(rgb(theme.tokens.raised))))
                 .tooltip(hover_card::tooltip(card))
-                .child(svg().path(icon).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)))
+                .child(svg().path(icon).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)).opacity(if can_split {
+                    1.
+                } else {
+                    0.35
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        this.open_pane_menu(leaf, axis, event.position + gpui::point(px(0.), px(14.)), window, cx);
+                        if can_split {
+                            this.open_pane_menu(leaf, axis, event.position + gpui::point(px(0.), px(14.)), window, cx);
+                        }
                         // Keep focus on the popup: the workspace's tracked focus must not take it back.
                         window.prevent_default();
                         cx.stop_propagation();
