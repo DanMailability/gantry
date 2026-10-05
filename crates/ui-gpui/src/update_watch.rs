@@ -64,6 +64,28 @@ pub(crate) fn probe(path: &Path, timeout: Duration) -> Option<Version> {
     parse_version_output(&output)
 }
 
+/// Whether a file event means the file changed: running `--version` on it opens and closes it for reading, which must
+/// not count (it would probe again forever).
+#[cfg(target_os = "linux")]
+fn is_change(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode};
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Modify(_)
+            | EventKind::Remove(_)
+            | EventKind::Access(AccessKind::Close(AccessMode::Write))
+    )
+}
+
+/// Size and modification time: what tells one install from the next.
+#[cfg(target_os = "linux")]
+fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
 /// Watch `path`'s directory; after changes to `path` settle, probe it off the UI thread and report the version.
 pub(crate) fn watch(path: &Path, cx: &mut Context<WorkspaceView>) -> Option<(RecommendedWatcher, Task<()>)> {
     let dir = path.parent()?;
@@ -71,6 +93,7 @@ pub(crate) fn watch(path: &Path, cx: &mut Context<WorkspaceView>) -> Option<(Rec
     let (events, changes) = async_channel::unbounded::<()>();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event
+            && is_change(&event.kind)
             && event.paths.iter().any(|path| path.file_name() == Some(name.as_os_str()))
         {
             let _ = events.try_send(());
@@ -84,6 +107,7 @@ pub(crate) fn watch(path: &Path, cx: &mut Context<WorkspaceView>) -> Option<(Rec
         .ok()?;
     let path = path.to_owned();
     let task = cx.spawn(async move |this, cx| {
+        let mut last = None;
         while changes.recv().await.is_ok() {
             loop {
                 cx.background_executor().timer(SETTLE).await;
@@ -95,12 +119,18 @@ pub(crate) fn watch(path: &Path, cx: &mut Context<WorkspaceView>) -> Option<(Rec
                     break;
                 }
             }
+            // One install probes once: the same size and time as the last good probe is the same file.
+            let current = stamp(&path);
+            if current.is_none() || current == last {
+                continue;
+            }
             let probed = path.clone();
             let found = cx.background_executor().spawn(async move { probe(&probed, PROBE_TIMEOUT) }).await;
-            if let Some(version) = found
-                && this.update(cx, |view, cx| view.installed_version(version, cx)).is_err()
-            {
-                return;
+            if let Some(version) = found {
+                last = current;
+                if this.update(cx, |view, cx| view.installed_version(version, cx)).is_err() {
+                    return;
+                }
             }
         }
     });
@@ -141,6 +171,20 @@ mod tests {
         assert_eq!(footer_lines(None)[1], "daemon version unknown");
         let no_commit = DaemonBuild { version: Some("0.3.0".into()), commit: None };
         assert_eq!(footer_lines(Some(&no_commit))[1], "daemon 0.3.0 (unknown)");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_changes_count_not_opens_or_reads() {
+        use notify::EventKind::{Access, Create, Modify, Remove};
+        use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode};
+        assert!(!is_change(&Access(AccessKind::Open(AccessMode::Any))));
+        assert!(!is_change(&Access(AccessKind::Close(AccessMode::Read))));
+        assert!(is_change(&Create(CreateKind::File)));
+        assert!(is_change(&Modify(ModifyKind::Data(DataChange::Any))));
+        assert!(is_change(&Modify(ModifyKind::Name(RenameMode::Both))));
+        assert!(is_change(&Remove(RemoveKind::File)));
+        assert!(is_change(&Access(AccessKind::Close(AccessMode::Write))));
     }
 
     #[cfg(unix)]
