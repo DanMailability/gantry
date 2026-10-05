@@ -35,7 +35,7 @@ const ROW_HEIGHT: f32 = 38.0;
 /// Width of the ring around the selected row.
 const RING: f32 = 2.0;
 /// Empty space between the ring and the selected row's fill.
-const RING_GAP: f32 = 3.0;
+const RING_GAP: f32 = 1.0;
 /// Ages ("5m") and project roots are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
 
