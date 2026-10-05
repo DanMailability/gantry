@@ -153,6 +153,8 @@ pub struct DaemonClient {
 struct Hello {
     instance: String,
     claude_dir: Option<PathBuf>,
+    daemon_version: Option<String>,
+    daemon_commit: Option<String>,
     panes: Vec<PaneInfo>,
 }
 
@@ -164,6 +166,10 @@ pub struct Connection {
     pub instance: String,
     /// The daemon's default Claude config dir.
     pub claude_dir: Option<PathBuf>,
+    /// The daemon's app version, if it sent one.
+    pub daemon_version: Option<String>,
+    /// The daemon's git commit, if it sent one.
+    pub daemon_commit: Option<String>,
     /// Live panes at connect time, most recently focused first.
     pub panes: Vec<PaneInfo>,
     /// Daemon events, in order.
@@ -190,9 +196,17 @@ impl DaemonClient {
             };
             runtime.block_on(run_connection(paths, spawn, ready_tx, outgoing_rx, events_tx));
         });
-        let Hello { instance, claude_dir, panes } =
+        let Hello { instance, claude_dir, daemon_version, daemon_commit, panes } =
             ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
-        Ok(Connection { client: DaemonClient { outgoing }, instance, claude_dir, panes, events })
+        Ok(Connection {
+            client: DaemonClient { outgoing },
+            instance,
+            claude_dir,
+            daemon_version,
+            daemon_commit,
+            panes,
+            events,
+        })
     }
 
     /// Start a pane; answered by `Spawned`/`SpawnFailed` with the same `request`.
@@ -350,8 +364,10 @@ where
 {
     let io = |err: io::Error| StartError::Io(err.into());
     write_frame(send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.map_err(io)?;
-    let (instance, claude_dir) = match next_message(recv).await? {
-        DaemonMessage::Welcome { instance, claude_dir, .. } => (instance, claude_dir),
+    let (instance, claude_dir, daemon_version, daemon_commit) = match next_message(recv).await? {
+        DaemonMessage::Welcome { instance, claude_dir, app_version, app_commit, .. } => {
+            (instance, claude_dir, app_version, app_commit)
+        }
         DaemonMessage::VersionMismatch { daemon_protocol } => {
             return Err(StartError::VersionMismatch { daemon_protocol });
         }
@@ -360,7 +376,7 @@ where
     write_frame(send, &Frame::control(&ClientMessage::ListPanes)).await.map_err(io)?;
     loop {
         if let DaemonMessage::Panes { panes } = next_message(recv).await? {
-            return Ok(Hello { instance, claude_dir, panes });
+            return Ok(Hello { instance, claude_dir, daemon_version, daemon_commit, panes });
         }
     }
 }

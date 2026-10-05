@@ -113,6 +113,8 @@ fn connect_then_spawn_attach_and_kill() {
     let paths = Paths::in_dir(dir.path(), "t");
     let first = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
     assert!(first.panes.is_empty());
+    assert_eq!(first.daemon_version.as_deref(), Some(protocol::build::VERSION));
+    assert_eq!(first.daemon_commit.as_deref(), Some(protocol::build::COMMIT));
     first.client.spawn(7, sh("printf 'hello pane'; sleep 10"));
     let ClientEvent::Spawned { request: 7, pane, cwd } =
         next_event(&first.events, |e| matches!(e, ClientEvent::Spawned { .. }))
