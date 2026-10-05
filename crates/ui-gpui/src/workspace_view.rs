@@ -12,6 +12,7 @@ use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, mix, terminal_palette};
+use app_core::version::{self, Note, Update, Version};
 use app_core::workspace::{ClaudeDirs, DirBadge, MAX_PANES_PER_TAB, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
@@ -20,6 +21,7 @@ use gpui::{
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
     Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
 };
+use notify::RecommendedWatcher;
 use protocol::message::{
     ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
 };
@@ -46,7 +48,7 @@ use crate::theme::{
     RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme,
     working_sweep,
 };
-use crate::update_watch::DaemonBuild;
+use crate::update_watch::{self, DaemonBuild};
 use crate::window_frame;
 
 /// Height of the title bar.
@@ -205,6 +207,18 @@ pub struct WorkspaceView {
     tab_menu: Option<OpenMenu>,
     /// The open popup of a pane's split button (Claude or Terminal).
     pane_menu: Option<OpenMenu>,
+    /// The binary this window started from (resolved at start, before an install can replace it).
+    start_path: Option<PathBuf>,
+    /// The version found at `start_path` after a change; `None` until one was probed.
+    installed: Option<Version>,
+    /// The daemon's version, if it sent one.
+    daemon_version: Option<Version>,
+    /// Watches `start_path`'s directory (Linux).
+    update_watch: Option<(RecommendedWatcher, Task<()>)>,
+    /// The open update card; its focus handle takes Esc.
+    update_card: Option<FocusHandle>,
+    /// Why Restart and update failed, shown in the card.
+    update_error: Option<String>,
     /// Take-over requests waiting for the daemon, by session.
     take_overs: HashMap<String, TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
@@ -312,6 +326,12 @@ impl WorkspaceView {
             before_settings: None,
             tab_menu: None,
             pane_menu: None,
+            start_path: None,
+            installed: None,
+            daemon_version: None,
+            update_watch: None,
+            update_card: None,
+            update_error: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -325,6 +345,12 @@ impl WorkspaceView {
             _clicks: clicks_task,
             _events: events_task,
         };
+        this.start_path = std::env::current_exe().ok();
+        this.daemon_version = daemon_version.as_deref().and_then(Version::parse);
+        #[cfg(target_os = "linux")]
+        if let Some(path) = this.start_path.clone() {
+            this.update_watch = update_watch::watch(&path, cx);
+        }
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
             this.add_slot(leaf, window, cx);
@@ -356,6 +382,39 @@ impl WorkspaceView {
             this.show_setup(SetupMode::FirstRun, window, cx);
         }
         this
+    }
+
+    /// A version was found at the start path.
+    pub(crate) fn installed_version(&mut self, version: Version, cx: &mut Context<Self>) {
+        self.installed = Some(version);
+        cx.notify();
+    }
+
+    /// The update notice, if anything is older than the newest version known.
+    fn update_notice(&self) -> Option<Update> {
+        let running = Version::parse(protocol::build::VERSION)?;
+        let live = self.workspace.leaves.values().filter(|leaf| leaf.pane.is_some()).count();
+        version::update(running, self.daemon_version, self.installed, live)
+    }
+
+    /// Restart and update: Stop all when the daemon is older, start the new GUI, quit.
+    fn restart_and_update(&mut self, cx: &mut Context<Self>) {
+        let (Some(update), Some(path)) = (self.update_notice(), self.start_path.clone()) else { return };
+        if !path.is_file() {
+            self.update_error = Some(format!("Could not start {}: the file is missing", path.display()));
+            cx.notify();
+            return;
+        }
+        if update.restart_daemon {
+            self.client.stop_all_and_wait(Duration::from_secs(2));
+        }
+        match update_watch::restart_command(&path, update.restart_daemon).spawn() {
+            Ok(_) => cx.quit(),
+            Err(err) => {
+                self.update_error = Some(format!("Could not start {}: {err}", path.display()));
+                cx.notify();
+            }
+        }
     }
 
     /// Take over what the settings say that is not drawn by `render`: pane colors, the daemon's palette, and the
@@ -1747,6 +1806,32 @@ impl WorkspaceView {
             })
             .child(self.render_title_session(window, cx))
             .child(if client_decorations { moves_window(spacer) } else { spacer })
+            .when_some(self.update_notice(), |bar, update| {
+                bar.child(
+                    div()
+                        .id("update-pill")
+                        .flex_none()
+                        .h(theme.ui(24.))
+                        .px(theme.ui(10.))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme.tokens.accent))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.tokens.accent))
+                        .cursor_pointer()
+                        .child(update.pill())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let focus = cx.focus_handle();
+                            window.focus(&focus, cx);
+                            this.update_card = Some(focus);
+                            this.update_error = None;
+                            cx.notify();
+                        })),
+                )
+            })
             .when(waiting > 0, |bar| {
                 bar.child(
                     div()
@@ -2351,6 +2436,83 @@ impl Render for WorkspaceView {
                         .p(theme.ui(16.))
                         .bg(rgba((theme.tokens.ground << 8) | 0xcc))
                         .child(view),
+                )
+            })
+            .when_some(self.update_card.as_ref().zip(self.update_notice()), |root, (focus, update)| {
+                let note = match update.note {
+                    Note::ClosesSessions(_) => {
+                        let colors = theme.tone(Tone::NeedsInput);
+                        div()
+                            .p(theme.ui(10.))
+                            .rounded(px(RADIUS_SMALL))
+                            .text_xs()
+                            .text_color(rgb(colors.ink))
+                            .when_some(colors.fill, |note, fill| note.bg(rgb(fill)))
+                    }
+                    Note::KeepsSessions => div().text_xs().text_color(rgb(theme.tokens.muted)),
+                }
+                .child(update.note_text());
+                let close = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                    this.update_card = None;
+                    this.focus_current(window, cx);
+                    cx.notify();
+                };
+                let (close_on_key, close_outside) =
+                    (cx.listener(move |this, _: &(), window, cx| close(this, window, cx)), {
+                        cx.listener(move |this, _: &(), window, cx| close(this, window, cx))
+                    });
+                root.child(
+                    div()
+                        .id("update-card")
+                        .occlude()
+                        .absolute()
+                        .top(theme.ui(46.))
+                        .right(theme.ui(74.))
+                        .w(theme.ui(320.))
+                        .p(theme.ui(16.))
+                        .flex()
+                        .flex_col()
+                        .gap(theme.ui(12.))
+                        .bg(rgb(theme.tokens.raised))
+                        .border_1()
+                        .border_color(rgb(theme.tokens.line))
+                        .rounded(px(RADIUS))
+                        .track_focus(focus)
+                        .on_key_down(move |event, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                close_on_key(&(), window, cx);
+                            }
+                            cx.stop_propagation();
+                        })
+                        .on_mouse_down_out(move |_, window, cx| close_outside(&(), window, cx))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(theme.tokens.text))
+                                .child(update.title()),
+                        )
+                        .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(update.detail_text()))
+                        .child(note)
+                        .when_some(self.update_error.clone(), |card, error| {
+                            card.child(div().text_xs().text_color(rgb(theme.tokens.danger)).child(error))
+                        })
+                        .child(
+                            div()
+                                .id("restart-and-update")
+                                .h(theme.ui(32.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(RADIUS_SMALL))
+                                .bg(rgb(theme.tokens.accent))
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme.tokens.on_accent))
+                                .cursor_pointer()
+                                .child("Restart and update")
+                                .on_click(cx.listener(|this, _, _, cx| this.restart_and_update(cx))),
+                        ),
                 )
             })
             .when_some(self.pane_menu.as_ref(), |root, menu| {
