@@ -1765,4 +1765,35 @@ mod tests {
         ws.new_tab(PaneLaunch::claude("/repo".into()));
         assert!(ws.can_split());
     }
+
+    #[test]
+    fn a_saved_tab_over_the_limit_loads_and_stays_full_until_two_close() {
+        let mut ws = Workspace::default();
+        ws.new_tab(PaneLaunch::claude("/repo".into()));
+        for _ in 0..3 {
+            ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into()));
+        }
+        let (split_id, extra) = (ws.alloc(), ws.alloc());
+        let target = ws.focused().unwrap();
+        ws.tabs[0].root.split(target, Axis::Vertical, split_id, extra);
+        ws.leaves.insert(extra, Leaf::new(PaneLaunch::claude("/repo".into())));
+        let mut ws: Workspace = serde_json::from_str(&serde_json::to_string(&ws).unwrap()).unwrap();
+        assert_eq!(ws.tabs[0].root.leaves().len(), 5);
+        assert!(!ws.can_split());
+        assert_eq!(ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into())), None);
+        ws.close(extra);
+        assert_eq!(ws.tabs[0].root.leaves().len(), 4);
+        assert!(!ws.can_split());
+    }
+
+    #[test]
+    fn no_split_without_tabs_or_on_the_settings_tab() {
+        let mut ws = Workspace::default();
+        assert!(!ws.can_split());
+        ws.new_tab(PaneLaunch::claude("/repo".into()));
+        assert!(ws.can_split());
+        let settings = ws.open_settings();
+        ws.select_tab(settings);
+        assert!(!ws.can_split());
+    }
 }

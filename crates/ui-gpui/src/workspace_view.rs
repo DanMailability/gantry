@@ -12,7 +12,7 @@ use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, mix, terminal_palette};
-use app_core::workspace::{ClaudeDirs, DirBadge, PaneLaunch, Rerun, Restored, Workspace};
+use app_core::workspace::{ClaudeDirs, DirBadge, MAX_PANES_PER_TAB, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
@@ -668,7 +668,7 @@ impl WorkspaceView {
         match outcome {
             TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
                 Some(TakeOverTarget::NewPane { cwd, split, container }) => {
-                    let axis = split.then_some(Axis::Horizontal);
+                    let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
                     let launch = self.resume_launch(&session, cwd, container, cx);
                     self.open_launch(launch, axis, None, window, cx);
                 }
@@ -1154,7 +1154,7 @@ impl WorkspaceView {
                 Some(keystroke) => format!("{label} ({})", shortcuts::label(Some(&keystroke), platform)),
                 None => label.to_string(),
             };
-            let title = if can_split { title } else { format!("{title} (4 panes max)") };
+            let title = if can_split { title } else { format!("{title} ({MAX_PANES_PER_TAB} panes max)") };
             let card = HoverCard { title, status: None, dir: None, container: false, folder: None };
             div()
                 .id((label, index))
@@ -1191,8 +1191,7 @@ impl WorkspaceView {
             }
         };
         let close_card = HoverCard { title: close_title, status: None, dir: None, container: false, folder: None };
-        // The theme has no danger color; the Needs-input dot is its reddest tone.
-        let danger = theme.tone(Tone::NeedsInput).dot;
+        let danger = theme.tokens.danger;
         div()
             .absolute()
             .top(px(2.))
@@ -1303,7 +1302,7 @@ impl WorkspaceView {
                 }
             }
             None => {
-                let axis = split.then_some(Axis::Horizontal);
+                let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
                 let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
                 match place {
                     Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
