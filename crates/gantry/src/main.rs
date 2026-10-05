@@ -12,6 +12,10 @@ use daemon::paths::{Paths, current_profile};
 fn main() -> ExitCode {
     let mut argv = std::env::args().skip(1).peekable();
     match argv.peek().map(String::as_str) {
+        Some("--version") => {
+            println!("{}", protocol::build::version_line());
+            return ExitCode::SUCCESS;
+        }
         Some("daemon") => return daemon_main(),
         Some("internal-print-env") => {
             println!("{}", daemon::shell_env::print_env_json());
