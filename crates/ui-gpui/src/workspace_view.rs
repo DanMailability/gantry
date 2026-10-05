@@ -40,7 +40,7 @@ use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
-use crate::sidebar_view::{SidebarEvent, SidebarView};
+use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
     RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme,
@@ -945,8 +945,8 @@ impl WorkspaceView {
         self.sync_panes(cx);
     }
 
-    /// Tab `index`'s title as the title bar and the sidebar show it: the focused pane's, without the Claude glyph
-    /// while the tab has a session status.
+    /// Tab `index`'s title as the title bar shows it when no pane row gives one: the focused pane's, without the
+    /// Claude glyph while the tab has a session status.
     fn tab_title(&self, index: usize, cx: &App) -> String {
         let Some(tab) = self.workspace.tabs.get(index) else { return String::new() };
         if tab.settings {
@@ -970,7 +970,10 @@ impl WorkspaceView {
                 PaneEntry {
                     leaf: *id,
                     cwd: leaf.launch.cwd.clone(),
-                    title: view.map_or_else(|| leaf.launch.label(), |view| view.title()),
+                    title: leaf
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| view.map_or_else(|| leaf.launch.label(), |view| view.title())),
                     session: leaf.session.clone(),
                     claude: leaf.launch.is_claude(),
                     ended: view.is_some_and(|view| view.has_ended()),
@@ -990,7 +993,7 @@ impl WorkspaceView {
             .filter(|(_, tab)| !tab.settings)
             .map(|(index, tab)| TabEntry {
                 index,
-                title: self.tab_title(index, cx),
+                name: tab.name.clone(),
                 focused: tab.focused,
                 leaves: tab.root.leaves(),
             })
@@ -1030,6 +1033,14 @@ impl WorkspaceView {
                 self.marked_unread.remove(&leaf);
                 self.sync_unseen(cx);
                 cx.notify();
+            }
+            MenuAction::RenamePane(leaf) => {
+                let name = self.workspace.leaf_name(leaf).unwrap_or_default().to_string();
+                self.start_rename(RenameTarget::Pane(leaf), name, window, cx);
+            }
+            MenuAction::RenameTab(index) => {
+                let name = self.workspace.tab_name(index).unwrap_or_default().to_string();
+                self.start_rename(RenameTarget::Tab(index), name, window, cx);
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
@@ -1121,7 +1132,7 @@ impl WorkspaceView {
             });
             let unread = self.unseen.contains_key(&tab.focused);
             let mark = (idle || unread).then_some((tab.focused, unread));
-            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context, mark)
+            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context, mark, tab.root.leaves().len())
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -1273,6 +1284,16 @@ impl WorkspaceView {
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
             SidebarEvent::Menu(action) => self.run_menu_action(action, window, cx),
+            SidebarEvent::Rename { target, name } => {
+                let renamed = match target {
+                    RenameTarget::Pane(leaf) => self.workspace.rename_leaf(leaf, &name),
+                    RenameTarget::Tab(index) => self.workspace.rename_tab(index, &name),
+                };
+                if renamed {
+                    self.save(cx);
+                    cx.notify();
+                }
+            }
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
             SidebarEvent::New { claude } => self.show_launcher(claude, window, cx),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
@@ -1314,6 +1335,16 @@ impl WorkspaceView {
                 }
             }
         }
+    }
+
+    /// Start the inline rename on the sidebar, showing the sidebar first if it is hidden.
+    fn start_rename(&mut self, target: RenameTarget, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.workspace.sidebar.visible {
+            self.workspace.sidebar.visible = true;
+            self.save(cx);
+            cx.notify();
+        }
+        self.sidebar.update(cx, |sidebar, cx| sidebar.start_rename(target, &name, window, cx));
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
@@ -1789,7 +1820,9 @@ impl WorkspaceView {
         let index = self.workspace.active;
         let leaf = tab.focused;
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
-        let title = self.sidebar.read(cx).leaf_title(leaf).unwrap_or_else(|| self.tab_title(index, cx));
+        let tab_name = tab.name.clone().filter(|_| tab.root.leaves().len() > 1);
+        let title =
+            tab_name.or_else(|| self.sidebar.read(cx).leaf_title(leaf)).unwrap_or_else(|| self.tab_title(index, cx));
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
         let unseen = self.unseen.contains_key(&leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());
@@ -1932,7 +1965,7 @@ impl WorkspaceView {
             .children(tab.root.layout(Rect::UNIT).into_iter().enumerate().filter_map(|(index, (leaf, rect))| {
                 let view = self.slots.get(&leaf)?.view.clone();
                 let focused = leaf == tab.focused;
-                let title = view.read(cx).title();
+                let title = self.workspace.leaf_name(leaf).map_or_else(|| view.read(cx).title(), String::from);
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen.contains_key(&leaf);

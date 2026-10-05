@@ -39,6 +39,15 @@ const RING_GAP: f32 = 3.0;
 /// Ages ("5m") and project roots are recomputed this often.
 const REFRESH: Duration = Duration::from_secs(30);
 
+/// What an inline rename edits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RenameTarget {
+    /// A shell pane, by leaf.
+    Pane(NodeId),
+    /// A tab, by index.
+    Tab(usize),
+}
+
 /// What the sidebar asks the workspace to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SidebarEvent {
@@ -57,6 +66,13 @@ pub enum SidebarEvent {
         index: usize,
         /// Where the menu opens.
         position: Point<Pixels>,
+    },
+    /// The inline rename was confirmed; an empty `name` clears the name.
+    Rename {
+        /// What was renamed.
+        target: RenameTarget,
+        /// The new name, as typed.
+        name: String,
     },
     /// Open the launcher (Claude first, or shell first).
     New {
@@ -82,6 +98,8 @@ pub struct SidebarView {
     arrivals: Arrivals,
     order: ProjectOrder,
     filter: TextField,
+    /// The row being renamed and its text field.
+    renaming: Option<(RenameTarget, TextField)>,
     toggled: HashSet<PathBuf>,
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
@@ -140,6 +158,7 @@ impl SidebarView {
             arrivals: Arrivals::default(),
             order: ProjectOrder::default(),
             filter: TextField::default(),
+            renaming: None,
             toggled: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
@@ -242,6 +261,45 @@ impl SidebarView {
         }
     }
 
+    /// Edit the name of `target` in place on its row, starting from `current` (selected). False, changing nothing
+    /// (focus stays), when the row is not in the drawn list (collapsed project, filter).
+    pub fn start_rename(
+        &mut self,
+        target: RenameTarget,
+        current: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.rows.iter().position(|row| renames(&row.kind, target)) else { return false };
+        self.scroll.scroll_to_item(index, ScrollStrategy::Center);
+        let mut field = TextField::default();
+        field.insert(current);
+        field.select_all();
+        self.renaming = Some((target, field));
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// The inline field standing in for the title of the row of `target`, while it is being renamed.
+    fn rename_field(&self, target: RenameTarget, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let (_, field) = self.renaming.as_ref().filter(|(editing, _)| *editing == target)?;
+        let press = field::on_press(cx, |this, offset, clicks, _, cx| {
+            if let Some((_, field)) = &mut this.renaming {
+                field.press(offset, clicks);
+            }
+            cx.notify();
+        });
+        Some(
+            div()
+                .flex_1()
+                .min_w_0()
+                // A press in the field must not activate the row.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(field::render(field, "Name", true, theme, press)),
+        )
+    }
+
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let (all_rows, rows) = {
             let sessions: Vec<&SessionInfo> = self.sessions.all().collect();
@@ -286,6 +344,12 @@ impl SidebarView {
         };
         self.all_rows = all_rows;
         self.rows = rows;
+        // A row that is gone (its pane closed) ends its rename.
+        if let Some((target, _)) = &self.renaming
+            && !self.rows.iter().any(|row| renames(&row.kind, *target))
+        {
+            self.renaming = None;
+        }
         // A selection whose row is gone falls back to the focused pane's row.
         if self.selected_index().is_none() {
             self.selected = self
@@ -334,6 +398,26 @@ impl SidebarView {
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
+        if let Some((target, field)) = &mut self.renaming {
+            match keystroke.key.as_str() {
+                "enter" => {
+                    let (target, name) = (*target, field.text().to_string());
+                    self.renaming = None;
+                    cx.emit(SidebarEvent::Rename { target, name });
+                    cx.emit(SidebarEvent::Dismiss);
+                }
+                "escape" => {
+                    self.renaming = None;
+                    cx.emit(SidebarEvent::Dismiss);
+                }
+                _ => {
+                    field::edit(field, keystroke, cx);
+                }
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         match keystroke.key.as_str() {
             "up" => self.move_selection(false),
             "down" => self.move_selection(true),
@@ -637,7 +721,10 @@ impl SidebarView {
                     lined(pill(None))
                         .text_color(rgb(if *tone == Tone::Closed { theme.tokens.muted } else { theme.tokens.text }))
                         .child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(">_"))
-                        .child(title(entry.title.clone()))
+                        .child(
+                            self.rename_field(RenameTarget::Pane(entry.leaf), &theme, cx)
+                                .unwrap_or_else(|| title(entry.title.clone())),
+                        )
                         .children(project()),
                 ),
             RowKind::Pane { entry, tone, note } => {
@@ -660,10 +747,14 @@ impl SidebarView {
                         .children(project()),
                 )
             }
-            RowKind::Tab { title: tab_title, panes, .. } => base.child(
+            RowKind::Tab { title: tab_title, panes, index: tab, .. } => base.child(
                 lined(pill(None))
                     .h(theme.ui(28.))
-                    .child(title(tab_title.clone()).font_weight(FontWeight::SEMIBOLD))
+                    .child(
+                        self.rename_field(RenameTarget::Tab(*tab), &theme, cx)
+                            .unwrap_or_else(|| title(tab_title.clone()))
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
                     .child(aside(format!("{panes} panes"), theme.tokens.muted)),
             ),
             RowKind::Detail { text, .. } => base.child(
@@ -685,6 +776,15 @@ impl SidebarView {
                 .border_color(rgb(theme.selection()));
             content.relative().child(ring)
         })
+    }
+}
+
+/// Whether a row is the one `target` names.
+fn renames(kind: &RowKind, target: RenameTarget) -> bool {
+    match (kind, target) {
+        (RowKind::Pane { entry, .. }, RenameTarget::Pane(leaf)) => entry.leaf == leaf,
+        (RowKind::Tab { index, .. }, RenameTarget::Tab(tab)) => *index == tab,
+        _ => false,
     }
 }
 
@@ -730,6 +830,10 @@ impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let focused = self.focus_handle.is_focused(window);
+        // Clicking elsewhere (focus left the sidebar) cancels a rename.
+        if !focused {
+            self.renaming = None;
+        }
         let theme = theme(cx).clone();
         div()
             .key_context("Sidebar")

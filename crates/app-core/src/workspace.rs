@@ -333,13 +333,16 @@ pub struct Leaf {
     /// Claude session it last ran (followed across `/clear`); `None` for other programs.
     #[serde(default)]
     pub session: Option<String>,
+    /// Name the user gave a shell pane; `None` = the pane's own title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Leaf {
     /// A leaf about to run `launch`.
     pub fn new(launch: PaneLaunch) -> Leaf {
         let session = launch.session().map(String::from);
-        Leaf { pane: None, launch, session }
+        Leaf { pane: None, launch, session, name: None }
     }
 
     /// What Continue / Restart does, given the daemon's sessions: focus the pane that already runs the
@@ -424,6 +427,9 @@ pub struct Tab {
     /// The Settings tab (not saved; its root is a node id with no leaf).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub settings: bool,
+    /// Name the user gave the tab; `None` = the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Default sidebar width, in pixels.
@@ -479,9 +485,41 @@ impl Workspace {
         let leaf = self.alloc();
         self.leaves.insert(leaf, Leaf::new(launch));
         let at = self.settings_tab().unwrap_or(self.tabs.len());
-        self.tabs.insert(at, Tab { root: Node::Leaf(leaf), focused: leaf, settings: false });
+        self.tabs.insert(at, Tab { root: Node::Leaf(leaf), focused: leaf, settings: false, name: None });
         self.active = at;
         leaf
+    }
+
+    /// Name a shell pane (trimmed; empty clears it). False, changing nothing, for a missing or Claude leaf.
+    pub fn rename_leaf(&mut self, leaf: NodeId, name: &str) -> bool {
+        match self.leaves.get_mut(&leaf) {
+            Some(found) if !found.launch.is_claude() => {
+                found.name = Some(name.trim().to_string()).filter(|name| !name.is_empty());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Name a tab (trimmed; empty clears it). False, changing nothing, for a missing tab or the Settings tab.
+    pub fn rename_tab(&mut self, index: usize, name: &str) -> bool {
+        match self.tabs.get_mut(index) {
+            Some(tab) if !tab.settings => {
+                tab.name = Some(name.trim().to_string()).filter(|name| !name.is_empty());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The name the user gave a shell pane, if any (a Claude pane never shows one, even from a hand-edited layout).
+    pub fn leaf_name(&self, leaf: NodeId) -> Option<&str> {
+        self.leaves.get(&leaf).filter(|leaf| !leaf.launch.is_claude())?.name.as_deref()
+    }
+
+    /// The name the user gave a tab, if any.
+    pub fn tab_name(&self, index: usize) -> Option<&str> {
+        self.tabs.get(index)?.name.as_deref()
     }
 
     /// Show the Settings tab, opening it as the last tab if it is not open. Returns its index.
@@ -490,7 +528,7 @@ impl Workspace {
             Some(index) => index,
             None => {
                 let id = self.alloc();
-                self.tabs.push(Tab { root: Node::Leaf(id), focused: id, settings: true });
+                self.tabs.push(Tab { root: Node::Leaf(id), focused: id, settings: true, name: None });
                 self.tabs.len() - 1
             }
         };
@@ -578,10 +616,9 @@ impl Workspace {
             if kept.is_empty() {
                 parked.push((tab.clone(), gone.into_iter().map(pair).collect()));
             } else {
-                parked.extend(
-                    gone.into_iter()
-                        .map(|id| (Tab { root: Node::Leaf(id), focused: id, settings: false }, vec![pair(id)])),
-                );
+                parked.extend(gone.into_iter().map(|id| {
+                    (Tab { root: Node::Leaf(id), focused: id, settings: false, name: None }, vec![pair(id)])
+                }));
             }
         }
         parked
@@ -1165,6 +1202,35 @@ mod tests {
     }
 
     #[test]
+    fn rename_leaf_trims_clears_and_refuses_claude() {
+        let mut ws = Workspace::default();
+        let shell_leaf = ws.new_tab(shell("/repo"));
+        let claude = ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into())).unwrap();
+        assert!(ws.rename_leaf(shell_leaf, "  build box "));
+        assert_eq!(ws.leaf_name(shell_leaf), Some("build box"));
+        assert!(ws.rename_leaf(shell_leaf, "   "));
+        assert_eq!(ws.leaf_name(shell_leaf), None);
+        assert!(!ws.rename_leaf(claude, "nope"));
+        assert_eq!(ws.leaf_name(claude), None);
+        assert!(!ws.rename_leaf(999, "x"));
+        ws.leaves.get_mut(&claude).unwrap().name = Some("hand edited".into());
+        assert_eq!(ws.leaf_name(claude), None);
+    }
+
+    #[test]
+    fn rename_tab_trims_clears_and_refuses_settings() {
+        let mut ws = Workspace::default();
+        ws.new_tab(shell("/repo"));
+        assert!(ws.rename_tab(0, " Test cleanup "));
+        assert_eq!(ws.tab_name(0), Some("Test cleanup"));
+        assert!(ws.rename_tab(0, ""));
+        assert_eq!(ws.tab_name(0), None);
+        assert!(!ws.rename_tab(5, "x"));
+        let settings = ws.open_settings();
+        assert!(!ws.rename_tab(settings, "x"));
+    }
+
+    #[test]
     fn pane_exited_for_an_unknown_pane_is_ignored() {
         let mut ws = Workspace::default();
         ws.new_tab(shell("/a"));
@@ -1184,6 +1250,7 @@ mod tests {
                 env: Vec::new(),
             },
             session: session.map(Into::into),
+            name: None,
         }
     }
 

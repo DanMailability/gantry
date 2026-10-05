@@ -130,8 +130,8 @@ impl ProjectOrder {
 pub struct TabEntry {
     /// Index in the workspace's tabs.
     pub index: usize,
-    /// Its title, as the title bar shows it.
-    pub title: String,
+    /// The name the user gave it; without one the heading shows its project.
+    pub name: Option<String>,
     /// The leaf with focus in it.
     pub focused: NodeId,
     /// Its leaves in screen order (left/top first: `Node::leaves()`).
@@ -587,7 +587,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     let tab = group.tab;
                     let mut heading = Row::new(RowKind::Tab {
                         index: tab.index,
-                        title: tab.title.clone(),
+                        title: tab.name.clone().unwrap_or_else(|| labels[&path].clone()),
                         panes: tab.leaves.len(),
                         focused: tab.focused,
                         first: tab.leaves[0],
@@ -1209,7 +1209,7 @@ mod tests {
     }
 
     fn tab(index: usize, focused: NodeId, leaves: &[NodeId]) -> TabEntry {
-        TabEntry { index, title: format!("tab title {index}"), focused, leaves: leaves.to_vec() }
+        TabEntry { index, name: None, focused, leaves: leaves.to_vec() }
     }
 
     fn titled_shell(leaf: NodeId, cwd: &str, title: &str) -> PaneEntry {
@@ -1346,6 +1346,19 @@ mod tests {
         );
         assert!(!rows[1].in_tab);
         assert!(rows[2].in_tab && rows[3].in_tab);
+    }
+
+    #[test]
+    fn a_split_tab_heading_shows_its_name_else_its_project() {
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), shell_pane(2, "/r/alpha")]);
+        fixture.tabs = vec![tab(0, 1, &[2, 1])];
+        let heading = |fixture: &mut Fixture| match fixture.rows()[1].kind.clone() {
+            RowKind::Tab { title, .. } => title,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(heading(&mut fixture), "alpha");
+        fixture.tabs[0].name = Some("Test cleanup".into());
+        assert_eq!(heading(&mut fixture), "Test cleanup");
     }
 
     #[test]

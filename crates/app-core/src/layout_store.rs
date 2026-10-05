@@ -74,6 +74,26 @@ mod tests {
     }
 
     #[test]
+    fn names_round_trip_and_old_layouts_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        workspace.rename_tab(0, "Test cleanup");
+        let shell = workspace.new_tab(PaneLaunch::shell("/repo".into(), &Default::default()));
+        workspace.rename_leaf(shell, "build box");
+        save(&path, &workspace).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+        assert_eq!(load(&path).unwrap().unwrap().leaf_name(shell), Some("build box"));
+        // A layout written before names existed has no name keys at all.
+        let mut value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let tab = &mut value["workspace"]["tabs"][0];
+        assert_eq!(tab["name"], "Test cleanup");
+        tab.as_object_mut().unwrap().remove("name");
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(load(&path).unwrap().is_some());
+    }
+
+    #[test]
     fn a_missing_file_is_no_layout() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(&dir.path().join("layout.json")).unwrap(), None);

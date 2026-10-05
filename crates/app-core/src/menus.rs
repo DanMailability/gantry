@@ -56,6 +56,10 @@ pub enum MenuAction {
     MarkUnread(NodeId),
     /// Remove a pane's unread mark (its tab and row go back to the session's own color).
     MarkRead(NodeId),
+    /// Rename a shell pane.
+    RenamePane(NodeId),
+    /// Rename a tab.
+    RenameTab(usize),
     /// Close one pane.
     ClosePane(NodeId),
     /// Close every pane of a tab.
@@ -284,6 +288,7 @@ pub fn vscode_args(folder: &Path, container: Option<&ContainerPlace>, pane_conta
 
 /// A tab's menu; `dir` is its focused pane's directory. `mark` = the focused pane and whether it is unread (offers
 /// "Mark as read"), `None` when it is neither unread nor idle.
+/// `panes` = how many panes the tab has; only a split tab (its heading) can be renamed.
 /// `context.dirs` is empty for a dev container tab.
 pub fn tab_menu(
     tab: usize,
@@ -291,6 +296,7 @@ pub fn tab_menu(
     vscode: Vec<String>,
     context: &MenuContext,
     mark: Option<(NodeId, bool)>,
+    panes: usize,
 ) -> Vec<MenuItem> {
     let mut items = vec![
         with_shortcut("Split right", Shortcut::SplitRight, MenuAction::Split { tab, axis: Axis::Horizontal }),
@@ -303,6 +309,9 @@ pub fn tab_menu(
     items.push(MenuItem::Separator);
     items.extend(folder_items(dir, vscode));
     items.push(MenuItem::Separator);
+    if panes > 1 {
+        items.push(entry("Rename…", MenuAction::RenameTab(tab)));
+    }
     items.push(with_shortcut("Close tab", Shortcut::Close, MenuAction::CloseTab(tab)));
     items
 }
@@ -393,6 +402,9 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     items.push(entry(label, MenuAction::NewHere { dir: pane.cwd.clone(), claude }));
                     if claude && pane.container.is_none() {
                         items.extend(claude_with(&pane.cwd, context));
+                    }
+                    if !claude {
+                        items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf)));
                     }
                 }
             }
@@ -552,10 +564,20 @@ mod tests {
 
     #[test]
     fn a_tab_offers_splits_folder_items_and_close() {
-        let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default(), None);
+        let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default(), None, 2);
         assert_eq!(
             labels(&items),
-            ["Split right", "Split down", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
+            [
+                "Split right",
+                "Split down",
+                "│",
+                "Copy folder path",
+                "Open folder",
+                "Open in VS Code",
+                "│",
+                "Rename…",
+                "Close tab"
+            ]
         );
         let MenuItem::Entry(first) = &items[0] else { panic!() };
         assert_eq!(
@@ -567,8 +589,29 @@ mod tests {
     }
 
     #[test]
+    fn only_shell_panes_and_tabs_offer_rename() {
+        let rename = |items: &[MenuItem]| {
+            items.iter().find_map(|item| match item {
+                MenuItem::Entry(entry) if entry.label == "Rename…" => Some(entry.action.clone()),
+                _ => None,
+            })
+        };
+        let menus_row_menu = |row: &Row| row_menu(row, ALONE, &MenuContext::default()).unwrap();
+        let shell = menus_row_menu(&pane_row(false, false));
+        assert_eq!(rename(&shell), Some(MenuAction::RenamePane(7)));
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, false))), None);
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, true))), None);
+        let running = SessionState::Managed { pane: 1 };
+        assert_eq!(rename(&menus_row_menu(&session_row(running, Tone::Idle, Some(4)))), None);
+        let items = tab_menu(3, Path::new("/r/app"), vec![], &MenuContext::default(), None, 2);
+        assert_eq!(rename(&items), Some(MenuAction::RenameTab(3)));
+        let single = tab_menu(3, Path::new("/r/app"), vec![], &MenuContext::default(), None, 1);
+        assert_eq!(rename(&single), None, "a one-pane tab has no heading to rename");
+    }
+
+    #[test]
     fn a_tab_with_an_idle_claude_offers_mark_as_unread() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, false)));
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, false)), 2);
         assert_eq!(
             labels(&items),
             [
@@ -580,6 +623,7 @@ mod tests {
                 "Open folder",
                 "Open in VS Code",
                 "│",
+                "Rename…",
                 "Close tab"
             ]
         );
@@ -589,7 +633,7 @@ mod tests {
 
     #[test]
     fn an_unread_tab_offers_mark_as_read() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, true)));
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, true)), 1);
         let MenuItem::Entry(read) = &items[2] else { panic!() };
         assert_eq!((read.label.as_str(), &read.action), ("Mark as read", &MenuAction::MarkRead(7)));
     }
@@ -697,7 +741,7 @@ mod tests {
         let shell = row_menu(&pane_row(false, false), ALONE, &MenuContext::default()).unwrap();
         assert_eq!(
             labels(&shell),
-            ["New shell here", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
+            ["New shell here", "Rename…", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
         );
         let MenuItem::Entry(new) = &shell[0] else { panic!() };
         assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false });
@@ -844,7 +888,7 @@ mod tests {
 
     #[test]
     fn a_tab_menu_offers_the_choice_after_the_splits() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &two_dirs(None), None);
+        let items = tab_menu(0, Path::new("/r/app"), vec![], &two_dirs(None), None, 1);
         assert_eq!(labels(&items)[..4], ["Split right", "Split down", "New Claude here with ▸", "│"]);
     }
 
