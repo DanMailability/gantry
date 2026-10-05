@@ -771,8 +771,8 @@ impl SidebarView {
 
 /// The selection ring, drawn by the list after all rows (inside its clip) so it passes over the neighbouring rows.
 struct SelectionRing {
-    /// The selected row, its group edges and the ring color.
-    row: Option<(usize, GroupEdges, u32)>,
+    /// The selected row, its group edges, whether it sits inside a split-tab group and the ring color.
+    row: Option<(usize, GroupEdges, bool, u32)>,
     /// The theme's UI scale, for the paddings the row itself uses.
     theme: Theme,
 }
@@ -789,7 +789,7 @@ impl UniformListDecoration for SelectionRing {
         _cx: &mut App,
     ) -> AnyElement {
         let root = div().w(bounds.size.width).h(bounds.size.height);
-        let Some((index, edges, color)) = self.row.filter(|(index, ..)| visible_range.contains(index)) else {
+        let Some((index, edges, in_tab, color)) = self.row.filter(|(index, ..)| visible_range.contains(index)) else {
             return root.into_any_element();
         };
         let theme = &self.theme;
@@ -799,9 +799,11 @@ impl UniformListDecoration for SelectionRing {
         let top = item_height * index + if edges.first { theme.ui(8.) + px(1.) } else { px(0.) };
         let bottom = item_height * (index + 1) - if edges.last { px(1.) } else { px(0.) };
         let side = theme.ui(6.) + px(1.) + theme.ui(10.) - out;
+        // A row in a split-tab group has `pl(32)` instead of the usual 10 (see `render_row_content`).
+        let left = if in_tab { theme.ui(6.) + px(1.) + theme.ui(32.) - out } else { side };
         let ring = div()
             .absolute()
-            .left(side)
+            .left(left)
             .right(side)
             .top(top + px(1.) - out)
             .h(bottom - top - px(2.) + out * 2.)
@@ -995,9 +997,10 @@ impl Render for SidebarView {
                             }),
                         )
                         .with_decoration(SelectionRing {
-                            row: self
-                                .selected_index()
-                                .map(|index| (index, session_tree::group_edges(&self.rows, index), theme.selection())),
+                            row: self.selected_index().map(|index| {
+                                let edges = session_tree::group_edges(&self.rows, index);
+                                (index, edges, self.rows[index].in_tab, theme.selection())
+                            }),
                             theme: theme.clone(),
                         })
                         .track_scroll(&self.scroll)
