@@ -970,7 +970,10 @@ impl WorkspaceView {
                 PaneEntry {
                     leaf: *id,
                     cwd: leaf.launch.cwd.clone(),
-                    title: view.map_or_else(|| leaf.launch.label(), |view| view.title()),
+                    title: leaf
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| view.map_or_else(|| leaf.launch.label(), |view| view.title())),
                     session: leaf.session.clone(),
                     claude: leaf.launch.is_claude(),
                     ended: view.is_some_and(|view| view.has_ended()),
@@ -990,7 +993,7 @@ impl WorkspaceView {
             .filter(|(_, tab)| !tab.settings)
             .map(|(index, tab)| TabEntry {
                 index,
-                title: self.tab_title(index, cx),
+                name: tab.name.clone(),
                 focused: tab.focused,
                 leaves: tab.root.leaves(),
             })
@@ -1750,7 +1753,9 @@ impl WorkspaceView {
         let index = self.workspace.active;
         let leaf = tab.focused;
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
-        let title = self.sidebar.read(cx).leaf_title(leaf).unwrap_or_else(|| self.tab_title(index, cx));
+        let tab_name = tab.name.clone().filter(|_| tab.root.leaves().len() > 1);
+        let title =
+            tab_name.or_else(|| self.sidebar.read(cx).leaf_title(leaf)).unwrap_or_else(|| self.tab_title(index, cx));
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
         let unseen = self.unseen.contains_key(&leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());
