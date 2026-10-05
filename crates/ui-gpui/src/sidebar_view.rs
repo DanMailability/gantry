@@ -867,6 +867,8 @@ impl Render for SidebarView {
         if !focused {
             self.renaming = None;
         }
+        // The rename field has the focus then, not the filter.
+        let focused = focused && self.renaming.is_none();
         let theme = theme(cx).clone();
         div()
             .key_context("Sidebar")
