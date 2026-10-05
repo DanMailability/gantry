@@ -18,7 +18,7 @@ use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
-    Subscription, Task, Window, canvas, div, prelude::*, px, relative, rgb, rgba, svg,
+    Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
 };
 use protocol::message::{
     ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
@@ -32,7 +32,7 @@ use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
-use crate::assets::{PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
+use crate::assets::{LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
@@ -1667,7 +1667,9 @@ impl WorkspaceView {
                     .h_full()
                     .flex()
                     .items_center()
+                    .gap(theme.ui(8.))
                     .font_weight(FontWeight::BOLD)
+                    .child(img(LOGO).flex_none().size(theme.ui(22.)))
                     .child("Gantry");
                 if sidebar.visible {
                     let brand = brand.w(theme.ui(sidebar.width) + px(SIDEBAR_EDGE)).pl(theme.ui(18.));

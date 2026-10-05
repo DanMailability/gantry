@@ -16,6 +16,9 @@ pub(crate) const SPLIT_DOWN_ICON: &str = "icons/split-down.svg";
 /// The last prompt card's icon (a chat bubble), drawn by `workspace_view::prompt_card`.
 pub(crate) const PROMPT_ICON: &str = "icons/prompt.svg";
 
+/// The app icon in color, drawn next to the name in the title bar (a picture, not a tinted icon like the others).
+pub(crate) const LOGO: &str = "icons/gantry.png";
+
 /// Gantry's embedded assets.
 pub(crate) struct Assets;
 
@@ -26,13 +29,20 @@ impl AssetSource for Assets {
             SPLIT_RIGHT_ICON => Some(include_bytes!("../assets/icons/split-right.svg")),
             SPLIT_DOWN_ICON => Some(include_bytes!("../assets/icons/split-down.svg")),
             PROMPT_ICON => Some(include_bytes!("../assets/icons/prompt.svg")),
+            LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
     }
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {
-        Ok(vec![CONTAINER_ICON.into(), SPLIT_RIGHT_ICON.into(), SPLIT_DOWN_ICON.into(), PROMPT_ICON.into()])
+        Ok(vec![
+            CONTAINER_ICON.into(),
+            SPLIT_RIGHT_ICON.into(),
+            SPLIT_DOWN_ICON.into(),
+            PROMPT_ICON.into(),
+            LOGO.into(),
+        ])
     }
 }
 
@@ -46,6 +56,7 @@ mod tests {
             let bytes = Assets.load(icon).unwrap().expect("embedded");
             assert!(std::str::from_utf8(&bytes).unwrap().starts_with("<svg"), "{icon}");
         }
+        assert!(Assets.load(LOGO).unwrap().expect("embedded").starts_with(b"\x89PNG"));
         assert!(Assets.load("icons/missing.svg").unwrap().is_none());
     }
 }
