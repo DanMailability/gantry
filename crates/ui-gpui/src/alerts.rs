@@ -29,6 +29,9 @@ pub fn deliver(notice: Notice, channels: Channels, volume: f32, clicked: async_c
 fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
     let mut notification = notify_rust::Notification::new();
     notification.appname("Gantry").summary(&notice.summary).body(&notice.body).action("default", "Show");
+    if let Some(path) = logo_file() {
+        notification.image_path(&path);
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     notification.hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()));
     let shown = notification.show();
@@ -47,6 +50,15 @@ fn show(notice: Notice, clicked: async_channel::Sender<NodeId>) {
     });
     #[cfg(target_os = "macos")]
     let _ = (handle, clicked, notice.leaf);
+}
+
+/// The app logo as a file in the temp dir (notifications take a path), written again when it is gone.
+fn logo_file() -> Option<String> {
+    let path = std::env::temp_dir().join("gantry-notification-logo.png");
+    if !path.exists() {
+        std::fs::write(&path, include_bytes!("../assets/icons/gantry.png")).ok()?;
+    }
+    path.to_str().map(str::to_string)
 }
 
 /// The embedded recording of `tone`.

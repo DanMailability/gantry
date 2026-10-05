@@ -183,21 +183,18 @@ fn prompt_snippet(prompt: &str) -> String {
     snippet
 }
 
-/// Notification summary and body for `kind` on the session titled `title` in `project`. The body is the project, then
-/// what Claude waits for, or else the start of the session's `last_prompt`, on one line (separated by `·`: some
-/// desktops show a notification body on a single line).
-pub fn describe(kind: &AlertKind, title: &str, project: &str, last_prompt: Option<&str>) -> (String, String) {
+/// Notification summary and body for `kind` on the session titled `title`. The body is what Claude waits for, or else
+/// the start of the session's `last_prompt` (empty when there is neither).
+pub fn describe(kind: &AlertKind, title: &str, last_prompt: Option<&str>) -> (String, String) {
     let (status, reason) = match kind {
         AlertKind::NeedsInput { reason } => ("Needs input", reason.as_deref()),
         AlertKind::Finished => ("Finished", None),
     };
-    let detail = reason.map(str::to_string).or_else(|| {
-        let snippet = prompt_snippet(last_prompt?);
-        (!snippet.is_empty()).then(|| format!("You: {snippet}"))
+    let body = reason.map(str::to_string).unwrap_or_else(|| {
+        let snippet = last_prompt.map(prompt_snippet).unwrap_or_default();
+        if snippet.is_empty() { snippet } else { format!("You: {snippet}") }
     });
-    let lines: Vec<_> =
-        [Some(project.to_string()), detail].into_iter().flatten().filter(|line| !line.is_empty()).collect();
-    (format!("{status} · {title}"), lines.join(" · "))
+    (format!("{status} · {title}"), body)
 }
 
 #[cfg(test)]
@@ -322,36 +319,36 @@ mod tests {
     }
 
     #[test]
-    fn notification_text_names_the_session_the_project_and_why() {
+    fn notification_text_names_the_session_and_why() {
         let needs = AlertKind::NeedsInput { reason: Some("dialog open".into()) };
         assert_eq!(
-            describe(&needs, "Fix CI", "repo", Some("fix the build")),
-            ("Needs input · Fix CI".into(), "repo · dialog open".into())
+            describe(&needs, "Fix CI", Some("fix the build")),
+            ("Needs input · Fix CI".into(), "dialog open".into())
         );
         assert_eq!(
-            describe(&AlertKind::NeedsInput { reason: None }, "Fix CI", "repo", Some("fix the build")).1,
-            "repo · You: fix the build"
+            describe(&AlertKind::NeedsInput { reason: None }, "Fix CI", Some("fix the build")).1,
+            "You: fix the build"
         );
         assert_eq!(
-            describe(&AlertKind::Finished, "Fix CI", "repo", Some("fix the build")),
-            ("Finished · Fix CI".into(), "repo · You: fix the build".into())
+            describe(&AlertKind::Finished, "Fix CI", Some("fix the build")),
+            ("Finished · Fix CI".into(), "You: fix the build".into())
         );
     }
 
     #[test]
     fn notification_quotes_five_words_of_the_last_prompt() {
-        let body = |prompt: Option<&str>| describe(&AlertKind::Finished, "t", "repo", prompt).1;
-        assert_eq!(body(Some("one two three four five six")), "repo · You: one two three four five…");
-        assert_eq!(body(Some("one two three four five")), "repo · You: one two three four five");
-        assert_eq!(body(Some("  a \n b  ")), "repo · You: a b");
-        assert_eq!(body(Some("fix the very long-running-continuous-integration job")), "repo · You: fix the very…");
-        assert_eq!(body(Some("see @/home/alice/Private/Repos/rust_terminal/docs/plan.md")), "repo · You: see…");
+        let body = |prompt: Option<&str>| describe(&AlertKind::Finished, "t", prompt).1;
+        assert_eq!(body(Some("one two three four five six")), "You: one two three four five…");
+        assert_eq!(body(Some("one two three four five")), "You: one two three four five");
+        assert_eq!(body(Some("  a \n b  ")), "You: a b");
+        assert_eq!(body(Some("fix the very long-running-continuous-integration job")), "You: fix the very…");
+        assert_eq!(body(Some("see @/home/alice/Private/Repos/rust_terminal/docs/plan.md")), "You: see…");
         assert_eq!(
             body(Some("/home/alice/Private/Repos/rust_terminal/docs/plan.md")),
-            "repo · You: /home/alice/Private/Repos/rust_terminal/…"
+            "You: /home/alice/Private/Repos/rust_terminal/…"
         );
-        assert_eq!(body(Some("   ")), "repo");
-        assert_eq!(body(None), "repo");
+        assert_eq!(body(Some("   ")), "");
+        assert_eq!(body(None), "");
     }
 
     #[test]

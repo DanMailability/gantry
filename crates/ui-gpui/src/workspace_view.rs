@@ -527,14 +527,8 @@ impl WorkspaceView {
         let sidebar = self.sidebar.read(cx);
         let session = sidebar.sessions().get(&alert.session);
         let title = session.map(|session| session_title(session).to_string()).unwrap_or_default();
-        let project = session.map_or_else(String::new, |session| {
-            let root = sidebar.project_of(&session.cwd);
-            sidebar.project_label(&root).unwrap_or_else(|| {
-                root.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned())
-            })
-        });
         let last_prompt = session.and_then(|session| session.last_prompt.as_deref());
-        let (summary, body) = describe(&alert.kind, &title, &project, last_prompt);
+        let (summary, body) = describe(&alert.kind, &title, last_prompt);
         alerts::deliver(Notice { leaf, summary, body }, channels, settings.alerts.volume, self.clicked.clone());
     }
 
