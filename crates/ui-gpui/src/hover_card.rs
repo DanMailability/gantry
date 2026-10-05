@@ -3,8 +3,12 @@
 
 use app_core::session_tree::Tone;
 use app_core::workspace::DirBadge;
-use gpui::{AnyView, App, Context, FontWeight, IntoElement, Render, Window, div, prelude::*, px, rgb};
+use gpui::{
+    AnyView, App, Context, FontWeight, IntoElement, Pixels, Render, TextRun, Window, black, div, font, prelude::*, px,
+    rgb,
+};
 
+use crate::context_menu;
 use crate::theme::{RADIUS_SMALL, UI_FONT, container_icon, dir_badge, theme};
 
 /// The mark before a title: only tones without a fill need one (the fill already says the rest).
@@ -42,11 +46,44 @@ pub(crate) struct HoverCard {
     pub folder: Option<String>,
 }
 
+/// The width of `text` on one line.
+fn line_width(window: &Window, text: &str, size: Pixels, weight: FontWeight) -> Pixels {
+    let mut font = font(UI_FONT);
+    font.weight = weight;
+    let run =
+        TextRun { len: text.len(), font, color: black(), background_color: None, underline: None, strikethrough: None };
+    window.text_system().shape_line(text.replace('\n', " ").into(), size, &[run], None).width
+}
+
+impl HoverCard {
+    /// The widest line, with the card's padding and border.
+    fn natural_width(&self, window: &Window, ui: impl Fn(f32) -> Pixels) -> Pixels {
+        let rem = window.rem_size();
+        let (small, extra_small) = (rem * 0.875, rem * 0.75);
+        let mut widest = line_width(window, &self.title, small, FontWeight::SEMIBOLD);
+        let lines = self
+            .status
+            .iter()
+            .cloned()
+            .chain(self.dir.iter().map(|badge| format!("Config: {}", badge.name)))
+            .map(|text| (text, small));
+        for (text, size) in lines.chain(self.folder.iter().cloned().map(|text| (text, extra_small))) {
+            widest = widest.max(line_width(window, &text, size, FontWeight::NORMAL));
+        }
+        widest + ui(24.) + px(2.)
+    }
+}
+
 impl Render for HoverCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
+        // A tooltip is measured without a width to wrap at, so text wider than the maximum would wrap when drawn but
+        // keep the height of one line: such a card gets the maximum as its definite width.
+        let max = theme.ui(320.);
+        let wide = self.natural_width(window, |size| theme.ui(size)) > max;
         div()
-            .max_w(theme.ui(320.))
+            .max_w(max)
+            .when(wide, |card| card.w(max))
             .px(theme.ui(12.))
             .py(theme.ui(10.))
             .flex()
@@ -87,8 +124,21 @@ impl Render for HoverCard {
 }
 
 /// A `.tooltip(…)` builder showing `card`.
+///
+/// While a menu is open it shows nothing: GPUI's tooltips ignore occlusion, so the card would be drawn over the menu.
 pub(crate) fn tooltip(card: HoverCard) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_, cx| cx.new(|_| card.clone()).into()
+    move |_, cx| {
+        if context_menu::any_open() { cx.new(|_| NoCard).into() } else { cx.new(|_| card.clone()).into() }
+    }
+}
+
+/// What a tooltip shows while a menu is open.
+struct NoCard;
+
+impl Render for NoCard {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
 }
 
 #[cfg(test)]

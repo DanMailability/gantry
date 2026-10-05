@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use app_core::menus::{MenuAction, MenuEntry, MenuItem, Shortcut};
 use app_core::settings::Settings;
@@ -12,6 +13,14 @@ use gpui::{
 
 use crate::settings_store::shortcut_label;
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
+
+/// How many menus are open.
+static OPEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether any menu is open.
+pub(crate) fn any_open() -> bool {
+    OPEN.load(Ordering::Relaxed) > 0
+}
 
 /// An open menu: its items, where it opened, and the focus handle that takes `Esc`.
 pub(crate) struct OpenMenu {
@@ -31,7 +40,14 @@ pub(crate) struct OpenMenu {
 impl OpenMenu {
     /// A closed-submenu menu at `position`.
     pub fn new(items: Vec<MenuItem>, position: Point<Pixels>, focus: FocusHandle) -> OpenMenu {
+        OPEN.fetch_add(1, Ordering::Relaxed);
         OpenMenu { items, position, focus, sub: Rc::new(Cell::new(None)), sub_bounds: Rc::new(Cell::new(None)) }
+    }
+}
+
+impl Drop for OpenMenu {
+    fn drop(&mut self) {
+        OPEN.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
