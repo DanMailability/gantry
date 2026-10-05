@@ -63,6 +63,13 @@ Or, on any version, remove the quarantine flag instead of steps 2-3:
 xattr -dr com.apple.quarantine /Applications/Gantry.app
 ```
 
+#### Permission prompts
+
+macOS may ask whether Gantry can access files in Desktop, Documents, Downloads, removable volumes or other apps' data.
+Gantry itself does not read those folders: the shells and `claude` it starts do, and macOS attributes their access to
+the app that launched them. Allow it once per folder, or change it later in System Settings > Privacy & Security >
+Files and Folders. Granting Full Disk Access is not needed.
+
 This build has not been tried on a Mac yet.
 
 ### Windows
