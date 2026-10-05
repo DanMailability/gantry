@@ -46,6 +46,12 @@ pub const APP_ID: &str = "io.github.idogrf.Gantry";
 /// Connect to (or start) the daemon, restore the layout, and run until the app quits.
 pub fn run(launch: Launch) {
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        // Without this, the first notification makes macOS ask "Where is use_default?": mac-notification-sys looks up an
+        // app named "use_default" with AppleScript. Must run once, before the first notification.
+        #[cfg(target_os = "macos")]
+        if let Err(err) = notify_rust::set_application(APP_ID) {
+            tracing::warn!("set_application failed: {err}");
+        }
         theme::load_fonts(cx);
         let paths = Paths::for_profile(&current_profile());
         SettingsStore::init(paths.settings_file.clone(), cx);
