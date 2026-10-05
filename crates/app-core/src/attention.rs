@@ -158,17 +158,34 @@ pub fn without_claude_glyph(title: &str) -> &str {
 
 /// Words of the last prompt a notification quotes.
 const PROMPT_WORDS: usize = 5;
+/// Characters of the last prompt a notification quotes, so one long word (a path) cannot fill the line.
+const PROMPT_CHARS: usize = 40;
 
-/// `prompt` collapsed to one line and cut after [`PROMPT_WORDS`] words, with `…` when something was left out.
+/// `prompt` collapsed to one line and cut after [`PROMPT_WORDS`] words or [`PROMPT_CHARS`] characters, at a word
+/// boundary (inside the first word when that alone is too long), with `…` when something was left out.
 fn prompt_snippet(prompt: &str) -> String {
-    let mut words = prompt.split_whitespace();
-    let head: Vec<_> = words.by_ref().take(PROMPT_WORDS).collect();
-    let cut = words.next().is_some();
-    format!("{}{}", head.join(" "), if cut { "…" } else { "" })
+    let mut snippet = String::new();
+    let mut words = prompt.split_whitespace().enumerate();
+    for (index, word) in words.by_ref() {
+        let room = PROMPT_CHARS.saturating_sub(snippet.chars().count() + usize::from(index > 0));
+        if index == PROMPT_WORDS || (index > 0 && word.chars().count() > room) {
+            return format!("{snippet}…");
+        }
+        if index > 0 {
+            snippet.push(' ');
+        }
+        if word.chars().count() > room {
+            snippet.extend(word.chars().take(room));
+            return format!("{snippet}…");
+        }
+        snippet.push_str(word);
+    }
+    snippet
 }
 
 /// Notification summary and body for `kind` on the session titled `title` in `project`. The body is the project, then
-/// what Claude waits for, or else the start of the session's `last_prompt`.
+/// what Claude waits for, or else the start of the session's `last_prompt`, on one line (separated by `·`: some
+/// desktops show a notification body on a single line).
 pub fn describe(kind: &AlertKind, title: &str, project: &str, last_prompt: Option<&str>) -> (String, String) {
     let (status, reason) = match kind {
         AlertKind::NeedsInput { reason } => ("Needs input", reason.as_deref()),
@@ -180,7 +197,7 @@ pub fn describe(kind: &AlertKind, title: &str, project: &str, last_prompt: Optio
     });
     let lines: Vec<_> =
         [Some(project.to_string()), detail].into_iter().flatten().filter(|line| !line.is_empty()).collect();
-    (format!("{status} · {title}"), lines.join("\n"))
+    (format!("{status} · {title}"), lines.join(" · "))
 }
 
 #[cfg(test)]
@@ -309,24 +326,30 @@ mod tests {
         let needs = AlertKind::NeedsInput { reason: Some("dialog open".into()) };
         assert_eq!(
             describe(&needs, "Fix CI", "repo", Some("fix the build")),
-            ("Needs input · Fix CI".into(), "repo\ndialog open".into())
+            ("Needs input · Fix CI".into(), "repo · dialog open".into())
         );
         assert_eq!(
             describe(&AlertKind::NeedsInput { reason: None }, "Fix CI", "repo", Some("fix the build")).1,
-            "repo\nYou: fix the build"
+            "repo · You: fix the build"
         );
         assert_eq!(
             describe(&AlertKind::Finished, "Fix CI", "repo", Some("fix the build")),
-            ("Finished · Fix CI".into(), "repo\nYou: fix the build".into())
+            ("Finished · Fix CI".into(), "repo · You: fix the build".into())
         );
     }
 
     #[test]
     fn notification_quotes_five_words_of_the_last_prompt() {
         let body = |prompt: Option<&str>| describe(&AlertKind::Finished, "t", "repo", prompt).1;
-        assert_eq!(body(Some("one two three four five six")), "repo\nYou: one two three four five…");
-        assert_eq!(body(Some("one two three four five")), "repo\nYou: one two three four five");
-        assert_eq!(body(Some("  a \n b  ")), "repo\nYou: a b");
+        assert_eq!(body(Some("one two three four five six")), "repo · You: one two three four five…");
+        assert_eq!(body(Some("one two three four five")), "repo · You: one two three four five");
+        assert_eq!(body(Some("  a \n b  ")), "repo · You: a b");
+        assert_eq!(body(Some("fix the very long-running-continuous-integration job")), "repo · You: fix the very…");
+        assert_eq!(body(Some("see @/home/alice/Private/Repos/rust_terminal/docs/plan.md")), "repo · You: see…");
+        assert_eq!(
+            body(Some("/home/alice/Private/Repos/rust_terminal/docs/plan.md")),
+            "repo · You: /home/alice/Private/Repos/rust_terminal/…"
+        );
         assert_eq!(body(Some("   ")), "repo");
         assert_eq!(body(None), "repo");
     }
