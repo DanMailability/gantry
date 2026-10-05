@@ -40,7 +40,7 @@ use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
-use crate::sidebar_view::{SidebarEvent, SidebarView};
+use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
     RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme,
@@ -1034,6 +1034,16 @@ impl WorkspaceView {
                 self.sync_unseen(cx);
                 cx.notify();
             }
+            MenuAction::RenamePane(leaf) => {
+                let name = self.workspace.leaf_name(leaf).unwrap_or_default().to_string();
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.start_rename(RenameTarget::Pane(leaf), &name, window, cx));
+            }
+            MenuAction::RenameTab(index) => {
+                let name = self.workspace.tab_name(index).unwrap_or_default().to_string();
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.start_rename(RenameTarget::Tab(index), &name, window, cx));
+            }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
             MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, None),
@@ -1237,6 +1247,16 @@ impl WorkspaceView {
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
             SidebarEvent::Menu(action) => self.run_menu_action(action, window, cx),
+            SidebarEvent::Rename { target, name } => {
+                let renamed = match target {
+                    RenameTarget::Pane(leaf) => self.workspace.rename_leaf(leaf, &name),
+                    RenameTarget::Tab(index) => self.workspace.rename_tab(index, &name),
+                };
+                if renamed {
+                    self.save(cx);
+                    cx.notify();
+                }
+            }
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
             SidebarEvent::New { claude } => self.show_launcher(claude, window, cx),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
@@ -1898,7 +1918,7 @@ impl WorkspaceView {
             .children(tab.root.layout(Rect::UNIT).into_iter().enumerate().filter_map(|(index, (leaf, rect))| {
                 let view = self.slots.get(&leaf)?.view.clone();
                 let focused = leaf == tab.focused;
-                let title = view.read(cx).title();
+                let title = self.workspace.leaf_name(leaf).map_or_else(|| view.read(cx).title(), String::from);
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen.contains_key(&leaf);

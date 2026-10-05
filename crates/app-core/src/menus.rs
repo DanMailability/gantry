@@ -56,6 +56,10 @@ pub enum MenuAction {
     MarkUnread(NodeId),
     /// Remove a pane's unread mark (its tab and row go back to the session's own color).
     MarkRead(NodeId),
+    /// Rename a shell pane.
+    RenamePane(NodeId),
+    /// Rename a tab.
+    RenameTab(usize),
     /// Close one pane.
     ClosePane(NodeId),
     /// Close every pane of a tab.
@@ -303,6 +307,7 @@ pub fn tab_menu(
     items.push(MenuItem::Separator);
     items.extend(folder_items(dir, vscode));
     items.push(MenuItem::Separator);
+    items.push(entry("Rename…", MenuAction::RenameTab(tab)));
     items.push(with_shortcut("Close tab", Shortcut::Close, MenuAction::CloseTab(tab)));
     items
 }
@@ -393,6 +398,9 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     items.push(entry(label, MenuAction::NewHere { dir: pane.cwd.clone(), claude }));
                     if claude && pane.container.is_none() {
                         items.extend(claude_with(&pane.cwd, context));
+                    }
+                    if !claude {
+                        items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf)));
                     }
                 }
             }
@@ -555,7 +563,17 @@ mod tests {
         let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default(), None);
         assert_eq!(
             labels(&items),
-            ["Split right", "Split down", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
+            [
+                "Split right",
+                "Split down",
+                "│",
+                "Copy folder path",
+                "Open folder",
+                "Open in VS Code",
+                "│",
+                "Rename…",
+                "Close tab"
+            ]
         );
         let MenuItem::Entry(first) = &items[0] else { panic!() };
         assert_eq!(
@@ -564,6 +582,25 @@ mod tests {
         );
         let MenuItem::Entry(last) = items.last().unwrap() else { panic!() };
         assert_eq!(last.action, MenuAction::CloseTab(2));
+    }
+
+    #[test]
+    fn only_shell_panes_and_tabs_offer_rename() {
+        let rename = |items: &[MenuItem]| {
+            items.iter().find_map(|item| match item {
+                MenuItem::Entry(entry) if entry.label == "Rename…" => Some(entry.action.clone()),
+                _ => None,
+            })
+        };
+        let menus_row_menu = |row: &Row| row_menu(row, ALONE, &MenuContext::default()).unwrap();
+        let shell = menus_row_menu(&pane_row(false, false));
+        assert_eq!(rename(&shell), Some(MenuAction::RenamePane(7)));
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, false))), None);
+        assert_eq!(rename(&menus_row_menu(&pane_row(true, true))), None);
+        let running = SessionState::Managed { pane: 1 };
+        assert_eq!(rename(&menus_row_menu(&session_row(running, Tone::Idle, Some(4)))), None);
+        let items = tab_menu(3, Path::new("/r/app"), vec![], &MenuContext::default(), None);
+        assert_eq!(rename(&items), Some(MenuAction::RenameTab(3)));
     }
 
     #[test]
@@ -580,6 +617,7 @@ mod tests {
                 "Open folder",
                 "Open in VS Code",
                 "│",
+                "Rename…",
                 "Close tab"
             ]
         );
@@ -697,7 +735,7 @@ mod tests {
         let shell = row_menu(&pane_row(false, false), ALONE, &MenuContext::default()).unwrap();
         assert_eq!(
             labels(&shell),
-            ["New shell here", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
+            ["New shell here", "Rename…", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
         );
         let MenuItem::Entry(new) = &shell[0] else { panic!() };
         assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false });
