@@ -17,8 +17,8 @@ use app_core::text_field::TextField;
 use app_core::theme_colors::ToneColors;
 use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, div,
-    prelude::*, px, rgb, rgba, uniform_list,
+    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, deferred,
+    div, prelude::*, px, rgb, rgba, uniform_list,
 };
 use protocol::message::SessionInfo;
 
@@ -564,21 +564,17 @@ impl SidebarView {
         let menu_key = key.clone();
         let (middle_down, middle_up) = (key.clone(), key.clone());
         let theme = theme(cx).clone();
-        // A selected row's fill is pulled in from its ring (which sits 1 px above and below the fill's usual place).
-        let inset = if selected { RING + RING_GAP } else { 0. };
-        let radius = RADIUS - inset;
         let base = div()
             .id(index)
             .flex_1()
             .min_h_0()
             .w_full()
-            .px(theme.ui(10. + inset))
-            .py(px(2. + inset - 1.))
+            .px(theme.ui(10.))
+            .py(px(1.))
             .flex()
             .flex_row()
             .items_center()
             .text_sm()
-            .overflow_hidden()
             .whitespace_nowrap()
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.focus_handle.focus(window, cx);
@@ -622,16 +618,17 @@ impl SidebarView {
                     }
                 }),
             );
-        // The visible part of a row: a rounded pill; when selected it is pulled in from the ring drawn around it.
+        // The visible part of a row: a rounded pill; the selection ring is drawn outside it.
         let pill = |fill: Option<u32>| {
             div()
                 .size_full()
-                .px(theme.ui(12. - inset))
+                .px(theme.ui(12.))
+                .overflow_hidden()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .rounded(px(radius))
+                .rounded(px(RADIUS))
                 .cursor_pointer()
                 .map(|pill| match fill {
                     Some(fill) => pill.bg(rgb(fill)),
@@ -641,7 +638,7 @@ impl SidebarView {
         // The row's project color, as a side line inside the pill's left edge.
         let line = row.project.as_ref().and_then(|root| theme.project(root));
         let lined = |pill: gpui::Div| match line {
-            Some(color) => pill.relative().pl(theme.ui(18. - inset)).child(side_line(color, &theme)),
+            Some(color) => pill.relative().pl(theme.ui(18.)).child(side_line(color, &theme)),
             None => pill,
         };
         let title = |text: String| div().flex_1().min_w_0().truncate().child(text);
@@ -650,7 +647,7 @@ impl SidebarView {
         let guide = row
             .in_tab
             .then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
-        let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32. + inset))).children(guide);
+        let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32.))).children(guide);
         // A row listed under another project's tab heading names its own project.
         let project = || {
             row.project_label
@@ -693,7 +690,7 @@ impl SidebarView {
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
                         .when(sweeping(*tone, self.animate, true), |pill| {
-                            pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme))
+                            pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme))
                         })
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
@@ -739,7 +736,7 @@ impl SidebarView {
                 base.tooltip(hover_card::tooltip(card)).child(
                     lined(pill(colors.fill))
                         .when(sweeping(*tone, self.animate, true), |pill| {
-                            pill.relative().child(working_sweep(("sweep-row", index), px(radius), &theme))
+                            pill.relative().child(working_sweep(("sweep-row", index), px(RADIUS), &theme))
                         })
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
@@ -765,16 +762,18 @@ impl SidebarView {
             }
         };
         content.when(selected, |content| {
+            // Outside the fill by the ring and its gap; deferred so it paints over the neighbouring rows.
+            let out = RING + RING_GAP;
             let ring = div()
                 .absolute()
-                .left(theme.ui(10.))
-                .right(theme.ui(10.))
-                .top(px(1.))
-                .bottom(px(1.))
-                .rounded(px(RADIUS))
+                .left(theme.ui(10. - out))
+                .right(theme.ui(10. - out))
+                .top(px(1. - out))
+                .bottom(px(1. - out))
+                .rounded(px(RADIUS + RING_GAP))
                 .border_2()
                 .border_color(rgb(theme.selection()));
-            content.relative().child(ring)
+            content.relative().child(deferred(ring))
         })
     }
 }
@@ -878,77 +877,71 @@ impl Render for SidebarView {
                     )),
             )
             .when(self.settings_open, |this| {
-                let inset = if self.settings_active { RING + RING_GAP } else { 0. };
+                let out = RING + RING_GAP;
                 let ring = self.settings_active.then(|| {
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left_0()
-                        .right_0()
-                        .rounded(px(RADIUS))
-                        .border_2()
-                        .border_color(rgb(theme.selection()))
+                    deferred(
+                        div()
+                            .absolute()
+                            .top(px(-out))
+                            .bottom(px(-out))
+                            .left(px(-out))
+                            .right(px(-out))
+                            .rounded(px(RADIUS + RING_GAP))
+                            .border_2()
+                            .border_color(rgb(theme.selection())),
+                    )
                 });
                 this.child(
-                    div()
-                        .relative()
-                        .h(theme.ui(ROW_HEIGHT - 4.))
-                        .flex_none()
-                        .mx_3()
-                        .mb_1()
-                        .p(theme.ui(inset))
-                        .children(ring)
-                        .child(
-                            div()
-                                .id("settings-row")
-                                .size_full()
-                                .px(theme.ui(12. - inset))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_sm()
-                                .rounded(px(RADIUS - inset))
-                                .bg(rgb(theme.tokens.text))
-                                .text_color(rgb(theme.tokens.ground))
-                                .cursor_pointer()
-                                .child("⚙")
-                                .child(div().flex_1().min_w_0().truncate().child("Settings"))
-                                .child(
-                                    div()
-                                        .id("close-settings")
-                                        .flex_none()
-                                        .size(theme.ui(20.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_full()
-                                        .text_xs()
-                                        .hover(|style| style.bg(rgba(0x00000026)))
-                                        .child("×")
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.stop_propagation();
-                                            cx.emit(SidebarEvent::CloseSettings);
-                                        })),
-                                )
-                                .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings)))
-                                .on_mouse_down(
-                                    MouseButton::Middle,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.middle_pressed = Some(None);
+                    div().relative().h(theme.ui(ROW_HEIGHT - 4.)).flex_none().mx_3().mb_1().children(ring).child(
+                        div()
+                            .id("settings-row")
+                            .size_full()
+                            .px(theme.ui(12.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .rounded(px(RADIUS))
+                            .bg(rgb(theme.tokens.text))
+                            .text_color(rgb(theme.tokens.ground))
+                            .cursor_pointer()
+                            .child("⚙")
+                            .child(div().flex_1().min_w_0().truncate().child("Settings"))
+                            .child(
+                                div()
+                                    .id("close-settings")
+                                    .flex_none()
+                                    .size(theme.ui(20.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .hover(|style| style.bg(rgba(0x00000026)))
+                                    .child("×")
+                                    .on_click(cx.listener(|_, _, _, cx| {
                                         cx.stop_propagation();
-                                    }),
-                                )
-                                .on_mouse_up(
-                                    MouseButton::Middle,
-                                    cx.listener(|this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        if this.middle_pressed.take() == Some(None) {
-                                            cx.emit(SidebarEvent::CloseSettings);
-                                        }
-                                    }),
-                                ),
-                        ),
+                                        cx.emit(SidebarEvent::CloseSettings);
+                                    })),
+                            )
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowSettings)))
+                            .on_mouse_down(
+                                MouseButton::Middle,
+                                cx.listener(|this, _, _, cx| {
+                                    this.middle_pressed = Some(None);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Middle,
+                                cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if this.middle_pressed.take() == Some(None) {
+                                        cx.emit(SidebarEvent::CloseSettings);
+                                    }
+                                }),
+                            ),
+                    ),
                 )
             })
             .child(
