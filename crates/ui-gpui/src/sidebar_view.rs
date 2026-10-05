@@ -8,17 +8,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
-    self, Activation, ActiveInput, Arrivals, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind, TabEntry,
-    Tone, display_path, session_title,
+    self, Activation, ActiveInput, Arrivals, GroupEdges, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind,
+    TabEntry, Tone, display_path, session_title,
 };
 use app_core::sessions::SessionStore;
 use app_core::split_tree::NodeId;
 use app_core::text_field::TextField;
 use app_core::theme_colors::ToneColors;
 use gpui::{
-    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task, UniformListScrollHandle, Window, deferred,
-    div, prelude::*, px, rgb, rgba, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
+    UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, rgb, rgba, uniform_list,
 };
 use protocol::message::SessionInfo;
 
@@ -560,7 +560,6 @@ impl SidebarView {
     fn render_row_content(&self, index: usize, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
         let row = &self.rows[index];
         let key = row.key();
-        let selected = self.selected.as_ref() == Some(&key);
         let menu_key = key.clone();
         let (middle_down, middle_up) = (key.clone(), key.clone());
         let theme = theme(cx).clone();
@@ -654,7 +653,7 @@ impl SidebarView {
                 .clone()
                 .map(|label| div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(label))
         };
-        let content = match &row.kind {
+        match &row.kind {
             RowKind::Project { path, label, expanded } => {
                 let color = theme.project(path);
                 let dragged = DraggedProject { root: path.clone(), label: label.clone() };
@@ -755,26 +754,61 @@ impl SidebarView {
                     .child(aside(format!("{panes} panes"), theme.tokens.muted)),
             ),
             RowKind::Detail { text, .. } => base.child(
-                div().pl(theme.ui(34.)).text_xs().italic().text_color(rgb(theme.tokens.muted)).child(text.clone()),
+                div()
+                    .pl(theme.ui(34.))
+                    .overflow_hidden()
+                    .text_xs()
+                    .italic()
+                    .text_color(rgb(theme.tokens.muted))
+                    .child(text.clone()),
             ),
             RowKind::TakeOver { .. } => {
                 base.child(pill(None).pl(theme.ui(32.)).text_color(rgb(theme.tokens.accent)).child("Take over…"))
             }
+        }
+    }
+}
+
+/// The selection ring, drawn by the list after all rows (inside its clip) so it passes over the neighbouring rows.
+struct SelectionRing {
+    /// The selected row, its group edges and the ring color.
+    row: Option<(usize, GroupEdges, u32)>,
+    /// The theme's UI scale, for the paddings the row itself uses.
+    theme: Theme,
+}
+
+impl UniformListDecoration for SelectionRing {
+    fn compute(
+        &self,
+        visible_range: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _scroll_offset: Point<Pixels>,
+        item_height: Pixels,
+        _item_count: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> AnyElement {
+        let root = div().w(bounds.size.width).h(bounds.size.height);
+        let Some((index, edges, color)) = self.row.filter(|(index, ..)| visible_range.contains(index)) else {
+            return root.into_any_element();
         };
-        content.when(selected, |content| {
-            // Outside the fill by the ring and its gap; deferred so it paints over the neighbouring rows.
-            let out = RING + RING_GAP;
-            let ring = div()
-                .absolute()
-                .left(theme.ui(10. - out))
-                .right(theme.ui(10. - out))
-                .top(px(1. - out))
-                .bottom(px(1. - out))
-                .rounded(px(RADIUS + RING_GAP))
-                .border_2()
-                .border_color(rgb(theme.selection()));
-            content.relative().child(deferred(ring))
-        })
+        let theme = &self.theme;
+        let out = px(RING + RING_GAP);
+        // The fill sits inside the row's side padding, the group's 1 px side border and its own padding, and under
+        // the group's top gap and top/bottom border.
+        let top = item_height * index + if edges.first { theme.ui(8.) + px(1.) } else { px(0.) };
+        let bottom = item_height * (index + 1) - if edges.last { px(1.) } else { px(0.) };
+        let side = theme.ui(6.) + px(1.) + theme.ui(10.) - out;
+        let ring = div()
+            .absolute()
+            .left(side)
+            .right(side)
+            .top(top + px(1.) - out)
+            .h(bottom - top - px(2.) + out * 2.)
+            .rounded(px(RADIUS) + out)
+            .border_2()
+            .border_color(rgb(color));
+        root.child(ring).into_any_element()
     }
 }
 
@@ -879,17 +913,15 @@ impl Render for SidebarView {
             .when(self.settings_open, |this| {
                 let out = RING + RING_GAP;
                 let ring = self.settings_active.then(|| {
-                    deferred(
-                        div()
-                            .absolute()
-                            .top(px(-out))
-                            .bottom(px(-out))
-                            .left(px(-out))
-                            .right(px(-out))
-                            .rounded(px(RADIUS + RING_GAP))
-                            .border_2()
-                            .border_color(rgb(theme.selection())),
-                    )
+                    div()
+                        .absolute()
+                        .top(px(-out))
+                        .bottom(px(-out))
+                        .left(px(-out))
+                        .right(px(-out))
+                        .rounded(px(RADIUS + out))
+                        .border_2()
+                        .border_color(rgb(theme.selection()))
                 });
                 this.child(
                     div().relative().h(theme.ui(ROW_HEIGHT - 4.)).flex_none().mx_3().mb_1().children(ring).child(
@@ -962,7 +994,15 @@ impl Render for SidebarView {
                                 range.map(|index| this.render_row(index, cx)).collect::<Vec<_>>()
                             }),
                         )
+                        .with_decoration(SelectionRing {
+                            row: self
+                                .selected_index()
+                                .map(|index| (index, session_tree::group_edges(&self.rows, index), theme.selection())),
+                            theme: theme.clone(),
+                        })
                         .track_scroll(&self.scroll)
+                        // Room under the last row for its ring.
+                        .pb(px(RING + RING_GAP))
                         .flex_1(),
                     ),
             )
