@@ -156,15 +156,31 @@ pub fn without_claude_glyph(title: &str) -> &str {
     title.strip_prefix(['◐', '◑', '✳']).map_or(title, str::trim_start)
 }
 
-/// Notification summary and body for `kind` on the session titled `title` in `dir` (already shortened for display).
-pub fn describe(kind: &AlertKind, title: &str, dir: &str) -> (String, String) {
-    match kind {
-        AlertKind::NeedsInput { reason: Some(reason) } => {
-            (format!("Needs input: {title}"), format!("{reason} · {dir}"))
-        }
-        AlertKind::NeedsInput { reason: None } => (format!("Needs input: {title}"), dir.to_string()),
-        AlertKind::Finished => (format!("Finished: {title}"), dir.to_string()),
-    }
+/// Words of the last prompt a notification quotes.
+const PROMPT_WORDS: usize = 5;
+
+/// `prompt` collapsed to one line and cut after [`PROMPT_WORDS`] words, with `…` when something was left out.
+fn prompt_snippet(prompt: &str) -> String {
+    let mut words = prompt.split_whitespace();
+    let head: Vec<_> = words.by_ref().take(PROMPT_WORDS).collect();
+    let cut = words.next().is_some();
+    format!("{}{}", head.join(" "), if cut { "…" } else { "" })
+}
+
+/// Notification summary and body for `kind` on the session titled `title` in `project`. The body is the project, then
+/// what Claude waits for, or else the start of the session's `last_prompt`.
+pub fn describe(kind: &AlertKind, title: &str, project: &str, last_prompt: Option<&str>) -> (String, String) {
+    let (status, reason) = match kind {
+        AlertKind::NeedsInput { reason } => ("Needs input", reason.as_deref()),
+        AlertKind::Finished => ("Finished", None),
+    };
+    let detail = reason.map(str::to_string).or_else(|| {
+        let snippet = prompt_snippet(last_prompt?);
+        (!snippet.is_empty()).then(|| format!("You: {snippet}"))
+    });
+    let lines: Vec<_> =
+        [Some(project.to_string()), detail].into_iter().flatten().filter(|line| !line.is_empty()).collect();
+    (format!("{status} · {title}"), lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -289,11 +305,30 @@ mod tests {
     }
 
     #[test]
-    fn notification_text_names_the_session_and_why() {
+    fn notification_text_names_the_session_the_project_and_why() {
         let needs = AlertKind::NeedsInput { reason: Some("dialog open".into()) };
-        assert_eq!(describe(&needs, "Fix CI", "~/repo"), ("Needs input: Fix CI".into(), "dialog open · ~/repo".into()));
-        assert_eq!(describe(&AlertKind::NeedsInput { reason: None }, "Fix CI", "~/repo").1, "~/repo");
-        assert_eq!(describe(&AlertKind::Finished, "Fix CI", "~/repo"), ("Finished: Fix CI".into(), "~/repo".into()));
+        assert_eq!(
+            describe(&needs, "Fix CI", "repo", Some("fix the build")),
+            ("Needs input · Fix CI".into(), "repo\ndialog open".into())
+        );
+        assert_eq!(
+            describe(&AlertKind::NeedsInput { reason: None }, "Fix CI", "repo", Some("fix the build")).1,
+            "repo\nYou: fix the build"
+        );
+        assert_eq!(
+            describe(&AlertKind::Finished, "Fix CI", "repo", Some("fix the build")),
+            ("Finished · Fix CI".into(), "repo\nYou: fix the build".into())
+        );
+    }
+
+    #[test]
+    fn notification_quotes_five_words_of_the_last_prompt() {
+        let body = |prompt: Option<&str>| describe(&AlertKind::Finished, "t", "repo", prompt).1;
+        assert_eq!(body(Some("one two three four five six")), "repo\nYou: one two three four five…");
+        assert_eq!(body(Some("one two three four five")), "repo\nYou: one two three four five");
+        assert_eq!(body(Some("  a \n b  ")), "repo\nYou: a b");
+        assert_eq!(body(Some("   ")), "repo");
+        assert_eq!(body(None), "repo");
     }
 
     #[test]
