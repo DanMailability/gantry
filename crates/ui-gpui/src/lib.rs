@@ -13,6 +13,7 @@ mod setup_view;
 pub mod sidebar_view;
 pub mod terminal_view;
 mod theme;
+mod update_watch;
 mod window_frame;
 pub mod workspace_view;
 

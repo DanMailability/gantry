@@ -46,6 +46,7 @@ use crate::theme::{
     RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme,
     working_sweep,
 };
+use crate::update_watch::DaemonBuild;
 use crate::window_frame;
 
 /// Height of the title bar.
@@ -237,7 +238,8 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let Connection { client, events, claude_dir: daemon_dir, .. } = connection;
+        let Connection { client, events, claude_dir: daemon_dir, daemon_version, daemon_commit, .. } = connection;
+        cx.set_global(DaemonBuild { version: daemon_version.clone(), commit: daemon_commit });
         let events_task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 let batch = batch_events(first, &events, MAX_BATCH_BYTES);
