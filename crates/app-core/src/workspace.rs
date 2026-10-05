@@ -444,6 +444,9 @@ impl Default for SidebarState {
     }
 }
 
+/// Most panes one tab may hold; further splits are refused.
+pub const MAX_PANES_PER_TAB: usize = 4;
+
 /// All tabs of the window.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -520,8 +523,18 @@ impl Workspace {
         saved
     }
 
-    /// Split the focused leaf, putting `launch` second, and focus it. `None` when there are no tabs.
+    /// Whether the active tab can take another pane: it is not the Settings tab and holds fewer than
+    /// `MAX_PANES_PER_TAB` panes.
+    pub fn can_split(&self) -> bool {
+        self.tabs.get(self.active).is_some_and(|tab| !tab.settings && tab.root.leaves().len() < MAX_PANES_PER_TAB)
+    }
+
+    /// Split the focused leaf, putting `launch` second, and focus it. `None` when there are no tabs or the tab is
+    /// full.
     pub fn split(&mut self, axis: Axis, launch: PaneLaunch) -> Option<NodeId> {
+        if !self.can_split() {
+            return None;
+        }
         let target = self.focused()?;
         let (split_id, leaf) = (self.alloc(), self.alloc());
         let tab = &mut self.tabs[self.active];
@@ -1715,5 +1728,41 @@ mod tests {
         let launch = PaneLaunch::claude_with("/r".into(), &dirs.dirs[1], None, None);
         let request = launch.request(None, 80, 24, 2_000);
         assert_eq!((request.claude, request.scrollback, request.env.len()), (true, Some(2_000), 1));
+    }
+
+    #[test]
+    fn split_stops_at_four_panes_per_tab() {
+        let mut ws = Workspace::default();
+        ws.new_tab(PaneLaunch::claude("/repo".into()));
+        for _ in 0..3 {
+            assert!(ws.can_split());
+            assert!(ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into())).is_some());
+        }
+        assert!(!ws.can_split());
+        assert_eq!(ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into())), None);
+        assert_eq!(ws.leaves.len(), 4);
+    }
+
+    #[test]
+    fn closing_a_pane_allows_splitting_again() {
+        let mut ws = Workspace::default();
+        ws.new_tab(PaneLaunch::claude("/repo".into()));
+        for _ in 0..3 {
+            ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into()));
+        }
+        let last = ws.focused().unwrap();
+        ws.close(last);
+        assert!(ws.can_split());
+    }
+
+    #[test]
+    fn the_limit_is_per_tab() {
+        let mut ws = Workspace::default();
+        ws.new_tab(PaneLaunch::claude("/repo".into()));
+        for _ in 0..3 {
+            ws.split(Axis::Vertical, PaneLaunch::claude("/repo".into()));
+        }
+        ws.new_tab(PaneLaunch::claude("/repo".into()));
+        assert!(ws.can_split());
     }
 }
