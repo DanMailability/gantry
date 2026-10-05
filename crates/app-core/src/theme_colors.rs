@@ -36,6 +36,8 @@ pub struct Tokens {
     pub on_accent: u32,
     /// Inside a pane: the terminal's default background.
     pub terminal: u32,
+    /// Destructive controls: the pane close button.
+    pub danger: u32,
 }
 
 /// Colors of a session row, tab or pane header in a given tone.
@@ -59,6 +61,7 @@ const MIST: Tokens = Tokens {
     accent: 0x9ecbff,
     on_accent: 0x0f2440,
     terminal: 0x141821,
+    danger: 0xe06c75,
 };
 
 const MIST_LIGHT: Tokens = Tokens {
@@ -71,6 +74,7 @@ const MIST_LIGHT: Tokens = Tokens {
     accent: 0x2f74c4,
     on_accent: 0xffffff,
     terminal: 0xf8f9fc,
+    danger: 0xc0392b,
 };
 
 /// The app colors of `preset`.

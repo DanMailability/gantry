@@ -13,6 +13,9 @@ pub(crate) const SPLIT_RIGHT_ICON: &str = "icons/split-right.svg";
 /// The split down button's icon (a window with its bottom half filled).
 pub(crate) const SPLIT_DOWN_ICON: &str = "icons/split-down.svg";
 
+/// The close pane button's icon (an X).
+pub(crate) const CLOSE_ICON: &str = "icons/close.svg";
+
 /// The last prompt card's icon (a chat bubble), drawn by `workspace_view::prompt_card`.
 pub(crate) const PROMPT_ICON: &str = "icons/prompt.svg";
 
@@ -28,6 +31,7 @@ impl AssetSource for Assets {
             CONTAINER_ICON => Some(include_bytes!("../assets/icons/container.svg")),
             SPLIT_RIGHT_ICON => Some(include_bytes!("../assets/icons/split-right.svg")),
             SPLIT_DOWN_ICON => Some(include_bytes!("../assets/icons/split-down.svg")),
+            CLOSE_ICON => Some(include_bytes!("../assets/icons/close.svg")),
             PROMPT_ICON => Some(include_bytes!("../assets/icons/prompt.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
             _ => None,
@@ -40,6 +44,7 @@ impl AssetSource for Assets {
             CONTAINER_ICON.into(),
             SPLIT_RIGHT_ICON.into(),
             SPLIT_DOWN_ICON.into(),
+            CLOSE_ICON.into(),
             PROMPT_ICON.into(),
             LOGO.into(),
         ])
@@ -52,7 +57,7 @@ mod tests {
 
     #[test]
     fn the_icons_are_embedded_and_nothing_else_is() {
-        for icon in [CONTAINER_ICON, SPLIT_RIGHT_ICON, SPLIT_DOWN_ICON, PROMPT_ICON] {
+        for icon in [CONTAINER_ICON, SPLIT_RIGHT_ICON, SPLIT_DOWN_ICON, CLOSE_ICON, PROMPT_ICON] {
             let bytes = Assets.load(icon).unwrap().expect("embedded");
             assert!(std::str::from_utf8(&bytes).unwrap().starts_with("<svg"), "{icon}");
         }

@@ -12,7 +12,7 @@ use app_core::layout_store;
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, mix, terminal_palette};
-use app_core::workspace::{ClaudeDirs, DirBadge, PaneLaunch, Rerun, Restored, Workspace};
+use app_core::workspace::{ClaudeDirs, DirBadge, MAX_PANES_PER_TAB, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use gpui::{
@@ -32,7 +32,7 @@ use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
-use crate::assets::{LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
+use crate::assets::{CLOSE_ICON, LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
@@ -668,7 +668,7 @@ impl WorkspaceView {
         match outcome {
             TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
                 Some(TakeOverTarget::NewPane { cwd, split, container }) => {
-                    let axis = split.then_some(Axis::Horizontal);
+                    let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
                     let launch = self.resume_launch(&session, cwd, container, cx);
                     self.open_launch(launch, axis, None, window, cx);
                 }
@@ -735,7 +735,7 @@ impl WorkspaceView {
     /// Open a new Claude or shell pane — as a new tab, or splitting the focused pane along `axis` —
     /// in the focused pane's current directory.
     fn open(&mut self, claude: bool, axis: Option<Axis>) {
-        if axis.is_some() && self.settings_active() {
+        if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
@@ -872,7 +872,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if axis.is_some() && self.settings_active() {
+        if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
         let leaf = match axis.and_then(|axis| self.workspace.split(axis, launch.clone())) {
@@ -1147,12 +1147,14 @@ impl WorkspaceView {
             )
         });
         let group = format!("pane-card-{index}");
+        let can_split = self.workspace.can_split();
         let button = |axis: Axis, label: &'static str, shortcut: &'static str, icon: &'static str| {
             let platform = Platform::current();
             let title = match shortcuts::current(shortcut, &settings.shortcuts, platform) {
                 Some(keystroke) => format!("{label} ({})", shortcuts::label(Some(&keystroke), platform)),
                 None => label.to_string(),
             };
+            let title = if can_split { title } else { format!("{title} ({MAX_PANES_PER_TAB} panes max)") };
             let card = HoverCard { title, status: None, dir: None, container: false, folder: None };
             div()
                 .id((label, index))
@@ -1162,20 +1164,34 @@ impl WorkspaceView {
                 .items_center()
                 .justify_center()
                 .rounded(px(RADIUS_SMALL - 2.))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                .when(can_split, |button| button.cursor_pointer().hover(|style| style.bg(rgb(theme.tokens.raised))))
                 .tooltip(hover_card::tooltip(card))
-                .child(svg().path(icon).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)))
+                .child(svg().path(icon).size(theme.ui(14.)).text_color(rgb(theme.tokens.muted)).opacity(if can_split {
+                    1.
+                } else {
+                    0.35
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        this.open_pane_menu(leaf, axis, event.position + gpui::point(px(0.), px(14.)), window, cx);
+                        if can_split {
+                            this.open_pane_menu(leaf, axis, event.position + gpui::point(px(0.), px(14.)), window, cx);
+                        }
                         // Keep focus on the popup: the workspace's tracked focus must not take it back.
                         window.prevent_default();
                         cx.stop_propagation();
                     }),
                 )
         };
+        let close_title = {
+            let platform = Platform::current();
+            match shortcuts::current("closePane", &settings.shortcuts, platform) {
+                Some(keystroke) => format!("Close pane ({})", shortcuts::label(Some(&keystroke), platform)),
+                None => "Close pane".to_string(),
+            }
+        };
+        let close_card = HoverCard { title: close_title, status: None, dir: None, container: false, folder: None };
+        let danger = theme.tokens.danger;
         div()
             .absolute()
             .top(px(2.))
@@ -1184,12 +1200,35 @@ impl WorkspaceView {
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(RADIUS_SMALL))
-            // 70 % of the terminal color behind both buttons, so they read over text.
+            // 70 % of the terminal color behind all buttons, so they read over text.
             .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))
             .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
             .child(button(Axis::Vertical, "Split down", "splitDownClaude", SPLIT_DOWN_ICON))
+            .child(div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center())
+            .child(
+                div()
+                    .id(("Close pane", index))
+                    .flex_none()
+                    .size(theme.ui(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_SMALL - 2.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgba((danger << 8) | 0x24)))
+                    .tooltip(hover_card::tooltip(close_card))
+                    .child(svg().path(CLOSE_ICON).size(theme.ui(14.)).text_color(rgba((danger << 8) | 0xc7)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            this.confirm_close(vec![leaf], window, cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
     }
 
     /// Open the Claude / Terminal popup of pane `leaf`'s split button at `position`.
@@ -1263,7 +1302,7 @@ impl WorkspaceView {
                 }
             }
             None => {
-                let axis = split.then_some(Axis::Horizontal);
+                let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
                 let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
                 match place {
                     Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
