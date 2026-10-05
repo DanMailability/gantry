@@ -233,6 +233,7 @@ impl WorkspaceView {
         restored: Restored,
         layout_file: PathBuf,
         default_cwd: PathBuf,
+        resume: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -336,7 +337,7 @@ impl WorkspaceView {
                 slot.view.update(cx, |view, cx| view.exited(None, cx));
             }
         }
-        if cx.global::<SettingsStore>().settings().window.resume_sessions {
+        if resume {
             // The session list decides how each one resumes, so they wait for it.
             this.to_resume =
                 this.workspace.finished_leaves().into_iter().filter(|leaf| !restored.spawn.contains(leaf)).collect();

@@ -12,6 +12,8 @@ pub struct LaunchArgs {
     pub cwd: Option<PathBuf>,
     /// Program and arguments (default: the user's shell).
     pub command: Vec<String>,
+    /// Resume finished sessions on this start (set by Restart and update; not in the usage text).
+    pub resume_sessions: bool,
 }
 
 impl LaunchArgs {
@@ -19,10 +21,12 @@ impl LaunchArgs {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut cwd = None;
         let mut command = Vec::new();
+        let mut resume_sessions = false;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--cwd" => cwd = Some(PathBuf::from(args.next().ok_or("--cwd needs a directory")?)),
+                "--resume-sessions" => resume_sessions = true,
                 "--" => {
                     command.extend(args);
                     break;
@@ -32,7 +36,7 @@ impl LaunchArgs {
                 }
             }
         }
-        Ok(LaunchArgs { cwd, command })
+        Ok(LaunchArgs { cwd, command, resume_sessions })
     }
 
     /// Turn the arguments into a launch request.
@@ -89,6 +93,15 @@ mod tests {
         );
         let cwd_only = parse(&["--cwd", "/tmp"]).unwrap().into_launch().unwrap();
         assert_eq!(cwd_only.explicit.unwrap().program, daemon::pty::default_shell());
+    }
+
+    #[test]
+    fn resume_sessions_flag() {
+        assert!(parse(&["--resume-sessions"]).unwrap().resume_sessions);
+        assert!(!parse(&[]).unwrap().resume_sessions);
+        let args = parse(&["--resume-sessions", "--cwd", "/tmp"]).unwrap();
+        assert!(args.resume_sessions);
+        assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
     }
 
     #[test]

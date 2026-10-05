@@ -19,6 +19,7 @@ pub mod workspace_view;
 use std::path::PathBuf;
 
 use app_core::layout_store;
+use app_core::settings::WindowSettings;
 use app_core::workspace::{Launch, restore};
 use daemon::client::{Connection, DaemonClient, StartError, restart_daemon};
 use daemon::launch::spawn_detached_daemon;
@@ -43,8 +44,14 @@ impl Render for Notice {
 /// Freedesktop app id: Wayland app id / X11 class, desktop file and icon name.
 pub const APP_ID: &str = "io.github.idogrf.Gantry";
 
-/// Connect to (or start) the daemon, restore the layout, and run until the app quits.
-pub fn run(launch: Launch) {
+/// `(restore_layout, resume)` for this start: `--resume-sessions` forces both on, else the settings decide.
+fn start_flags(window: &WindowSettings, resume_sessions: bool) -> (bool, bool) {
+    (window.restore_layout || resume_sessions, window.resume_sessions || resume_sessions)
+}
+
+/// Connect to (or start) the daemon, restore the layout, and run until the app quits. `resume_sessions` (the hidden
+/// `--resume-sessions` flag) restores the layout and resumes finished sessions whatever the settings say.
+pub fn run(launch: Launch, resume_sessions: bool) {
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         // Without this, the first notification makes macOS ask "Where is use_default?": mac-notification-sys looks up an
         // app named "use_default" with AppleScript. Must run once, before the first notification.
@@ -67,7 +74,9 @@ pub fn run(launch: Launch) {
         match DaemonClient::connect(&paths, spawn_detached_daemon) {
             Ok(connection) => {
                 let window = cx
-                    .open_window(options, |window, cx| cx.new(|cx| workspace(connection, &launch, &paths, window, cx)))
+                    .open_window(options, |window, cx| {
+                        cx.new(|cx| workspace(connection, &launch, &paths, resume_sessions, window, cx))
+                    })
                     .expect("open window");
                 install_quit_prompt(window, cx);
             }
@@ -87,8 +96,9 @@ pub fn run(launch: Launch) {
                             restarted.then(|| DaemonClient::connect(&paths, spawn_detached_daemon).ok()).flatten();
                         let _ = cx.update(|window, cx| match connection {
                             Some(connection) => {
-                                let view = window
-                                    .replace_root(cx, |window, cx| workspace(connection, &launch, &paths, window, cx));
+                                let view = window.replace_root(cx, |window, cx| {
+                                    workspace(connection, &launch, &paths, resume_sessions, window, cx)
+                                });
                                 install_should_close(window, cx, view);
                             }
                             None => cx.quit(),
@@ -113,6 +123,7 @@ fn workspace(
     connection: Connection,
     launch: &Launch,
     paths: &Paths,
+    resume_sessions: bool,
     window: &mut Window,
     cx: &mut Context<WorkspaceView>,
 ) -> WorkspaceView {
@@ -121,10 +132,11 @@ fn workspace(
         None
     });
     let window_settings = cx.global::<SettingsStore>().settings().window;
-    let mut restored = restore(saved, &connection.instance, &connection.panes, launch, window_settings.restore_layout);
+    let (restore_layout, resume) = start_flags(&window_settings, resume_sessions);
+    let mut restored = restore(saved, &connection.instance, &connection.panes, launch, restore_layout);
     restored.workspace.sidebar.visible = window_settings.sidebar_at_start.visible(restored.workspace.sidebar.visible);
     let default_cwd: PathBuf = launch.default.cwd.clone();
-    WorkspaceView::new(connection, restored, paths.layout_file.clone(), default_cwd, window, cx)
+    WorkspaceView::new(connection, restored, paths.layout_file.clone(), default_cwd, resume, window, cx)
 }
 
 fn install_quit_prompt(window: WindowHandle<WorkspaceView>, cx: &mut App) {
@@ -141,9 +153,21 @@ fn install_should_close(window: &mut Window, cx: &mut App, view: gpui::Entity<Wo
 
 #[cfg(test)]
 mod tests {
-    use super::APP_ID;
+    use super::{APP_ID, start_flags};
 
     const DESKTOP: &str = include_str!("../../../packaging/linux/io.github.idogrf.Gantry.desktop");
+
+    #[test]
+    fn resume_flag_restores_and_resumes_whatever_the_settings_say() {
+        let mut window = app_core::settings::Settings::default().window;
+        window.restore_layout = false;
+        window.resume_sessions = false;
+        assert_eq!(start_flags(&window, true), (true, true));
+        assert_eq!(start_flags(&window, false), (false, false));
+        window.restore_layout = true;
+        window.resume_sessions = true;
+        assert_eq!(start_flags(&window, false), (true, true));
+    }
 
     #[test]
     fn the_desktop_entry_matches_the_app_id() {
