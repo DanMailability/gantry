@@ -49,9 +49,21 @@ An RPM can be built with `packaging/linux/build-rpm.sh`.
 
 ### macOS
 
-Apple Silicon only. Build the app bundle on a Mac with `packaging/macos/build-dmg.sh`. The app is ad-hoc signed and not
-notarized: right-click it and choose Open, or run `xattr -dr com.apple.quarantine Gantry.app`. This build has not been
-tried on a Mac yet.
+Apple Silicon only. Build the DMG on a Mac with `packaging/macos/build-dmg.sh`. The app is ad-hoc signed and not
+notarized, so macOS blocks it the first time ("Apple can't verify..."). To open it:
+
+1. Open the DMG and drag `Gantry.app` into Applications. Don't run it from inside the DMG.
+2. macOS 15 Sequoia or newer: double-click it and dismiss the dialog with Done. Then open System Settings > Privacy &
+   Security, scroll to the Security section, click Open Anyway next to Gantry, authenticate and confirm. Once only.
+3. macOS 14 or older: right-click it in Applications, choose Open, then click Open.
+
+Or, on any version, remove the quarantine flag instead of steps 2-3:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Gantry.app
+```
+
+This build has not been tried on a Mac yet.
 
 ### Windows
 
