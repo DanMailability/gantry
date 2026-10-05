@@ -32,7 +32,7 @@ use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
-use crate::assets::{LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
+use crate::assets::{CLOSE_ICON, LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
@@ -1183,6 +1183,16 @@ impl WorkspaceView {
                     }),
                 )
         };
+        let close_title = {
+            let platform = Platform::current();
+            match shortcuts::current("closePane", &settings.shortcuts, platform) {
+                Some(keystroke) => format!("Close pane ({})", shortcuts::label(Some(&keystroke), platform)),
+                None => "Close pane".to_string(),
+            }
+        };
+        let close_card = HoverCard { title: close_title, status: None, dir: None, container: false, folder: None };
+        // The theme has no danger color; the Needs-input dot is its reddest tone.
+        let danger = theme.tone(Tone::NeedsInput).dot;
         div()
             .absolute()
             .top(px(2.))
@@ -1191,12 +1201,35 @@ impl WorkspaceView {
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(RADIUS_SMALL))
-            // 70 % of the terminal color behind both buttons, so they read over text.
+            // 70 % of the terminal color behind all buttons, so they read over text.
             .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))
             .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
             .child(button(Axis::Vertical, "Split down", "splitDownClaude", SPLIT_DOWN_ICON))
+            .child(div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center())
+            .child(
+                div()
+                    .id(("Close pane", index))
+                    .flex_none()
+                    .size(theme.ui(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_SMALL - 2.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgba((danger << 8) | 0x24)))
+                    .tooltip(hover_card::tooltip(close_card))
+                    .child(svg().path(CLOSE_ICON).size(theme.ui(14.)).text_color(rgba((danger << 8) | 0xc7)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            this.confirm_close(vec![leaf], window, cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
     }
 
     /// Open the Claude / Terminal popup of pane `leaf`'s split button at `position`.
