@@ -359,7 +359,7 @@ mod tests {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let path = transcript(dir.path(), "-r", "s1", "/r", "hello", 10);
-        let record = serde_json::json!({"type": "last-prompt", "lastPrompt": "what next", "sessionId": "s1"});
+        let record = serde_json::json!({"type": "user", "cwd": "/r", "message": {"content": "what next"}});
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -368,7 +368,7 @@ mod tests {
             .unwrap();
         let mut index = Index::new(dir.path().into(), FakeHost::default());
         assert_eq!(index.scan()[0].last_prompt.as_deref(), Some("what next"));
-        // A long turn: tool output pushes the record out of the tail window before Claude writes the next one.
+        // A long turn: tool output pushes the prompt out of the tail window.
         let filler = format!(r#"{{"type":"assistant","pad":"{}"}}"#, "y".repeat(300 << 10));
         std::fs::OpenOptions::new()
             .append(true)

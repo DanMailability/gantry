@@ -29,7 +29,8 @@ pub struct TranscriptSummary {
     pub ai_title: Option<String>,
     /// First line of the first prompt the user typed.
     pub first_prompt: Option<String>,
-    /// Your newest prompt, from the newest `last-prompt` record in the tail, on one line.
+    /// Your newest prompt, on one line: the newest prompt in the tail, else the newest `last-prompt` record there
+    /// (Claude writes those on its own schedule, so one can be several prompts old).
     pub last_prompt: Option<String>,
 }
 
@@ -76,16 +77,20 @@ fn read_head(file: &mut File) -> io::Result<(Option<PathBuf>, Option<String>)> {
 }
 
 /// The newest name, AI title and last prompt in the last `TAIL_LIMIT` bytes. Only lines mentioning one of those
-/// records are parsed; a partial first line (the window starts mid-line) and a half-written last line fail to
+/// records or a user record are parsed; a partial first line (the window starts mid-line) and a half-written last line fail to
 /// parse and are skipped.
 fn read_tail(file: &mut File) -> io::Result<(Option<String>, Option<String>, Option<String>)> {
     let len = file.metadata()?.len();
     file.seek(SeekFrom::Start(len.saturating_sub(TAIL_LIMIT)))?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail)?;
-    let (mut name, mut ai_title, mut last_prompt) = (None, None, None);
+    let (mut name, mut ai_title, mut last_prompt, mut typed) = (None, None, None, None);
     for line in tail.split(|&byte| byte == b'\n') {
-        if !mentions(line, b"-title\"") && !mentions(line, b"\"agent-name\"") && !mentions(line, b"\"last-prompt\"") {
+        if !mentions(line, b"-title\"")
+            && !mentions(line, b"\"agent-name\"")
+            && !mentions(line, b"\"last-prompt\"")
+            && !mentions(line, b"\"type\":\"user\"")
+        {
             continue;
         }
         let Ok(record) = serde_json::from_slice::<Value>(line) else { continue };
@@ -98,19 +103,27 @@ fn read_tail(file: &mut File) -> io::Result<(Option<String>, Option<String>, Opt
                 let prompt = record.get("lastPrompt").and_then(Value::as_str).map(clean_prompt);
                 last_prompt = prompt.filter(|prompt| !prompt.is_empty()).or(last_prompt);
             }
+            Some("user") => {
+                typed = prompt_text(&record).map(clean_prompt).filter(|prompt| !prompt.is_empty()).or(typed)
+            }
             _ => {}
         }
     }
-    Ok((name, ai_title, last_prompt))
+    Ok((name, ai_title, typed.or(last_prompt)))
 }
 
 fn mentions(line: &[u8], needle: &[u8]) -> bool {
     line.windows(needle.len()).any(|window| window == needle)
 }
 
-/// First line of a prompt the user typed. Skips meta records, sidechains, and wrapped command output
-/// (text starting with `<`).
+/// First line of a prompt the user typed.
 fn user_prompt(record: &Value) -> Option<String> {
+    Some(clean(prompt_text(record)?.lines().next()?)).filter(|line| !line.is_empty())
+}
+
+/// The text of a prompt the user typed. Skips meta records, sidechains, wrapped command output (text starting
+/// with `<`) and the `[Image: …]` notes Claude adds for pasted images.
+fn prompt_text(record: &Value) -> Option<&str> {
     if record.get("type").and_then(Value::as_str) != Some("user") {
         return None;
     }
@@ -127,10 +140,7 @@ fn user_prompt(record: &Value) -> Option<String> {
         _ => return None,
     };
     let text = text.trim_start();
-    if text.starts_with('<') {
-        return None;
-    }
-    Some(clean(text.lines().next()?)).filter(|line| !line.is_empty())
+    (!text.starts_with('<') && !text.starts_with("[Image")).then_some(text)
 }
 
 /// Trimmed, without control characters, at most `MAX_TITLE_CHARS` characters.
@@ -298,7 +308,8 @@ mod tests {
         let path = write(
             dir.path(),
             &[
-                user("hello"),
+                record("ai-title", "aiTitle", "Title"),
+                serde_json::json!({"type": "attachment", "cwd": "/repo"}).to_string(),
                 last_prompt("first"),
                 last_prompt("second"),
                 r#"{"type":"last-prompt","leafUuid":"u","sessionId":"0f3c-session"}"#.into(),
@@ -308,10 +319,34 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_typed_prompt_beats_an_older_last_prompt_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_result = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "tool_result", "content": "done"}]}
+        })
+        .to_string();
+        let path = write(
+            dir.path(),
+            &[
+                user("first"),
+                last_prompt("first"),
+                user("second\nline two"),
+                tool_result,
+                user("<command-name>/clear</command-name>"),
+                user("[Image: source: /tmp/1.png]"),
+            ],
+        );
+        assert_eq!(summarize(&path).unwrap().unwrap().last_prompt.as_deref(), Some("second line two"));
+    }
+
+    #[test]
     fn last_prompt_is_one_clean_line_of_at_most_400_characters() {
         let dir = tempfile::tempdir().unwrap();
         let long = "é".repeat(5000);
-        let path = write(dir.path(), &[user("hello"), last_prompt(&format!("a\n\tb\u{7}c  d {long}"))]);
+        let title = record("ai-title", "aiTitle", "Title");
+        let cwd = serde_json::json!({"type": "attachment", "cwd": "/repo"}).to_string();
+        let path = write(dir.path(), &[title, cwd, last_prompt(&format!("a\n\tb\u{7}c  d {long}"))]);
         let prompt = summarize(&path).unwrap().unwrap().last_prompt.unwrap();
         assert!(prompt.starts_with("a bc d é"), "{prompt}");
         assert_eq!(prompt.chars().count(), MAX_PROMPT_CHARS);
