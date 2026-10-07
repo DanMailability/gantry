@@ -493,6 +493,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
+            host: protocol::host::HostId::local(),
         }
     }
 

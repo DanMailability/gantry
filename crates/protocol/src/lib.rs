@@ -2,4 +2,5 @@
 
 pub mod build;
 pub mod frame;
+pub mod host;
 pub mod message;

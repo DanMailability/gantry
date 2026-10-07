@@ -1307,6 +1307,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
+            host: protocol::host::HostId::local(),
         }
     }
 
@@ -1389,6 +1390,7 @@ mod tests {
         ws.pane_started(sh, 2, "/r".into());
         let with = |pane, prompt: Option<&str>| SessionInfo {
             last_prompt: prompt.map(Into::into),
+            host: protocol::host::HostId::local(),
             ..session_info("a", SessionState::Managed { pane })
         };
         let mut store = SessionStore::default();

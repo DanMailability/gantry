@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::host::HostId;
+
 /// Protocol version; bump on any incompatible change to non-frozen messages.
 pub const PROTOCOL_VERSION: u32 = 7;
 
@@ -160,6 +162,9 @@ pub struct SessionInfo {
     /// Your newest prompt in this session, on one line; `None` when unknown (or from an older daemon).
     #[serde(default)]
     pub last_prompt: Option<String>,
+    /// The host whose daemon reported it. The GUI sets this when the session arrives; it never travels on the wire.
+    #[serde(skip)]
+    pub host: HostId,
 }
 
 /// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`. With `claude`
@@ -425,6 +430,27 @@ mod tests {
     }
 
     #[test]
+    fn a_sessions_host_is_not_on_the_wire() {
+        let info = SessionInfo {
+            id: "s".into(),
+            cwd: "/r".into(),
+            title: String::new(),
+            last_active_ms: 0,
+            state: SessionState::Closed,
+            cwd_exists: true,
+            status: None,
+            status_since_ms: 0,
+            container: None,
+            claude_dir: None,
+            last_prompt: None,
+            host: HostId::named("devbox"),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("devbox") && !json.contains("host"), "{json}");
+        assert!(serde_json::from_str::<SessionInfo>(&json).unwrap().host.is_local());
+    }
+
+    #[test]
     fn messages_round_trip() {
         let msg = ClientMessage::Spawn {
             request: 3,
@@ -500,6 +526,7 @@ mod tests {
             container: None,
             claude_dir: Some("/home/me/.claude-work".into()),
             last_prompt: Some("Fix the build".into()),
+            host: HostId::local(),
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains(r#""state":{"kind":"managed","pane":3}"#), "{json}");
@@ -534,6 +561,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: Some("x".into()),
+            host: HostId::local(),
         };
         let mut json = serde_json::to_value(&session).unwrap();
         json.as_object_mut().unwrap().remove("last_prompt");
