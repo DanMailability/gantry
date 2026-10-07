@@ -168,6 +168,9 @@ struct PendingOpen {
     host: HostId,
 }
 
+/// Tries (one second apart) a connect makes after an update's restart while the old daemon still answers.
+const RESTART_RETRIES: u8 = 3;
+
 /// One connected host's daemon.
 struct HostConn {
     client: DaemonClient,
@@ -241,6 +244,9 @@ pub struct WorkspaceView {
     recents: Option<(Entity<RecentsView>, Subscription)>,
     /// The open setup wizard overlay.
     setup: Option<(Entity<SetupView>, Subscription)>,
+    /// Hosts whose daemon was just stopped for an update: how many more times a connect that meets the old daemon
+    /// (VersionMismatch) is tried again before the card is shown.
+    restart_retries: HashMap<HostId, u8>,
     /// The open SSH install wizard overlay.
     ssh_wizard: Option<(Entity<SshWizard>, Subscription)>,
     /// The Settings page, while its tab is open.
@@ -438,6 +444,7 @@ impl WorkspaceView {
             launcher: None,
             recents: None,
             setup: None,
+            restart_retries: HashMap::new(),
             ssh_wizard: None,
             settings: None,
             _settings_events: None,
@@ -646,7 +653,10 @@ impl WorkspaceView {
     ) {
         self.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
         self.forget_host(from, cx);
-        self.workspace.rename_host(from, to);
+        if let Err(error) = self.workspace.rename_host(from, to) {
+            tracing::warn!("host rename refused: {error}");
+            return;
+        }
         self.host_states.remove(from);
         if let Some(waiting) = self.queued.remove(from) {
             self.queued.entry(to.clone()).or_default().extend(waiting);
@@ -708,8 +718,19 @@ impl WorkspaceView {
                 (entry.name.clone(), HostStatus { label: state.label(), dot: state.dot(), panes })
             })
             .collect();
-        if cx.try_global::<HostStatuses>().is_none_or(|known| known.0 != statuses) {
-            cx.set_global(HostStatuses(statuses));
+        let listed: HashSet<&str> = self.ssh_hosts.iter().map(|entry| entry.name.as_str()).collect();
+        let taken: HashSet<String> = self
+            .workspace
+            .leaves
+            .values()
+            .map(|leaf| &leaf.host)
+            .chain(self.workspace.instances.keys())
+            .filter(|host| !host.is_local() && !listed.contains(host.name()))
+            .map(|host| host.name().to_string())
+            .collect();
+        let next = HostStatuses { hosts: statuses, taken };
+        if cx.try_global::<HostStatuses>().is_none_or(|known| *known != next) {
+            cx.set_global(next);
         }
     }
 
@@ -871,6 +892,24 @@ impl WorkspaceView {
             Err(kind) => {
                 // Whatever ended it, a question of this attempt still on screen is stale.
                 self.withdraw_questions(host, cx);
+                // Right after an update's restart the old daemon may still answer: try again shortly.
+                if matches!(kind, FailKind::UpdateNeeded { .. })
+                    && let Some(left) = self.restart_retries.get_mut(host)
+                    && *left > 0
+                {
+                    *left -= 1;
+                    let state = self.host_state(host);
+                    self.set_host_state(host, state.next(HostEvent::Cancel), cx);
+                    let host_for_task = host.clone();
+                    let task = cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_secs(1)).await;
+                        let _ =
+                            this.update_in(cx, |view, window, cx| view.connect_host(&host_for_task, true, window, cx));
+                    });
+                    self.retries.insert(host.clone(), task);
+                    return;
+                }
+                self.restart_retries.remove(host);
                 let next = self.host_state(host).next(HostEvent::AttemptFailed(kind));
                 self.set_host_state(host, next.clone(), cx);
                 if let HostState::Reconnecting { attempt } = next {
@@ -896,6 +935,7 @@ impl WorkspaceView {
     fn host_connected(&mut self, host: &HostId, connection: Connection, window: &mut Window, cx: &mut Context<Self>) {
         let Connection { client, events, instance, panes, .. } = connection;
         self.retries.remove(host);
+        self.restart_retries.remove(host);
         // Panes closed while the host was away are killed now, and not adopted as tabs again.
         let (panes, to_kill) = without_killed_offline(&mut self.killed_offline, host, &instance, &panes);
         for pane in to_kill {
@@ -2242,14 +2282,24 @@ impl WorkspaceView {
                 this.focus_current(window, cx);
                 cx.notify();
             }
-            WizardEvent::Finished { host, add } => {
-                this.ssh_wizard = None;
+            WizardEvent::Finished { host, add, restarted } => {
                 if *add {
-                    let host = host.clone();
-                    SettingsStore::update(cx, |settings| {
-                        let _ = add_ssh_host(&mut settings.ssh_hosts, host);
-                    });
+                    let entry = host.clone();
+                    let mut saved = Ok(());
+                    SettingsStore::update(cx, |settings| saved = add_ssh_host(&mut settings.ssh_hosts, entry));
+                    if let Err(error) = saved {
+                        // Not saved: stay in the wizard and never connect to a different entry.
+                        if let Some((wizard, _)) = &this.ssh_wizard {
+                            wizard.update(cx, |wizard, cx| wizard.refuse(error, cx));
+                        }
+                        return;
+                    }
                     this.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+                }
+                this.ssh_wizard = None;
+                if *restarted {
+                    // The old daemon may still answer for a moment after its stop.
+                    this.restart_retries.insert(HostId::named(&host.name), RESTART_RETRIES);
                 }
                 this.focus_current(window, cx);
                 this.connect_host(&HostId::named(&host.name), true, window, cx);

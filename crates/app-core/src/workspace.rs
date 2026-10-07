@@ -512,18 +512,24 @@ impl Workspace {
         leaf
     }
 
-    /// Move `from`'s leaves and its daemon instance to the name `to` (a rename of an SSH host).
-    pub fn rename_host(&mut self, from: &HostId, to: &HostId) {
-        let leaves = self
-            .leaves
-            .values_mut()
-            .chain(self.dropped.iter_mut().flat_map(|(_, leaves)| leaves.iter_mut().map(|(_, leaf)| leaf)));
-        for leaf in leaves.filter(|leaf| leaf.host == *from) {
+    /// Move `from`'s leaves and its daemon instance to the name `to` (a rename of an SSH host). Refused, changing
+    /// nothing, when `to` still has leaves or an instance here (their panes would be mixed up with `from`'s).
+    pub fn rename_host(&mut self, from: &HostId, to: &HostId) -> Result<(), String> {
+        if from == to {
+            return Ok(());
+        }
+        let in_dropped = self.dropped.iter().any(|(_, leaves)| leaves.iter().any(|(_, leaf)| leaf.host == *to));
+        if self.instances.contains_key(to) || in_dropped || self.leaves.values().any(|leaf| leaf.host == *to) {
+            return Err(format!("{} still has panes in the layout", to.name()));
+        }
+        let dropped = self.dropped.iter_mut().flat_map(|(_, leaves)| leaves.iter_mut().map(|(_, leaf)| leaf));
+        for leaf in self.leaves.values_mut().chain(dropped).filter(|leaf| leaf.host == *from) {
             leaf.host = to.clone();
         }
         if let Some(instance) = self.instances.remove(from) {
             self.instances.insert(to.clone(), instance);
         }
+        Ok(())
     }
 
     /// Drop every leaf of `host` (closing the tabs that empties) and its daemon instance. Returns the panes those
@@ -2256,7 +2262,7 @@ mod tests {
         let a = ws.new_tab_on(shell("/a"), dev.clone());
         let b = ws.new_tab_on(shell("/b"), dev.clone());
         let local = ws.new_tab(shell("/c"));
-        ws.rename_host(&dev, &main_pc);
+        ws.rename_host(&dev, &main_pc).unwrap();
         assert_eq!((ws.leaves[&a].host.clone(), ws.leaves[&b].host.clone()), (main_pc.clone(), main_pc.clone()));
         assert!(ws.leaves[&local].host.is_local());
         assert_eq!(ws.instances[&main_pc], "r1");
@@ -2306,5 +2312,20 @@ mod tests {
         assert!(!ws.instances.contains_key(&dev));
         assert!(ws.leaves.values().all(|leaf| leaf.host != dev));
         assert_eq!(ws.tabs.len(), 1);
+    }
+
+    #[test]
+    fn rename_host_refuses_a_name_that_still_has_leaves_or_an_instance() {
+        let (dev, lab) = (HostId::named("dev"), HostId::named("lab"));
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        ws.new_tab_on(shell("/a"), dev.clone());
+        ws.new_tab_on(shell("/b"), lab.clone());
+        assert!(ws.rename_host(&dev, &lab).unwrap_err().contains("lab"), "lab has a leaf");
+        ws.set_instance(&HostId::named("ghost"), "g1");
+        assert!(ws.rename_host(&dev, &HostId::named("ghost")).is_err(), "ghost has an instance");
+        assert!(ws.rename_host(&dev, &dev).is_ok(), "the same name is a no-op");
+        assert_eq!(ws.instances[&dev], "r1");
+        assert!(ws.leaves.values().any(|leaf| leaf.host == dev));
     }
 }

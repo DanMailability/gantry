@@ -10,7 +10,7 @@ use std::path::Path;
 use app_core::host_install::{CheckResult, GantryOnRemote, Linger, Probe, Step, check, next_step, upload_path};
 use app_core::host_state::FailKind;
 use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshHost};
-use app_core::ssh_config::{aliases, validate_name, validate_target};
+use app_core::ssh_config::{aliases, validate_name, validate_target, wildcard_match};
 use app_core::text_field::TextField;
 use daemon::askpass::AskPrompt;
 use daemon::ssh::{AttemptHandle, SshHostSpec};
@@ -51,6 +51,8 @@ pub(crate) enum WizardEvent {
         host: SshHost,
         /// It is new: save it in `sshHosts` first.
         add: bool,
+        /// Its daemon was just stopped to update it: connecting may meet the old daemon for a moment.
+        restarted: bool,
     },
 }
 
@@ -115,21 +117,56 @@ fn text(content: &str) -> TextField {
     field
 }
 
-/// The aliases of `~/.ssh/config` (an `Include` is read relative to `~/.ssh`, without wildcards).
-fn ssh_config_aliases() -> Vec<String> {
-    let Some(dir) = std::env::home_dir().map(|home| home.join(".ssh")) else { return Vec::new() };
-    let Ok(config) = std::fs::read_to_string(dir.join("config")) else { return Vec::new() };
-    let mut read = |name: &str| {
-        let path = Path::new(name);
-        std::fs::read_to_string(if path.is_absolute() { path.to_path_buf() } else { dir.join(path) }).ok()
+/// The text of an `Include` of an ssh config: `~` is the home folder, a relative path is relative to `ssh_dir`, and
+/// `*` or `?` in the file name match files of that folder (their texts joined, in name order). `None` when nothing
+/// was read.
+fn include_text(name: &str, ssh_dir: &Path, home: &Path) -> Option<String> {
+    let expanded = match name.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => ssh_dir.join(name),
     };
-    aliases(&config, &mut read)
+    let pattern = expanded.file_name()?.to_string_lossy().into_owned();
+    if !pattern.contains(['*', '?']) {
+        return std::fs::read_to_string(&expanded).ok();
+    }
+    let mut files: Vec<_> = std::fs::read_dir(expanded.parent()?)
+        .ok()?
+        .flatten()
+        .filter(|entry| wildcard_match(&pattern, &entry.file_name().to_string_lossy()))
+        .map(|entry| entry.path())
+        .collect();
+    files.sort();
+    let texts: Vec<String> = files.iter().filter_map(|path| std::fs::read_to_string(path).ok()).collect();
+    (!texts.is_empty()).then(|| texts.concat())
 }
 
-/// The suggested name of a target: an alias as it is, `user@host.domain` as `host`.
+/// The aliases of `~/.ssh/config`, with one level of `Include`.
+fn ssh_config_aliases() -> Vec<String> {
+    let Some(home) = std::env::home_dir() else { return Vec::new() };
+    let dir = home.join(".ssh");
+    let Ok(config) = std::fs::read_to_string(dir.join("config")) else { return Vec::new() };
+    aliases(&config, &mut |name| include_text(name, &dir, &home))
+}
+
+/// The suggested name of a target: an alias as it is, `user@host` as the host (its first label for a DNS name, whole
+/// for an IP address).
 fn suggested_name(target: &str) -> String {
     let host = target.rsplit('@').next().unwrap_or(target);
-    if target.contains('@') { host.split('.').next().unwrap_or(host).to_string() } else { host.to_string() }
+    if target.contains('@') && host.parse::<std::net::IpAddr>().is_err() {
+        host.split('.').next().unwrap_or(host).to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// The file to upload: this process's own image, which stays readable after a reinstall replaced (and so unlinked)
+/// the file it started from; the path it started from where `/proc` does not offer it.
+fn own_binary() -> Option<std::path::PathBuf> {
+    let proc = std::path::PathBuf::from("/proc/self/exe");
+    if std::fs::File::open(&proc).is_ok() {
+        return Some(proc);
+    }
+    std::env::current_exe().ok()
 }
 
 /// What a failed step says.
@@ -231,8 +268,8 @@ impl SshWizard {
 
     /// Why the upload cannot start, if it cannot.
     fn install_block(&self) -> Option<String> {
-        if !cfg!(target_os = "linux") {
-            return Some("This Gantry cannot be uploaded to a Linux host: install it by hand.".into());
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return Some("This Gantry cannot be uploaded to a Linux x86_64 host: install it by hand.".into());
         }
         upload_path(self.command.text().trim()).err()
     }
@@ -267,7 +304,7 @@ impl SshWizard {
         if self.install_block().is_some() {
             return;
         }
-        let Ok(local) = std::env::current_exe() else {
+        let Some(local) = own_binary() else {
             self.error = Some("Could not find this Gantry's own file.".into());
             return;
         };
@@ -299,10 +336,11 @@ impl SshWizard {
             Msg::LingerDone(result) => {
                 self.working = None;
                 self.job = None;
-                if let Err(reason) = result {
-                    self.linger_note = Some(reason);
+                match result {
+                    Ok(()) => self.finish(cx),
+                    // Stay on Finish: the note says what to run, and the button saves anyway.
+                    Err(reason) => self.linger_note = Some(reason),
                 }
-                self.finish(cx);
             }
             Msg::Stopped(result) => {
                 self.working = None;
@@ -330,10 +368,18 @@ impl SshWizard {
             return;
         }
         let spec = self.spec();
+        let restarted = matches!(self.start, WizardStart::Update(_));
         cx.emit(WizardEvent::Finished {
             host: SshHost { name: spec.name, target: spec.target, command: spec.command },
             add,
+            restarted,
         });
+    }
+
+    /// The workspace could not save the host: say why and stay open.
+    pub(crate) fn refuse(&mut self, error: String, cx: &mut Context<Self>) {
+        self.error = Some(error);
+        cx.notify();
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -396,13 +442,17 @@ impl SshWizard {
         if self.working.is_some() {
             return;
         }
+        self.linger_note = None;
         self.error = None;
         match self.step {
             Step::Host => {}
             Step::Check => {
-                if !self.fixed() {
-                    self.step = Step::Host;
+                if self.fixed() {
+                    // Nothing before the check of a saved host.
+                    self.close(cx);
+                    return;
                 }
+                self.step = Step::Host;
             }
             Step::Install | Step::Finish => self.step = Step::Check,
         }
@@ -416,7 +466,10 @@ impl SshWizard {
             self.run(job, "Stopping the daemon…", cx);
             return;
         }
-        if self.linger_tick && self.check.as_ref().is_some_and(|check| check.linger == Linger::Off) {
+        if self.linger_note.is_none()
+            && self.linger_tick
+            && self.check.as_ref().is_some_and(|check| check.linger == Linger::Off)
+        {
             let job = run::linger(self.spec(), &self.questions);
             self.run(job, "Turning lingering on…", cx);
         } else {
@@ -767,7 +820,9 @@ impl SshWizard {
             },
             Step::Install => "Continue".into(),
             Step::Finish => match self.start {
+                WizardStart::Add if self.linger_note.is_some() => "Save and connect anyway".into(),
                 WizardStart::Add => "Save and connect".into(),
+                WizardStart::Install(_) if self.linger_note.is_some() => "Connect anyway".into(),
                 WizardStart::Install(_) => "Connect".into(),
                 WizardStart::Update(_) => "Restart".into(),
             },
@@ -817,9 +872,9 @@ impl Render for SshWizard {
         let can_back = self.working.is_none()
             && match self.step {
                 Step::Host => false,
-                Step::Check => !self.fixed(),
+                Step::Check => !self.fixed() || self.error.is_some(),
                 Step::Install => true,
-                Step::Finish => !matches!(self.start, WizardStart::Update(_)),
+                Step::Finish => !matches!(self.start, WizardStart::Update(_)) || self.error.is_some(),
             };
         let footer = div()
             .flex()
@@ -893,8 +948,33 @@ mod tests {
     fn the_suggested_name_is_the_alias_or_the_host_part() {
         assert_eq!(suggested_name("mainpc"), "mainpc");
         assert_eq!(suggested_name("ido@build.example.com"), "build");
-        assert_eq!(suggested_name("ido@10.0.0.12"), "10");
+        assert_eq!(suggested_name("ido@10.0.0.12"), "10.0.0.12");
+        assert_eq!(suggested_name("10.0.0.12"), "10.0.0.12");
         assert_eq!(suggested_name(""), "");
+    }
+
+    #[test]
+    fn includes_expand_home_globs_and_relative_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir_all(ssh.join("config.d")).unwrap();
+        std::fs::write(ssh.join("config.d/a.conf"), "Host a\n").unwrap();
+        std::fs::write(ssh.join("config.d/b.conf"), "Host b\n").unwrap();
+        std::fs::write(ssh.join("config.d/skip.txt"), "Host skipped\n").unwrap();
+        std::fs::write(ssh.join("extra"), "Host c\n").unwrap();
+        std::fs::write(home.path().join("elsewhere"), "Host d\n").unwrap();
+        let read = |name: &str| include_text(name, &ssh, home.path());
+        assert_eq!(read("config.d/*.conf").as_deref(), Some("Host a\nHost b\n"));
+        assert_eq!(read("extra").as_deref(), Some("Host c\n"));
+        assert_eq!(read("~/elsewhere").as_deref(), Some("Host d\n"));
+        assert_eq!(read("missing"), None);
+        assert_eq!(read("nodir/*").as_deref(), None);
+    }
+
+    #[test]
+    fn the_own_binary_can_be_opened() {
+        let path = own_binary().expect("a path");
+        assert!(std::fs::metadata(path).unwrap().len() > 0);
     }
 
     #[test]

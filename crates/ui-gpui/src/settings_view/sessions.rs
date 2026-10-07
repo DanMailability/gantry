@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use app_core::session_tree::display_path;
-use app_core::settings::{ClaudeDir, Settings, replace_ssh_host};
+use app_core::settings::{ClaudeDir, Settings};
 use app_core::text_field::TextField;
 use app_core::theme_colors::ProjectColor;
 use app_core::workspace::ClaudeDirs;
@@ -285,23 +285,17 @@ impl SettingsView {
         }
         let (daemon_dir, home) = (self.daemon_dir.clone(), std::env::home_dir());
         let mut refused = None;
-        let mut ssh_refused = None;
-        let mut renamed = None;
-        let mut retargeted = None;
+        let mut ssh_edit = None;
+        let taken =
+            cx.try_global::<ssh_hosts::HostStatuses>().map(|statuses| statuses.taken.clone()).unwrap_or_default();
         SettingsStore::update(cx, |settings| match key {
             (ssh_hosts::HOST_NAME | ssh_hosts::HOST_TARGET, index) => {
-                let Some(old) = settings.ssh_hosts.get(index).cloned() else { return };
-                let mut new = old.clone();
-                if key.0 == ssh_hosts::HOST_NAME {
-                    new.name = text.trim().to_string();
+                let field = if key.0 == ssh_hosts::HOST_NAME {
+                    ssh_hosts::HostField::Name
                 } else {
-                    new.target = text.trim().to_string();
-                }
-                match replace_ssh_host(&mut settings.ssh_hosts, &old.name, new.clone()) {
-                    Ok(()) if key.0 == ssh_hosts::HOST_NAME => renamed = Some((old.name, new.name)),
-                    Ok(()) => retargeted = Some(new.name),
-                    Err(error) => ssh_refused = Some(error),
-                }
+                    ssh_hosts::HostField::Target
+                };
+                ssh_edit = Some(ssh_hosts::edit_ssh_host(&mut settings.ssh_hosts, index, field, &text, &taken));
             }
             (DIR_NAME, index) => {
                 materialize(settings, daemon_dir.as_deref(), home.as_deref());
@@ -326,18 +320,21 @@ impl SettingsView {
             (SHELL_ARGS, _) => settings.shell.args = split_args(&text),
             _ => {}
         });
-        if key.0 == ssh_hosts::HOST_NAME || key.0 == ssh_hosts::HOST_TARGET {
-            self.ssh_message = ssh_refused;
-            if let Some(name) = retargeted {
-                self.edited_targets.insert(name);
-            }
-            if let Some((from, to)) = renamed {
-                let connected = cx
-                    .try_global::<ssh_hosts::HostStatuses>()
-                    .and_then(|statuses| statuses.0.get(&to).or_else(|| statuses.0.get(&from)).cloned())
-                    .is_some_and(|status| status.dot == app_core::host_state::HostDot::Ok);
-                self.edited_targets.remove(&from);
-                cx.emit(SettingsEvent::HostRenamed { from, to, reconnect: connected });
+        if let Some(edit) = ssh_edit {
+            self.ssh_message = edit.as_ref().err().cloned();
+            match edit {
+                Ok(ssh_hosts::HostEdit::Retargeted(name)) => {
+                    self.edited_targets.insert(name);
+                }
+                Ok(ssh_hosts::HostEdit::Renamed { from, to }) => {
+                    let connected = cx
+                        .try_global::<ssh_hosts::HostStatuses>()
+                        .and_then(|statuses| statuses.hosts.get(&from).cloned())
+                        .is_some_and(|status| status.dot == app_core::host_state::HostDot::Ok);
+                    self.edited_targets.remove(&from);
+                    cx.emit(SettingsEvent::HostRenamed { from, to, reconnect: connected });
+                }
+                Ok(ssh_hosts::HostEdit::Unchanged) | Err(_) => {}
             }
         } else {
             self.sessions_message = refused.map(String::from);

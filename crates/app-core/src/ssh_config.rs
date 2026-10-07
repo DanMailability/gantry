@@ -38,6 +38,19 @@ fn collect(text: &str, read_include: &mut dyn FnMut(&str) -> Option<String>, fol
     }
 }
 
+/// Whether `text` matches `pattern`, where `*` stands for any run of characters and `?` for exactly one.
+pub fn wildcard_match(pattern: &str, text: &str) -> bool {
+    fn go(pattern: &[char], text: &[char]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some(('*', rest)) => (0..=text.len()).any(|skip| go(rest, &text[skip..])),
+            Some(('?', rest)) => text.split_first().is_some_and(|(_, tail)| go(rest, tail)),
+            Some((c, rest)) => text.split_first().is_some_and(|(t, tail)| t == c && go(rest, tail)),
+        }
+    }
+    go(&pattern.chars().collect::<Vec<_>>(), &text.chars().collect::<Vec<_>>())
+}
+
 /// Whether `target` can follow `ssh --`: an alias or `user@host`, no whitespace or shell syntax, not an option.
 pub fn validate_target(target: &str) -> Result<(), String> {
     if target.is_empty() {
@@ -79,6 +92,16 @@ mod tests {
         let text = "Host *\n  User x\nHost mainpc build-box\n  HostName a\nHost !bad ok? gpu1\nInclude extra\n";
         let mut read = |name: &str| (name == "extra").then(|| "Host from-include\nInclude deeper\n".to_string());
         assert_eq!(aliases(text, &mut read), ["mainpc", "build-box", "gpu1", "from-include"]);
+    }
+
+    #[test]
+    fn wildcards_match_whole_names() {
+        assert!(wildcard_match("*.conf", "a.conf"));
+        assert!(wildcard_match("host-?", "host-1"));
+        assert!(wildcard_match("*", "anything"));
+        assert!(!wildcard_match("*.conf", "a.conf.bak"));
+        assert!(!wildcard_match("host-?", "host-12"));
+        assert!(wildcard_match("exact", "exact"));
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! The SSH hosts section: the hosts in `sshHosts` with their live state, rename, edit target, remove, and the way into
 //! the Add SSH host wizard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use app_core::host_state::HostDot;
-use app_core::settings::Settings;
+use app_core::settings::{Settings, SshHost, replace_ssh_host};
 use gpui::{Context, Div, Global, Window, div, px, rgb};
 
 use super::*;
@@ -29,9 +29,67 @@ pub(crate) struct HostStatus {
 
 /// The state of every listed host by name, kept up to date by the workspace.
 #[derive(Default, PartialEq, Eq)]
-pub(crate) struct HostStatuses(pub(crate) HashMap<String, HostStatus>);
+pub(crate) struct HostStatuses {
+    /// Each listed host's state.
+    pub(crate) hosts: HashMap<String, HostStatus>,
+    /// Names of hosts that are not listed but still have panes or a daemon instance in the layout: no host may take
+    /// such a name.
+    pub(crate) taken: HashSet<String>,
+}
 
 impl Global for HostStatuses {}
+
+/// A field of a host's row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostField {
+    Name,
+    Target,
+}
+
+/// What an edit of a host's row did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum HostEdit {
+    /// The trimmed value is the one it had.
+    Unchanged,
+    /// The host has a new name.
+    Renamed {
+        /// The old name.
+        from: String,
+        /// The new name.
+        to: String,
+    },
+    /// The host (by name) has a new target.
+    Retargeted(String),
+}
+
+/// Apply the text typed into one field of host `index`: nothing when it is unchanged, an error (and no change) when
+/// the value is not allowed or `taken` names a host that still has panes in the layout.
+pub(super) fn edit_ssh_host(
+    hosts: &mut [SshHost],
+    index: usize,
+    field: HostField,
+    text: &str,
+    taken: &HashSet<String>,
+) -> Result<HostEdit, String> {
+    let old = hosts.get(index).cloned().ok_or_else(|| "That host is gone".to_string())?;
+    let text = text.trim();
+    let mut new = old.clone();
+    match field {
+        HostField::Name => new.name = text.to_string(),
+        HostField::Target => new.target = text.to_string(),
+    }
+    if new == old {
+        return Ok(HostEdit::Unchanged);
+    }
+    if field == HostField::Name && taken.contains(text) {
+        return Err(format!("{text} still has panes in the layout; remove it first"));
+    }
+    replace_ssh_host(hosts, &old.name, new.clone())?;
+    Ok(match field {
+        HostField::Name => HostEdit::Renamed { from: old.name, to: new.name },
+        HostField::Target => HostEdit::Retargeted(new.name),
+    })
+}
 
 /// The question before a host is removed.
 pub(super) fn remove_text(name: &str, panes: usize) -> String {
@@ -52,7 +110,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Div {
         let statuses: HashMap<String, HostStatus> =
-            cx.try_global::<HostStatuses>().map(|statuses| statuses.0.clone()).unwrap_or_default();
+            cx.try_global::<HostStatuses>().map(|statuses| statuses.hosts.clone()).unwrap_or_default();
         let mut rows: Vec<Div> = Vec::new();
         for (index, host) in settings.ssh_hosts.iter().enumerate() {
             let status = statuses.get(&host.name);
@@ -183,6 +241,38 @@ impl SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host(name: &str, target: &str) -> SshHost {
+        SshHost { name: name.into(), target: target.into(), command: "~/.local/bin/gantry".into() }
+    }
+
+    #[test]
+    fn an_unchanged_value_does_nothing_even_with_spaces_around_it() {
+        let mut hosts = vec![host("lab", "me@lab")];
+        let taken = HashSet::new();
+        assert_eq!(edit_ssh_host(&mut hosts, 0, HostField::Name, " lab ", &taken), Ok(HostEdit::Unchanged));
+        assert_eq!(edit_ssh_host(&mut hosts, 0, HostField::Target, "me@lab ", &taken), Ok(HostEdit::Unchanged));
+        assert_eq!(hosts, vec![host("lab", "me@lab")]);
+    }
+
+    #[test]
+    fn a_rename_or_retarget_is_reported_and_bad_values_are_refused() {
+        let mut hosts = vec![host("lab", "me@lab"), host("dev", "dev")];
+        let taken: HashSet<String> = ["ghost".to_string()].into();
+        assert_eq!(
+            edit_ssh_host(&mut hosts, 0, HostField::Name, "lab2", &taken),
+            Ok(HostEdit::Renamed { from: "lab".into(), to: "lab2".into() })
+        );
+        assert_eq!(
+            edit_ssh_host(&mut hosts, 0, HostField::Target, "me@lab2", &taken),
+            Ok(HostEdit::Retargeted("lab2".into()))
+        );
+        assert!(edit_ssh_host(&mut hosts, 0, HostField::Name, "dev", &taken).is_err());
+        let error = edit_ssh_host(&mut hosts, 0, HostField::Name, "ghost", &taken).unwrap_err();
+        assert!(error.contains("ghost"), "{error}");
+        assert!(edit_ssh_host(&mut hosts, 0, HostField::Target, "a b", &taken).is_err());
+        assert_eq!(hosts[0], host("lab2", "me@lab2"));
+    }
 
     #[test]
     fn the_remove_question_counts_the_panes() {
