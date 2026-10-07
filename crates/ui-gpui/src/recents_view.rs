@@ -15,6 +15,7 @@ use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, IntoElement,
     KeyDownEvent, ListAlignment, ListState, Render, Stateful, StyledText, Window, div, list, prelude::*, px, rgb,
 };
+use protocol::host::HostId;
 use protocol::message::{SearchHit, SessionInfo, Speaker};
 
 use crate::field;
@@ -148,7 +149,7 @@ impl RecentsView {
         let sessions: Vec<&SessionInfo> = self.sessions.iter().collect();
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let roots = &self.roots;
-        let project_of = |cwd: &Path| roots.of(cwd);
+        let project_of = |host: &HostId, cwd: &Path| roots.of(host, cwd);
         let input = RecentsInput {
             sessions: &sessions,
             open: &self.open,

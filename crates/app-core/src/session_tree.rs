@@ -4,7 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
+use protocol::host::{HostId, PaneKey, project_key, split_project_key};
+use protocol::message::{SessionInfo, SessionState, SessionStatus};
 
 use crate::fuzzy::Fuzzy;
 use crate::split_tree::NodeId;
@@ -33,6 +34,8 @@ pub enum Tone {
 pub struct PaneEntry {
     /// Its leaf.
     pub leaf: NodeId,
+    /// The host whose daemon runs it.
+    pub host: HostId,
     /// Directory it was started in.
     pub cwd: PathBuf,
     /// Pane title.
@@ -161,7 +164,7 @@ pub struct ActiveInput<'a> {
     /// Tabs of the layout; those with several panes are listed as a heading with their panes under it.
     pub tabs: &'a [TabEntry],
     /// The project a directory belongs to (see [`project_root`]).
-    pub project_of: &'a dyn Fn(&Path) -> PathBuf,
+    pub project_of: &'a dyn Fn(&HostId, &Path) -> PathBuf,
     /// Current time, ms since the Unix epoch.
     pub now_ms: u64,
 }
@@ -179,8 +182,12 @@ impl ProjectRoots {
         ProjectRoots { home, cache: Default::default() }
     }
 
-    /// The project `cwd` belongs to: its git repository, else the directory itself.
-    pub fn of(&self, cwd: &Path) -> PathBuf {
+    /// The project `cwd` belongs to on `host`: its git repository, else the directory itself. Another machine's disk
+    /// cannot be searched, so a remote project is the directory itself.
+    pub fn of(&self, host: &HostId, cwd: &Path) -> PathBuf {
+        if !host.is_local() {
+            return project_key(host, cwd);
+        }
         if let Some(root) = self.cache.borrow().get(cwd) {
             return root.clone();
         }
@@ -305,7 +312,7 @@ pub enum RowKey {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activation {
     /// Show the pane running this session.
-    FocusPane(PaneId),
+    FocusPane(PaneKey),
     /// Show this leaf.
     FocusLeaf(NodeId),
     /// Resume a closed session.
@@ -362,7 +369,9 @@ impl Row {
             RowKind::Session { session, leaf, .. } => match (session.state, leaf) {
                 (SessionState::External { .. }, _) => Activation::ToggleDetails(session.id.clone()),
                 (_, Some(leaf)) => Activation::FocusLeaf(*leaf),
-                (SessionState::Managed { pane }, None) => Activation::FocusPane(pane),
+                (SessionState::Managed { pane }, None) => {
+                    Activation::FocusPane(PaneKey::new(session.host.clone(), pane))
+                }
                 (SessionState::Closed, None) if session.cwd_exists => {
                     Activation::Resume { session: session.id.clone(), cwd: session.cwd.clone() }
                 }
@@ -450,6 +459,7 @@ pub fn find(rows: &[Row], key: &RowKey) -> Option<usize> {
 /// What one Active row stands for, before grouping.
 struct Entry<'a> {
     key: EntryKey,
+    host: &'a HostId,
     cwd: &'a Path,
     title: &'a str,
     /// `last_active_ms`; panes the session list does not know count as active now.
@@ -464,17 +474,19 @@ enum EntryKind<'a> {
 
 /// The Active list.
 pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
-    let by_id: HashMap<&str, &SessionInfo> = input.sessions.iter().map(|s| (s.id.as_str(), *s)).collect();
+    let by_id: HashMap<(&HostId, &str), &SessionInfo> =
+        input.sessions.iter().map(|s| ((&s.host, s.id.as_str()), *s)).collect();
     let mut entries: Vec<Entry<'_>> = Vec::new();
-    let mut in_leaves: HashSet<&str> = HashSet::new();
+    let mut in_leaves: HashSet<(&HostId, &str)> = HashSet::new();
     for pane in input.panes {
-        match pane.session.as_deref().and_then(|id| by_id.get(id).copied()) {
+        match pane.session.as_deref().and_then(|id| by_id.get(&(&pane.host, id)).copied()) {
             Some(session) => {
-                in_leaves.insert(session.id.as_str());
+                in_leaves.insert((&session.host, session.id.as_str()));
                 let title = session_title(session);
                 let kind = EntryKind::Session { session, leaf: Some(pane) };
                 entries.push(Entry {
                     key: EntryKey::Leaf(pane.leaf),
+                    host: &session.host,
                     cwd: &session.cwd,
                     title,
                     activity: session.last_active_ms,
@@ -485,6 +497,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                 let title = if pane.claude { "New session" } else { pane.title.as_str() };
                 entries.push(Entry {
                     key: EntryKey::Leaf(pane.leaf),
+                    host: &pane.host,
                     cwd: &pane.cwd,
                     title,
                     activity: u64::MAX,
@@ -494,12 +507,13 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         }
     }
     for session in input.sessions.iter().copied() {
-        if session.state == SessionState::Closed || in_leaves.contains(session.id.as_str()) {
+        if session.state == SessionState::Closed || in_leaves.contains(&(&session.host, session.id.as_str())) {
             continue;
         }
         let kind = EntryKind::Session { session, leaf: None };
         entries.push(Entry {
             key: EntryKey::Session(session.id.clone()),
+            host: &session.host,
             cwd: &session.cwd,
             title: session_title(session),
             activity: session.last_active_ms,
@@ -519,12 +533,12 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     arrivals.update(&keys.into_iter().map(|(key, _)| key.clone()).collect::<Vec<_>>());
 
     // A tab with several panes is one item, placed in the project of its first leaf that has an entry.
-    let leaf_cwd: HashMap<NodeId, &Path> =
-        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, entry.cwd))).collect();
+    let leaf_cwd: HashMap<NodeId, (&HostId, &Path)> =
+        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, (entry.host, entry.cwd)))).collect();
     let mut groups: Vec<Group<'_>> = Vec::new();
     let mut group_of: HashMap<NodeId, usize> = HashMap::new();
     for tab in input.tabs.iter().filter(|tab| tab.leaves.len() >= 2) {
-        let Some(cwd) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf)) else { continue };
+        let Some((host, cwd)) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf).copied()) else { continue };
         let place = tab
             .leaves
             .iter()
@@ -535,7 +549,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         for leaf in &tab.leaves {
             group_of.insert(*leaf, groups.len());
         }
-        groups.push(Group { tab, project: (input.project_of)(cwd), place, members: Vec::new() });
+        groups.push(Group { tab, project: (input.project_of)(host, cwd), place, members: Vec::new() });
     }
 
     let mut fuzzy = Fuzzy::new(input.filter, entries.iter().map(|entry| keep_text(entry.title, entry.cwd, input.home)));
@@ -547,7 +561,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         }
         match leaf_of(&entry.key).and_then(|leaf| group_of.get(&leaf)) {
             Some(&group) => groups[group].members.push(entry),
-            None => by_project.entry((input.project_of)(entry.cwd)).or_default().push(entry),
+            None => by_project.entry((input.project_of)(entry.host, entry.cwd)).or_default().push(entry),
         }
     }
     let mut items_of: HashMap<PathBuf, Vec<Item<'_>>> = HashMap::new();
@@ -581,7 +595,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     let mut paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
     for (_, items) in &projects {
         for entry in items.iter().flat_map(Item::entries) {
-            let own = (input.project_of)(entry.cwd);
+            let own = (input.project_of)(entry.host, entry.cwd);
             if !paths.contains(&own) {
                 paths.push(own);
             }
@@ -596,7 +610,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             match item {
                 Item::Single(entry) => {
                     let mut row = entry_row(entry, input);
-                    row.project = Some((input.project_of)(entry.cwd));
+                    row.project = Some((input.project_of)(entry.host, entry.cwd));
                     rendered.push(row);
                 }
                 Item::Group(group) => {
@@ -613,7 +627,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     for entry in &group.members {
                         let mut row = entry_row(entry, input);
                         row.in_tab = true;
-                        let own = (input.project_of)(entry.cwd);
+                        let own = (input.project_of)(entry.host, entry.cwd);
                         row.project_label = (own != path).then(|| labels[&own].clone());
                         row.project = Some(own);
                         rendered.push(row);
@@ -802,21 +816,30 @@ pub fn project_label(rows: &[Row], root: &Path) -> Option<String> {
     })
 }
 
-/// Project names: the folder's name, or its whole displayed path where two projects share a name.
+/// Project names: the folder's name, or its whole displayed path where two projects share a name. A remote project
+/// is `<host> - <name>`.
 pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>) -> HashMap<PathBuf, String> {
-    let short = |path: &Path| match path.file_name() {
-        Some(name) if Some(path) != home => name.to_string_lossy().into_owned(),
-        _ => display_path(path, home),
+    let name = |path: &Path, whole: bool| {
+        let (host, root) = split_project_key(path);
+        let home = home.filter(|_| host.is_local());
+        let text = match root.file_name() {
+            Some(name) if !whole && Some(root.as_path()) != home => name.to_string_lossy().into_owned(),
+            _ => display_path(&root, home),
+        };
+        match host.remote_name() {
+            Some(host) => format!("{host} - {text}"),
+            None => text,
+        }
     };
     let mut uses: HashMap<String, HashSet<&Path>> = HashMap::new();
     for path in paths {
-        uses.entry(short(path)).or_default().insert(path);
+        uses.entry(name(path, false)).or_default().insert(path);
     }
     paths
         .iter()
         .map(|path| {
-            let name = short(path);
-            let label = if uses[&name].len() > 1 { display_path(path, home) } else { name };
+            let short = name(path, false);
+            let label = if uses[&short].len() > 1 { name(path, true) } else { short };
             (path.clone(), label)
         })
         .collect()
@@ -889,13 +912,15 @@ mod tests {
     }
 
     /// Repositories of the fixtures: every `/r/<name>` directory.
-    fn project_of(cwd: &Path) -> PathBuf {
-        project_root(cwd, Some(Path::new("/home/me")), |dir| dir.parent() == Some(Path::new("/r")))
+    fn project_of(host: &HostId, cwd: &Path) -> PathBuf {
+        let root = project_root(cwd, Some(Path::new("/home/me")), |dir| dir.parent() == Some(Path::new("/r")));
+        project_key(host, &root)
     }
 
     fn pane(leaf: NodeId, cwd: &str, session: Option<&str>) -> PaneEntry {
         PaneEntry {
             leaf,
+            host: HostId::local(),
             cwd: cwd.into(),
             title: format!("pane {leaf}"),
             session: session.map(String::from),
@@ -1166,7 +1191,7 @@ mod tests {
         assert_eq!(by(RowKey::Leaf(9)), Activation::FocusLeaf(9));
         assert_eq!(by(RowKey::Leaf(8)), Activation::FocusLeaf(8));
         assert_eq!(by(RowKey::Session("e".into())), Activation::ToggleDetails("e".into()));
-        assert_eq!(by(RowKey::Session("orphan".into())), Activation::FocusPane(1));
+        assert_eq!(by(RowKey::Session("orphan".into())), Activation::FocusPane(PaneKey::local(1)));
         assert_eq!(by(RowKey::Project("/r/p".into())), Activation::ToggleProject("/r/p".into()));
     }
 
@@ -1553,5 +1578,47 @@ mod tests {
         assert_eq!(leaf_title(&rows, 1), Some(expected));
         assert_eq!(leaf_title(&rows, 2), Some(shell_pane(2, "/r/alpha").title));
         assert_eq!(leaf_title(&rows, 9), None);
+    }
+
+    fn remote(session: SessionInfo) -> SessionInfo {
+        SessionInfo { host: HostId::named("devbox"), ..session }
+    }
+
+    #[test]
+    fn the_same_folder_on_two_hosts_is_two_projects_and_only_the_remote_one_names_its_host() {
+        let mut fixture =
+            Fixture::of(vec![managed("l", "/r/app", NOW - 1), remote(managed("r", "/r/app", NOW - 2))], vec![]);
+        assert_eq!(fixture.outline(), vec!["▾ app", "  l (Idle · now)", "▾ devbox - app", "  r (Idle · now)"]);
+    }
+
+    #[test]
+    fn activating_a_running_session_focuses_its_pane_on_its_own_host() {
+        let mut fixture = Fixture::of(vec![remote(managed("r", "/r/app", NOW - 1))], vec![]);
+        let rows = fixture.rows();
+        let row = rows.iter().find(|row| matches!(row.kind, RowKind::Session { .. })).unwrap();
+        assert_eq!(row.activation(), Activation::FocusPane(PaneKey::new(HostId::named("devbox"), 1)));
+    }
+
+    #[test]
+    fn labels_add_the_host_to_remote_projects_only() {
+        let devbox = HostId::named("devbox");
+        let paths = vec![
+            PathBuf::from("/r/app"),
+            project_key(&devbox, Path::new("/home/u/app")),
+            project_key(&devbox, Path::new("/home/u/api")),
+        ];
+        let labels = labels(&paths, Some(Path::new("/home/me")));
+        assert_eq!(labels[&paths[0]], "app");
+        assert_eq!(labels[&paths[1]], "devbox - app");
+        assert_eq!(labels[&paths[2]], "devbox - api");
+    }
+
+    #[test]
+    fn two_remote_folders_with_one_name_show_their_paths() {
+        let devbox = HostId::named("devbox");
+        let paths = vec![project_key(&devbox, Path::new("/srv/a/app")), project_key(&devbox, Path::new("/srv/b/app"))];
+        let labels = labels(&paths, None);
+        assert_eq!(labels[&paths[0]], "devbox - /srv/a/app");
+        assert_eq!(labels[&paths[1]], "devbox - /srv/b/app");
     }
 }

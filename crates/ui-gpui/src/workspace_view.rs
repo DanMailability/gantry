@@ -670,7 +670,8 @@ impl WorkspaceView {
     /// The color of the project `leaf` belongs to (its session's directory, else the pane's), if project colors are on.
     fn leaf_project_color(&self, leaf: NodeId, cx: &App) -> Option<u32> {
         let cwd = self.leaf_cwd(leaf, cx)?;
-        theme(cx).project(&self.sidebar.read(cx).project_of(&cwd))
+        let host = self.workspace.leaves.get(&leaf)?.host.clone();
+        theme(cx).project(&self.sidebar.read(cx).project_of(&host, &cwd))
     }
 
     /// The directory `leaf` works in: its session's, else the pane's.
@@ -1074,6 +1075,7 @@ impl WorkspaceView {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
                 PaneEntry {
                     leaf: *id,
+                    host: leaf.host.clone(),
                     cwd: leaf.launch.cwd.clone(),
                     title: leaf
                         .name
@@ -1369,8 +1371,8 @@ impl WorkspaceView {
     fn on_sidebar_event(&mut self, event: SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             SidebarEvent::Activate { activation, split } => match activation {
-                Activation::FocusPane(pane) => {
-                    if let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::local(pane)) {
+                Activation::FocusPane(key) => {
+                    if let Some(leaf) = self.workspace.leaf_for_pane(&key) {
                         self.focus_leaf(leaf, window, cx);
                     }
                 }
@@ -1981,8 +1983,9 @@ impl WorkspaceView {
             folder: cwd.as_deref().map(|cwd| display_path(cwd, std::env::home_dir().as_deref())),
         };
         let sidebar = self.sidebar.read(cx);
+        let host = self.workspace.leaves.get(&leaf).map(|leaf| leaf.host.clone()).unwrap_or_default();
         let project = cwd.as_deref().map(|cwd| {
-            let root = sidebar.project_of(cwd);
+            let root = sidebar.project_of(&host, cwd);
             let label = sidebar.project_label(&root).unwrap_or_else(|| {
                 root.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned())
             });

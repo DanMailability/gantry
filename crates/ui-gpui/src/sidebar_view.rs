@@ -186,8 +186,8 @@ impl SidebarView {
     }
 
     /// The project a directory belongs to (its git repository, else the directory).
-    pub(crate) fn project_of(&self, cwd: &Path) -> PathBuf {
-        self.roots.of(cwd)
+    pub(crate) fn project_of(&self, host: &HostId, cwd: &Path) -> PathBuf {
+        self.roots.of(host, cwd)
     }
 
     /// Every Gantry leaf in sidebar order, whatever the filter or collapsed projects hide.
@@ -311,7 +311,7 @@ impl SidebarView {
             let sessions: Vec<&SessionInfo> = self.sessions.all().collect();
             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
             let roots = &self.roots;
-            let project_of = |cwd: &Path| roots.of(cwd);
+            let project_of = |host: &HostId, cwd: &Path| roots.of(host, cwd);
             let build = |filter: &str,
                          toggled: &HashSet<PathBuf>,
                          details: Option<&str>,

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use protocol::host::HostId;
 use protocol::message::{SearchHit, SessionInfo, SessionState, Speaker};
 
 use crate::fuzzy::Fuzzy;
@@ -27,7 +28,7 @@ pub struct RecentsInput<'a> {
     /// Projects whose "Show N more" was used.
     pub expanded: &'a HashSet<PathBuf>,
     /// The project a directory belongs to.
-    pub project_of: &'a dyn Fn(&Path) -> PathBuf,
+    pub project_of: &'a dyn Fn(&HostId, &Path) -> PathBuf,
     /// Current time, ms since the Unix epoch.
     pub now_ms: u64,
     /// Sessions shown per project before "Show N more" (no search, all projects).
@@ -183,7 +184,7 @@ fn grouped<'a>(input: &RecentsInput<'a>) -> Vec<(PathBuf, Vec<&'a SessionInfo>)>
     let mut by_project: HashMap<PathBuf, Vec<&'a SessionInfo>> = HashMap::new();
     for session in input.sessions.iter().copied() {
         if session.state == SessionState::Closed && !input.open.contains(&session.id) {
-            by_project.entry((input.project_of)(&session.cwd)).or_default().push(session);
+            by_project.entry((input.project_of)(&session.host, &session.cwd)).or_default().push(session);
         }
     }
     let mut projects: Vec<(PathBuf, Vec<&'a SessionInfo>)> = by_project.into_iter().collect();
@@ -281,7 +282,7 @@ fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
     }
     let mut rows: Vec<(Order, RecentItem)> = Vec::new();
     for session in candidates {
-        let project = (input.project_of)(&session.cwd);
+        let project = (input.project_of)(&session.host, &session.cwd);
         if !in_scope(input, &project) {
             continue;
         }
@@ -422,6 +423,7 @@ pub fn counts(input: &RecentsInput<'_>) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::host::project_key;
 
     const NOW: u64 = 1_000_000_000;
     const HOUR: u64 = 60 * 60 * 1000;
@@ -443,8 +445,9 @@ mod tests {
         }
     }
 
-    fn project_of(cwd: &Path) -> PathBuf {
-        cwd.ancestors().find(|dir| dir.parent() == Some(Path::new("/r"))).unwrap_or(cwd).to_path_buf()
+    fn project_of(host: &HostId, cwd: &Path) -> PathBuf {
+        let root = cwd.ancestors().find(|dir| dir.parent() == Some(Path::new("/r"))).unwrap_or(cwd);
+        project_key(host, root)
     }
 
     struct Fixture {
@@ -821,5 +824,13 @@ mod tests {
     fn overlapping_highlights_are_merged_in_order() {
         let snippet = Snippet::from_hit(&hit("s", "abcdefghij", vec![(5, 8), (0, 2), (1, 4)]));
         assert_eq!(snippet.highlights, vec![0..4, 5..8]);
+    }
+
+    #[test]
+    fn the_same_folder_on_two_hosts_is_two_recent_projects_named_with_the_host() {
+        let remote = SessionInfo { host: HostId::named("devbox"), ..closed("r", "/r/app", 2) };
+        let fixture = Fixture::of(vec![closed("l", "/r/app", 1), remote]);
+        assert_eq!(fixture.outline(), vec!["# app", "l", "# devbox - app", "r"]);
+        assert_eq!(fixture.chip_labels()[1..3], ["app 1", "devbox - app 1"]);
     }
 }

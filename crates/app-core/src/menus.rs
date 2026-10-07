@@ -504,6 +504,7 @@ mod tests {
     fn pane_row(claude: bool, ended: bool) -> Row {
         let entry = PaneEntry {
             leaf: 7,
+            host: protocol::host::HostId::local(),
             cwd: "/r/app".into(),
             title: "p".into(),
             session: claude.then(|| "new".to_string()),
