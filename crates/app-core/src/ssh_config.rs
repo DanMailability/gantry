@@ -4,11 +4,11 @@
 /// order. An `Include` is read once through `read_include` (its own `Include`s are not followed).
 pub fn aliases(text: &str, read_include: &mut dyn FnMut(&str) -> Option<String>) -> Vec<String> {
     let mut found = Vec::new();
-    collect(text, Some(read_include), &mut found);
+    collect(text, read_include, true, &mut found);
     found
 }
 
-fn collect(text: &str, mut read_include: Option<&mut dyn FnMut(&str) -> Option<String>>, found: &mut Vec<String>) {
+fn collect(text: &str, read_include: &mut dyn FnMut(&str) -> Option<String>, follow: bool, found: &mut Vec<String>) {
     let mut included: Vec<String> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -24,16 +24,14 @@ fn collect(text: &str, mut read_include: Option<&mut dyn FnMut(&str) -> Option<S
                     found.push(pattern.to_string());
                 }
             }
-        } else if keyword.eq_ignore_ascii_case("include")
-            && let Some(read) = read_include.as_mut()
-        {
+        } else if follow && keyword.eq_ignore_ascii_case("include") {
             for name in words {
                 if included.iter().any(|done| done == name) {
                     continue;
                 }
                 included.push(name.to_string());
-                if let Some(text) = read(name) {
-                    collect(&text, None, found);
+                if let Some(text) = read_include(name) {
+                    collect(&text, read_include, false, found);
                 }
             }
         }

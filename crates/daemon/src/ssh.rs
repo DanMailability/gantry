@@ -29,7 +29,7 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Lets the caller end an attempt that is still connecting.
 #[derive(Clone, Default)]
 pub struct AttemptHandle {
-    cancel: Arc<Notify>,
+    pub(crate) cancel: Arc<Notify>,
 }
 
 impl AttemptHandle {
@@ -52,8 +52,14 @@ pub enum Attempt {
     Background,
 }
 
-/// The arguments of `ssh` for `spec`. The target comes after `--` so it can never be read as an option.
+/// The arguments of `ssh` for `spec` running the Gantry bridge. The target comes after `--` so it can never be read
+/// as an option.
 pub fn ssh_args(spec: &SshHostSpec, background: bool) -> Vec<String> {
+    ssh_args_for(spec, background, &format!("{} bridge", spec.command))
+}
+
+/// The arguments of `ssh` for `spec` running `remote_command` (text for the remote shell).
+pub fn ssh_args_for(spec: &SshHostSpec, background: bool, remote_command: &str) -> Vec<String> {
     let mut args: Vec<String> =
         ["-T", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
             .into_iter()
@@ -62,7 +68,7 @@ pub fn ssh_args(spec: &SshHostSpec, background: bool) -> Vec<String> {
     if background {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
     }
-    args.extend(["--".into(), spec.target.clone(), format!("{} bridge", spec.command)]);
+    args.extend(["--".into(), spec.target.clone(), remote_command.to_string()]);
     args
 }
 
@@ -97,7 +103,7 @@ pub fn connect(
 }
 
 /// Resolves after `total` of time during which no sign-in question waits for the user.
-async fn timeout_without_questions(state: &AskpassState, total: Duration) {
+pub(crate) async fn timeout_without_questions(state: &AskpassState, total: Duration) {
     let mut left = total;
     loop {
         if state.waiting() {
@@ -110,6 +116,53 @@ async fn timeout_without_questions(state: &AskpassState, total: Duration) {
             () = state.wait_changed() => left = left.saturating_sub(started.elapsed()),
         }
     }
+}
+
+/// Set up `command`'s environment for `attempt`: for an interactive one start the sign-in server and point
+/// `SSH_ASKPASS` at this binary; otherwise (or when that is impossible) remove `SSH_ASKPASS`. Returns the server (the
+/// sign-in socket lives as long as it does), the questions' state and whether ssh must run in batch mode.
+pub(crate) async fn prepare(
+    command: &mut tokio::process::Command,
+    spec: &SshHostSpec,
+    attempt: &Attempt,
+) -> (Option<AskpassServer>, Arc<AskpassState>, bool) {
+    let mut background = !matches!(attempt, Attempt::Interactive { .. });
+    let state = Arc::new(AskpassState::default());
+    let mut askpass: Option<AskpassServer> = None;
+    if let Attempt::Interactive { prompts, runtime_dir } = attempt {
+        match AskpassServer::start(runtime_dir, &spec.name, prompts.clone(), state.clone()).await {
+            Ok(server) => {
+                if let Ok(exe) = std::env::current_exe() {
+                    command
+                        .env("SSH_ASKPASS", exe)
+                        .env("SSH_ASKPASS_REQUIRE", "force")
+                        .env("GANTRY_ASKPASS_SOCKET", server.path());
+                    askpass = Some(server);
+                } else {
+                    background = true;
+                }
+            }
+            // No sign-in dialogs here (Windows): keys and the agent only.
+            Err(_) => background = true,
+        }
+    }
+    if background {
+        command.env_remove("SSH_ASKPASS").env_remove("SSH_ASKPASS_REQUIRE");
+    }
+    (askpass, state, background)
+}
+
+/// Collect what ssh prints on stderr in the background; only the tail (the last words of ssh) is kept.
+pub(crate) fn spawn_stderr_tail(mut stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
+    tokio::spawn(async move {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text).await;
+        let mut keep = text.len().saturating_sub(4096);
+        while !text.is_char_boundary(keep) {
+            keep += 1;
+        }
+        text[keep..].to_string()
+    })
 }
 
 /// Why an attempt was ended from outside, before its handshake finished.
@@ -133,51 +186,20 @@ async fn run(
         let _ = ready.send(Err(kind));
     };
     let interactive = matches!(attempt, Attempt::Interactive { .. });
-    let mut background = !interactive;
     let mut command = tokio::process::Command::new(&program);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    let state = Arc::new(AskpassState::default());
     // Dropping the server removes the sign-in socket: it goes right after the handshake.
-    let mut askpass: Option<AskpassServer> = None;
-    if let Attempt::Interactive { prompts, runtime_dir } = &attempt {
-        match AskpassServer::start(runtime_dir, &spec.name, prompts.clone(), state.clone()).await {
-            Ok(server) => {
-                if let Ok(exe) = std::env::current_exe() {
-                    command
-                        .env("SSH_ASKPASS", exe)
-                        .env("SSH_ASKPASS_REQUIRE", "force")
-                        .env("GANTRY_ASKPASS_SOCKET", server.path());
-                    askpass = Some(server);
-                } else {
-                    background = true;
-                }
-            }
-            // No sign-in dialogs here (Windows): keys and the agent only.
-            Err(_) => background = true,
-        }
-    }
-    if background {
-        command.env_remove("SSH_ASKPASS").env_remove("SSH_ASKPASS_REQUIRE");
-    }
+    let (askpass, state, background) = prepare(&mut command, &spec, &attempt).await;
     command.args(ssh_args(&spec, background));
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => return fail(FailKind::Other { reason: format!("could not run {program}: {err}") }),
     };
-    let (stdin, stdout, mut stderr) = match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+    let (stdin, stdout, stderr) = match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
         (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
         _ => return fail(FailKind::Other { reason: "ssh has no pipes".into() }),
     };
-    let stderr_text = tokio::spawn(async move {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text).await;
-        // Only the tail matters: the last words of ssh.
-        let mut keep = text.len().saturating_sub(4096);
-        while !text.is_char_boundary(keep) {
-            keep += 1;
-        }
-        text[keep..].to_string()
-    });
+    let stderr_text = spawn_stderr_tail(stderr);
     let handshaken = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hello_ready = ready.clone();
     let done = handshaken.clone();

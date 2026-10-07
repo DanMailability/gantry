@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use app_core::host_state::FailKind;
 use daemon::askpass::{AskAnswer, AskPrompt};
 use daemon::client::ClientEvent;
+use daemon::remote_install::{self, Timeouts};
 use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, SshHostSpec, connect as connect_with};
 use protocol::message::SpawnRequest;
 
@@ -26,6 +27,8 @@ struct Fake {
     fail: Option<(i32, &'static str)>,
     /// Run this shell text instead of the bridge (after the asking above); `$GANTRY` is the gantry binary.
     body: Option<String>,
+    /// Run the remote command text (ssh's last argument) with `sh -c` instead of the bridge, like a remote shell.
+    run_remote: bool,
 }
 
 struct Env {
@@ -50,7 +53,7 @@ fn setup(profile: &str, fake: Fake) -> Env {
     let root = dir.path().display();
     let mut script = format!(
         "#!/bin/sh\nexport XDG_RUNTIME_DIR='{root}/run' HOME='{root}/home' SHELL=/bin/sh GANTRY_PROFILE='{profile}'\n\
-         printf '%s' \"$SSH_ASKPASS\" > '{root}/askpass-env'\n"
+         PATH='{root}/fakebin':\"$PATH\"\nprintf '%s' \"$SSH_ASKPASS\" > '{root}/askpass-env'\n"
     );
     if let Some(prompt) = fake.ask {
         let prompt = prompt.replace('\'', "'\\''");
@@ -59,7 +62,9 @@ fn setup(profile: &str, fake: Fake) -> Env {
              {{ echo 'Permission denied (publickey,password).' >&2; exit 255; }}\n  printf '%s' \"$answer\" > '{root}/answer'\nfi\n"
         ));
     }
-    if let Some(body) = fake.body {
+    if fake.run_remote {
+        script.push_str("for last; do :; done\nexec sh -c \"$last\"\n");
+    } else if let Some(body) = fake.body {
         script.push_str(&format!("GANTRY='{GANTRY}'\n{body}\n"));
     } else if let Some((code, message)) = fake.fail {
         script.push_str(&format!("echo '{message}' >&2\nexit {code}\n"));
@@ -168,8 +173,11 @@ fn a_cancelled_sign_in_ends_the_attempt_as_needs_input() {
 
 #[test]
 fn a_background_attempt_never_gets_the_askpass_helper() {
-    let fake =
-        Fake { ask: Some("Password: "), fail: Some((255, "me@devbox: Permission denied (publickey).")), body: None };
+    let fake = Fake {
+        ask: Some("Password: "),
+        fail: Some((255, "me@devbox: Permission denied (publickey).")),
+        ..Fake::default()
+    };
     let env = setup("sshbridge4", fake);
     let error = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).err().expect("fails");
     assert_eq!(error, FailKind::NeedsInput);
@@ -320,4 +328,228 @@ fn an_interactive_attempt_that_asks_nothing_still_times_out() {
     .err()
     .expect("times out");
     assert_eq!(error, FailKind::Other { reason: "timed out waiting for Gantry on the host".into() });
+}
+
+/// A fake ssh that runs ssh's remote command text locally, like a remote shell.
+fn remote_env(profile: &str, ask: Option<&'static str>) -> Env {
+    setup(profile, Fake { ask, run_remote: true, ..Fake::default() })
+}
+
+fn remote_spec(env: &Env, command: &str) -> SshHostSpec {
+    SshHostSpec {
+        name: "devbox-name".into(),
+        target: "devbox".into(),
+        command: env.path(command).display().to_string(),
+    }
+}
+
+fn write_script(path: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn uname() -> String {
+    let out = std::process::Command::new("uname").arg("-sm").output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn probe_reads_a_fake_remote() {
+    let env = remote_env("sshinst1", None);
+    write_script(&env.path("stub-gantry"), "#!/bin/sh\necho 'gantry 0.17.0 (test)'\n");
+    let spec = remote_spec(&env, "stub-gantry");
+    let probe =
+        remote_install::probe(env.fake.to_str().unwrap(), &spec, Attempt::Background, &AttemptHandle::default())
+            .unwrap();
+    assert_eq!(probe.version.as_deref(), Some("0.17.0"));
+    assert_eq!(probe.os_arch, uname());
+    assert_eq!(probe.home, env.path("home").display().to_string());
+}
+
+#[test]
+fn probe_of_a_missing_gantry_says_missing() {
+    let env = remote_env("sshinst1b", None);
+    let spec = remote_spec(&env, "nowhere/gantry");
+    let probe =
+        remote_install::probe(env.fake.to_str().unwrap(), &spec, Attempt::Background, &AttemptHandle::default())
+            .unwrap();
+    assert_eq!(probe.version, None);
+}
+
+fn big_file(env: &Env, name: &str, megabytes: usize) -> std::path::PathBuf {
+    let path = env.path(name);
+    let chunk: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let mut data = Vec::new();
+    for _ in 0..megabytes {
+        data.extend_from_slice(&chunk);
+    }
+    std::fs::write(&path, data).unwrap();
+    path
+}
+
+#[test]
+fn upload_writes_the_file_with_mode_755_and_removes_the_temp_name() {
+    let env = remote_env("sshinst2", None);
+    let local = big_file(&env, "local-binary", 3);
+    let spec = remote_spec(&env, "bin/gantry");
+    let mut last = 0;
+    let mut progress = |sent: u64| last = sent;
+    remote_install::upload(
+        env.fake.to_str().unwrap(),
+        &spec,
+        Attempt::Background,
+        &AttemptHandle::default(),
+        &local,
+        &mut progress,
+    )
+    .unwrap();
+    let target = env.path("bin/gantry");
+    assert_eq!(std::fs::read(&target).unwrap(), std::fs::read(&local).unwrap());
+    assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755);
+    assert!(!env.path("bin/gantry.new").exists());
+    assert_eq!(last, std::fs::metadata(&local).unwrap().len());
+}
+
+#[test]
+fn a_cut_upload_leaves_the_old_binary_and_no_new_file() {
+    let env = remote_env("sshinst3", None);
+    let local = big_file(&env, "local-binary", 20);
+    let spec = remote_spec(&env, "bin/gantry");
+    std::fs::create_dir_all(env.path("bin")).unwrap();
+    std::fs::write(env.path("bin/gantry"), "old").unwrap();
+    let handle = AttemptHandle::default();
+    let canceller = handle.clone();
+    let mut cut = false;
+    let mut progress = |_sent: u64| {
+        if !cut {
+            cut = true;
+            canceller.cancel();
+        }
+    };
+    let error =
+        remote_install::upload(env.fake.to_str().unwrap(), &spec, Attempt::Background, &handle, &local, &mut progress)
+            .expect_err("cancelled");
+    assert_eq!(error, FailKind::NeedsInput);
+    assert_eq!(std::fs::read_to_string(env.path("bin/gantry")).unwrap(), "old");
+    assert!(!env.path("bin/gantry.new").exists());
+}
+
+#[test]
+fn a_refused_command_never_runs() {
+    let env = remote_env("sshinst4", None);
+    let local = big_file(&env, "local-binary", 1);
+    let mut spec = remote_spec(&env, "bin/gantry");
+    spec.command = "env X=1 gantry".into();
+    let error = remote_install::upload(
+        env.fake.to_str().unwrap(),
+        &spec,
+        Attempt::Background,
+        &AttemptHandle::default(),
+        &local,
+        &mut |_| {},
+    )
+    .expect_err("refused");
+    match error {
+        FailKind::Other { reason } => assert!(reason.contains("install Gantry on that host by hand"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!env.path("askpass-env").exists(), "ssh was never started");
+}
+
+#[test]
+fn verify_returns_the_version_line_or_the_failure() {
+    let env = remote_env("sshinst5", None);
+    write_script(&env.path("stub-gantry"), "#!/bin/sh\necho 'gantry 0.17.0 (test)'\n");
+    let spec = remote_spec(&env, "stub-gantry");
+    let line =
+        remote_install::verify(env.fake.to_str().unwrap(), &spec, Attempt::Background, &AttemptHandle::default())
+            .unwrap();
+    assert_eq!(line, "gantry 0.17.0 (test)");
+    write_script(&env.path("broken-gantry"), "#!/bin/sh\necho 'GLIBC_2.39 not found' >&2\nexit 1\n");
+    let spec = remote_spec(&env, "broken-gantry");
+    match remote_install::verify(env.fake.to_str().unwrap(), &spec, Attempt::Background, &AttemptHandle::default())
+        .unwrap_err()
+    {
+        FailKind::Other { reason } => assert!(reason.contains("GLIBC_2.39 not found"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn stop_remote_daemon_ends_the_daemon_over_the_bridge() {
+    let env = setup("sshinst6", Fake::default());
+    let first = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).unwrap();
+    let instance = first.instance.clone();
+    remote_install::stop_remote_daemon(
+        env.fake.to_str().unwrap(),
+        &spec(),
+        Attempt::Background,
+        &AttemptHandle::default(),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the first connection never ended");
+        if matches!(first.events.recv_blocking(), Ok(ClientEvent::Disconnected) | Err(_)) {
+            break;
+        }
+    }
+    // The old daemon closes its socket right after it reads StopAll; give it a moment before connecting again.
+    std::thread::sleep(Duration::from_millis(500));
+    let second = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).unwrap();
+    assert_ne!(second.instance, instance, "a fresh daemon");
+    stop_daemon(&second);
+}
+
+#[test]
+fn enable_linger_reports_stderr() {
+    let env = remote_env("sshinst7", None);
+    write_script(&env.path("fakebin/loginctl"), "#!/bin/sh\necho 'Interactive authentication required.' >&2\nexit 1\n");
+    let spec = remote_spec(&env, "bin/gantry");
+    let error = remote_install::enable_linger(
+        env.fake.to_str().unwrap(),
+        &spec,
+        Attempt::Background,
+        &AttemptHandle::default(),
+    )
+    .expect_err("fails");
+    assert!(error.contains("Interactive authentication required."), "{error}");
+}
+
+#[test]
+fn the_answer_to_a_question_is_used_for_the_probe() {
+    let env = remote_env("sshinst8", Some("Password:"));
+    write_script(&env.path("stub-gantry"), "#!/bin/sh\necho 'gantry 0.17.0 (test)'\n");
+    let spec = remote_spec(&env, "stub-gantry");
+    let (prompts_tx, prompts_rx) = async_channel::unbounded::<AskPrompt>();
+    let responder = std::thread::spawn(move || {
+        let prompt = prompts_rx.recv_blocking().unwrap();
+        prompt.reply.send_blocking(AskAnswer::Answer("pw".into())).unwrap();
+    });
+    let attempt = Attempt::Interactive { prompts: prompts_tx, runtime_dir: env.path("run") };
+    let probe = remote_install::probe(env.fake.to_str().unwrap(), &spec, attempt, &AttemptHandle::default()).unwrap();
+    responder.join().unwrap();
+    assert_eq!(probe.version.as_deref(), Some("0.17.0"));
+    assert_eq!(std::fs::read_to_string(env.path("answer")).unwrap(), "pw");
+}
+
+#[test]
+fn a_remote_that_stalls_times_out() {
+    let env = setup("sshinst9", Fake { body: Some("sleep 60".into()), ..Fake::default() });
+    let spec = remote_spec(&env, "bin/gantry");
+    let started = Instant::now();
+    let error = remote_install::run_remote(
+        env.fake.to_str().unwrap(),
+        &spec,
+        Attempt::Background,
+        &AttemptHandle::default(),
+        "true",
+        None,
+        &mut |_| {},
+        Timeouts { idle: Duration::from_millis(500) },
+    )
+    .expect_err("times out");
+    assert!(matches!(error, FailKind::Other { .. }), "{error:?}");
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
