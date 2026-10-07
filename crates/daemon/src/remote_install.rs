@@ -1,7 +1,7 @@
 //! The steps of the SSH install wizard, each one ssh command on the transport's attempt machinery: sign-in dialogs
 //! through askpass, Cancel through the attempt handle, no step that hangs. Every function blocks.
 
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use app_core::host_install::{Probe, UploadPath, parse_probe, probe_command, uplo
 use app_core::host_state::{FailKind, classify_failure};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{ClientMessage, PROTOCOL_VERSION};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 
@@ -34,7 +35,7 @@ impl Default for Timeouts {
 
 const UPLOAD_IDLE: Duration = Duration::from_secs(60);
 const CLEANUP_IDLE: Duration = Duration::from_secs(10);
-const STOP_IDLE: Duration = Duration::from_secs(30);
+const STOP_IDLE: Duration = Duration::from_secs(10);
 const CHUNK: usize = 64 * 1024;
 
 fn other(reason: impl Into<String>) -> FailKind {
@@ -214,6 +215,37 @@ pub fn probe(program: &str, spec: &SshHostSpec, attempt: Attempt, handle: &Attem
     parse_probe(&stdout).map_err(other)
 }
 
+/// The file opened and rewound, its size and its sha256 (lowercase hex).
+fn open_with_hash(local: &Path) -> Result<(std::fs::File, u64, String), FailKind> {
+    let fail = |err: std::io::Error| other(format!("could not read {}: {err}", local.display()));
+    let mut input = std::fs::File::open(local).map_err(fail)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; CHUNK];
+    let mut size = 0u64;
+    loop {
+        let read = input.read(&mut buffer).map_err(fail)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    input.seek(SeekFrom::Start(0)).map_err(fail)?;
+    Ok((input, size, format!("{:x}", hasher.finalize())))
+}
+
+/// The remote shell text of an upload: the file goes to `<file>.new` and only replaces `file` when it has the size
+/// (and, where `sha256sum` exists, the hash) sent. A cut stream (sshd closes the channel and `cat` sees a clean end)
+/// fails the check and removes `<file>.new`. `size` and `hash` are digits and hex only.
+fn upload_command(dir: &str, file: &str, size: u64, hash: &str) -> String {
+    format!(
+        "mkdir -p {dir} && cat > {file}.new && [ \"$(wc -c < {file}.new)\" -eq {size} ] && \
+         {{ ! command -v sha256sum >/dev/null 2>&1 || [ \"$(sha256sum < {file}.new | cut -d' ' -f1)\" = {hash} ]; }} && \
+         chmod 755 {file}.new && mv -f {file}.new {file} || \
+         {{ rm -f {file}.new; echo 'the upload was cut or did not match' >&2; exit 1; }}"
+    )
+}
+
 /// Send the file `local` to the host's Gantry path, through `<path>.new` so a cut upload never replaces a working
 /// binary; a failed or cancelled upload removes `<path>.new` (best effort). `on_progress` gets the bytes sent.
 pub fn upload(
@@ -225,9 +257,8 @@ pub fn upload(
     on_progress: &mut dyn FnMut(u64),
 ) -> Result<(), FailKind> {
     let UploadPath { dir, file } = upload_path(&spec.command).map_err(other)?;
-    let input =
-        std::fs::File::open(local).map_err(|err| other(format!("could not open {}: {err}", local.display())))?;
-    let command = format!("mkdir -p {dir} && cat > {file}.new && chmod 755 {file}.new && mv -f {file}.new {file}");
+    let (input, size, hash) = open_with_hash(local)?;
+    let command = upload_command(&dir, &file, size, &hash);
     let result = run_remote(
         program,
         spec,
@@ -289,6 +320,7 @@ pub fn stop_remote_daemon(
             return Err(other("ssh has no pipes"));
         };
         let state = started.state.clone();
+        let answered = std::cell::Cell::new(false);
         let outcome = {
             let work = async {
                 // A write error means the bridge is gone: the exit status below says why.
@@ -296,13 +328,12 @@ pub fn stop_remote_daemon(
                     .await;
                 let _ = write_frame(&mut stdin, &Frame::control(&ClientMessage::StopAll)).await;
                 let _ = stdin.flush().await;
-                // The bridge only ends once its stdin does; the daemon has both frames by then, in order.
-                drop(stdin);
-                let mut answered = false;
+                // Stdin stays open: the bridge ends by itself when the daemon closes the socket.
                 while let Ok(Some(_)) = read_frame(&mut stdout).await {
-                    answered = true;
+                    answered.set(true);
                 }
-                (answered, started.child.wait().await)
+                drop(stdin);
+                started.child.wait().await
             };
             tokio::select! {
                 done = work => Ok(done),
@@ -312,13 +343,18 @@ pub fn stop_remote_daemon(
             }
         };
         match outcome {
+            // The daemon answered, so it has the frames and is going down: a slow close is not a failure.
+            Err(Abort::TimedOut) if answered.get() => {
+                let _ = started.child.start_kill();
+                Ok(())
+            }
             Err(abort) => {
                 let _ = started.child.start_kill();
                 Err(abort.kind(STOP_IDLE))
             }
-            Ok((true, _)) => Ok(()),
-            Ok((false, Ok(status))) if status.success() => Ok(()),
-            Ok((false, status)) => Err(failure(started, status.ok().and_then(|status| status.code())).await),
+            Ok(_) if answered.get() => Ok(()),
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(status) => Err(failure(started, status.ok().and_then(|status| status.code())).await),
         }
     })
 }

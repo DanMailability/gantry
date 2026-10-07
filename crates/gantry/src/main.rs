@@ -56,11 +56,13 @@ fn bridge_main() -> ExitCode {
         tokio::io::stdin(),
         tokio::io::stdout(),
     ));
+    // Leave now: dropping the runtime would wait for the blocked read of stdin, which keeps the bridge (and its ssh
+    // session) alive after the daemon closed the socket.
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => std::process::exit(0),
         Err(err) => {
             eprintln!("gantry bridge: {err}");
-            ExitCode::FAILURE
+            std::process::exit(1)
         }
     }
 }

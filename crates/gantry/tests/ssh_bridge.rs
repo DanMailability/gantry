@@ -63,7 +63,8 @@ fn setup(profile: &str, fake: Fake) -> Env {
         ));
     }
     if fake.run_remote {
-        script.push_str("for last; do :; done\nexec sh -c \"$last\"\n");
+        // Like sshd: the remote command runs in a child of its own that outlives a killed ssh, with the same stdin pipe.
+        script.push_str("for last; do :; done\nsh -c \"$last\" <&0 &\npid=$!\nwait $pid\nexit $?\n");
     } else if let Some(body) = fake.body {
         script.push_str(&format!("GANTRY='{GANTRY}'\n{body}\n"));
     } else if let Some((code, message)) = fake.fail {
@@ -418,12 +419,19 @@ fn a_cut_upload_leaves_the_old_binary_and_no_new_file() {
     let spec = remote_spec(&env, "bin/gantry");
     std::fs::create_dir_all(env.path("bin")).unwrap();
     std::fs::write(env.path("bin/gantry"), "old").unwrap();
+    let new_file = env.path("bin/gantry.new");
     let handle = AttemptHandle::default();
     let canceller = handle.clone();
     let mut cut = false;
     let mut progress = |_sent: u64| {
         if !cut {
             cut = true;
+            // Cut only once the remote command is writing its file, like a dropped connection mid-upload.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !new_file.exists() {
+                assert!(Instant::now() < deadline, "the remote never created gantry.new");
+                std::thread::sleep(Duration::from_millis(10));
+            }
             canceller.cancel();
         }
     };
@@ -431,8 +439,13 @@ fn a_cut_upload_leaves_the_old_binary_and_no_new_file() {
         remote_install::upload(env.fake.to_str().unwrap(), &spec, Attempt::Background, &handle, &local, &mut progress)
             .expect_err("cancelled");
     assert_eq!(error, FailKind::NeedsInput);
-    assert_eq!(std::fs::read_to_string(env.path("bin/gantry")).unwrap(), "old");
-    assert!(!env.path("bin/gantry.new").exists());
+    // The remote command outlives ssh (as under sshd): wait until it is done with gantry.new, whichever way it went.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while new_file.exists() {
+        assert!(Instant::now() < deadline, "gantry.new was never removed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(env.path("bin/gantry")).unwrap(), "old", "a cut upload replaced the binary");
 }
 
 #[test]
@@ -481,6 +494,7 @@ fn stop_remote_daemon_ends_the_daemon_over_the_bridge() {
     let env = setup("sshinst6", Fake::default());
     let first = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).unwrap();
     let instance = first.instance.clone();
+    let started = Instant::now();
     remote_install::stop_remote_daemon(
         env.fake.to_str().unwrap(),
         &spec(),
@@ -488,6 +502,7 @@ fn stop_remote_daemon_ends_the_daemon_over_the_bridge() {
         &AttemptHandle::default(),
     )
     .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5), "the bridge ends when the daemon closes the socket");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         assert!(Instant::now() < deadline, "the first connection never ended");
@@ -495,8 +510,6 @@ fn stop_remote_daemon_ends_the_daemon_over_the_bridge() {
             break;
         }
     }
-    // The old daemon closes its socket right after it reads StopAll; give it a moment before connecting again.
-    std::thread::sleep(Duration::from_millis(500));
     let second = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).unwrap();
     assert_ne!(second.instance, instance, "a fresh daemon");
     stop_daemon(&second);
@@ -552,4 +565,34 @@ fn a_remote_that_stalls_times_out() {
     .expect_err("times out");
     assert!(matches!(error, FailKind::Other { .. }), "{error:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
+fn stop_remote_daemon_works_when_the_daemon_answers_version_mismatch() {
+    // A daemon of another protocol answers the frozen hello with VersionMismatch, then reads until StopAll.
+    let hello = protocol::message::ClientMessage::Hello { protocol: protocol::message::PROTOCOL_VERSION };
+    let mut expected = Vec::new();
+    let mut reply = Vec::new();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        for message in [&hello, &protocol::message::ClientMessage::StopAll] {
+            protocol::frame::write_frame(&mut expected, &protocol::frame::Frame::control(message)).await.unwrap();
+        }
+        let mismatch = protocol::message::DaemonMessage::VersionMismatch { daemon_protocol: 6 };
+        protocol::frame::write_frame(&mut reply, &protocol::frame::Frame::control(&mismatch)).await.unwrap();
+    });
+    let body = format!(
+        "dir=\"$(dirname \"$0\")\"\ncat \"$dir/mismatch.bin\"\nhead -c {} > \"$dir/received.bin\"",
+        expected.len()
+    );
+    let env = setup("sshinst10", Fake { body: Some(body), ..Fake::default() });
+    std::fs::write(env.path("mismatch.bin"), reply).unwrap();
+    remote_install::stop_remote_daemon(
+        env.fake.to_str().unwrap(),
+        &spec(),
+        Attempt::Background,
+        &AttemptHandle::default(),
+    )
+    .expect("a daemon of another protocol still stops");
+    assert_eq!(std::fs::read(env.path("received.bin")).unwrap(), expected, "Hello, then the frozen StopAll");
 }
