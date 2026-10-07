@@ -582,14 +582,18 @@ impl Workspace {
         self.tabs.get(self.active).is_some_and(|tab| !tab.settings && tab.root.leaves().len() < MAX_PANES_PER_TAB)
     }
 
-    /// Split the focused leaf, putting `launch` second, and focus it. `None` when there are no tabs or the tab is
-    /// full.
+    /// Split the focused leaf, putting `launch` second (on this machine), and focus it. `None` when there are no
+    /// tabs or the tab is full.
     pub fn split(&mut self, axis: Axis, launch: PaneLaunch) -> Option<NodeId> {
+        self.split_on(axis, launch, HostId::local())
+    }
+
+    /// Like `split`, with the new leaf on `host`.
+    pub fn split_on(&mut self, axis: Axis, launch: PaneLaunch, host: HostId) -> Option<NodeId> {
         if !self.can_split() {
             return None;
         }
         let target = self.focused()?;
-        let host = self.leaves.get(&target).map(|leaf| leaf.host.clone()).unwrap_or_default();
         let (split_id, leaf) = (self.alloc(), self.alloc());
         let tab = &mut self.tabs[self.active];
         tab.root.split(target, axis, split_id, leaf);
@@ -1586,14 +1590,23 @@ mod tests {
     }
 
     #[test]
-    fn splitting_a_pane_keeps_its_host() {
+    fn splitting_a_pane_with_its_host_runs_there() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        on_host(&mut ws, a, "devbox");
+        let b = ws.split_on(Axis::Vertical, shell("/b"), HostId::named("devbox")).unwrap();
+        assert_eq!(ws.leaves[&b].host, HostId::named("devbox"));
+        let c = ws.new_tab(shell("/c"));
+        assert!(ws.leaves[&c].host.is_local(), "a new tab opens on this machine");
+    }
+
+    #[test]
+    fn a_split_is_local_unless_given_a_host() {
         let mut ws = Workspace::default();
         let a = ws.new_tab(shell("/a"));
         on_host(&mut ws, a, "devbox");
         let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
-        assert_eq!(ws.leaves[&b].host, HostId::named("devbox"));
-        let c = ws.new_tab(shell("/c"));
-        assert!(ws.leaves[&c].host.is_local(), "a new tab opens on this machine");
+        assert!(ws.leaves[&b].host.is_local());
     }
 
     #[test]

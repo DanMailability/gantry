@@ -155,11 +155,15 @@ struct PendingOpen {
     cwd: PathBuf,
     axis: Option<Axis>,
     cwd_from: Option<PaneKey>,
+    /// The host a split runs on (the source pane's); `local` otherwise.
+    host: HostId,
 }
 
 /// One connected host's daemon.
 struct HostConn {
     client: DaemonClient,
+    /// False once the connection ended; it is not re-established.
+    connected: bool,
     /// Keeps routing this host's events to the view.
     _events: Task<()>,
 }
@@ -261,7 +265,7 @@ pub enum Resume {
 impl WorkspaceView {
     /// The connection to `host`, if it is connected.
     fn client(&self, host: &HostId) -> Option<&DaemonClient> {
-        self.hosts.get(host).map(|conn| &conn.client)
+        self.hosts.get(host).filter(|conn| conn.connected).map(|conn| &conn.client)
     }
 
     /// This machine's daemon (always connected: the window needs it to start).
@@ -306,10 +310,14 @@ impl WorkspaceView {
         let Connection { client, events, claude_dir: daemon_dir, daemon_version, daemon_commit, .. } = connection;
         cx.set_global(DaemonBuild { version: daemon_version.clone(), commit: daemon_commit });
         let mut hosts = HashMap::new();
-        hosts.insert(HostId::local(), HostConn { client, _events: Self::listen(HostId::local(), events, window, cx) });
+        hosts.insert(
+            HostId::local(),
+            HostConn { client, connected: true, _events: Self::listen(HostId::local(), events, window, cx) },
+        );
         for (host, connection) in extra {
             let conn = HostConn {
                 client: connection.client,
+                connected: true,
                 _events: Self::listen(host.clone(), connection.events, window, cx),
             };
             hosts.insert(host, conn);
@@ -602,6 +610,7 @@ impl WorkspaceView {
                         view.update(cx, |view, cx| view.set_hits(*request, hits, cx));
                     }
                 }
+                ClientEvent::SearchIndexing { .. } | ClientEvent::SearchUnavailable { .. } if !host.is_local() => {}
                 ClientEvent::SearchIndexing { done, total } => {
                     self.search_indexing = (done < total).then(|| (done * 100 / (*total).max(1)) as u8);
                     self.push_search_state(cx);
@@ -614,6 +623,9 @@ impl WorkspaceView {
                     if matches!(event, ClientEvent::TakenOver) && host.is_local() {
                         cx.quit();
                         continue;
+                    }
+                    if let Some(conn) = self.hosts.get_mut(host) {
+                        conn.connected = false;
                     }
                     let leaves: Vec<NodeId> = self
                         .workspace
@@ -842,7 +854,7 @@ impl WorkspaceView {
                 Some(TakeOverTarget::NewPane { cwd, split, container }) => {
                     let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
                     let launch = self.resume_launch(&session, cwd, container, cx);
-                    self.open_launch(launch, axis, None, window, cx);
+                    self.open_launch(launch, axis, None, HostId::local(), window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
                     let session_dir = self
@@ -918,7 +930,8 @@ impl WorkspaceView {
         let source = source.filter(|leaf| axis.is_some() || leaf.host.is_local());
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.key());
-        self.open_new(claude, cwd, axis, cwd_from, None);
+        let host = source.map(|leaf| leaf.host.clone()).unwrap_or_default();
+        self.open_new(claude, cwd, axis, cwd_from, host, None);
     }
 
     /// The Settings tab is the active one (it has no pane to split).
@@ -933,11 +946,12 @@ impl WorkspaceView {
         cwd: PathBuf,
         axis: Option<Axis>,
         cwd_from: Option<PaneKey>,
+        host: HostId,
         pick: Option<String>,
     ) {
         self.next_request += 1;
         self.local_client().find_container(self.next_request, &cwd);
-        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from });
+        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from, host });
     }
 
     /// Start a new Claude session (or shell) in `cwd`: Claude with the config dir `pick` names, else the one remembered
@@ -970,7 +984,7 @@ impl WorkspaceView {
         if let Some(name) = &dir_pick {
             self.remember_pick(&dir, name, cx);
         }
-        self.open_new(claude, dir, None, None, dir_pick);
+        self.open_new(claude, dir, None, None, HostId::local(), dir_pick);
     }
 
     /// An explicit pick of a config dir for `folder` is remembered for it; picking the default forgets it.
@@ -994,12 +1008,12 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from }) = self.pending_opens.remove(&request) else {
+        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from, host }) = self.pending_opens.remove(&request) else {
             return;
         };
         let Some(container) = container else {
             let launch = self.new_launch(claude, cwd, pick.as_deref(), None, cx);
-            self.open_launch(launch, axis, cwd_from, window, cx);
+            self.open_launch(launch, axis, cwd_from, host, window, cx);
             return;
         };
         let folder = &container.host_folder;
@@ -1020,11 +1034,11 @@ impl WorkspaceView {
                 Ok(0) => {
                     // Splits of a container pane start in the session's directory, not the docker client's.
                     let launch = this.new_launch(claude, cwd, pick.as_deref(), Some(container.host_folder), cx);
-                    this.open_launch(launch, axis, None, window, cx)
+                    this.open_launch(launch, axis, None, HostId::local(), window, cx)
                 }
                 Ok(1) => {
                     let launch = this.new_launch(claude, cwd, pick.as_deref(), None, cx);
-                    this.open_launch(launch, axis, cwd_from, window, cx)
+                    this.open_launch(launch, axis, cwd_from, host, window, cx)
                 }
                 _ => this.focus_current(window, cx),
             });
@@ -1041,19 +1055,20 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// Start `launch` in a new tab, or splitting the focused pane along `axis`.
+    /// Start `launch` in a new tab, or splitting the focused pane along `axis` (a split runs on `host`).
     pub(crate) fn open_launch(
         &mut self,
         launch: PaneLaunch,
         axis: Option<Axis>,
         cwd_from: Option<PaneKey>,
+        host: HostId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
-        let leaf = match axis.and_then(|axis| self.workspace.split(axis, launch.clone())) {
+        let leaf = match axis.and_then(|axis| self.workspace.split_on(axis, launch.clone(), host)) {
             Some(leaf) => leaf,
             None => self.workspace.new_tab(launch),
         };
@@ -1227,10 +1242,10 @@ impl WorkspaceView {
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
-            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, None),
+            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, HostId::local(), None),
             MenuAction::NewClaudeWith { dir, dir_name } => {
                 self.remember_pick(&dir, &dir_name, cx);
-                self.open_new(true, dir, None, None, Some(dir_name));
+                self.open_new(true, dir, None, None, HostId::local(), Some(dir_name));
             }
             MenuAction::PinFavorite(dir) => SettingsStore::update(cx, |settings| {
                 if !settings.favorites.contains(&dir) {
@@ -1523,7 +1538,7 @@ impl WorkspaceView {
                     place => {
                         let container = place.and_then(|place| place.host_folder);
                         let launch = self.resume_launch(&session, cwd, container, cx);
-                        self.open_launch(launch, axis, None, window, cx);
+                        self.open_launch(launch, axis, None, HostId::local(), window, cx);
                     }
                 }
             }
@@ -1646,7 +1661,8 @@ impl WorkspaceView {
             return;
         }
         self.launcher = None;
-        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
+        let sessions: Vec<SessionInfo> =
+            self.sidebar.read(cx).sessions().all().filter(|session| session.host.is_local()).cloned().collect();
         let open: HashSet<String> = self.workspace.leaves.values().filter_map(|leaf| leaf.session.clone()).collect();
         let view = cx.new(|cx| RecentsView::new(sessions, open, project, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &RecentsEvent, window, cx| {
