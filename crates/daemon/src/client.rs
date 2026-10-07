@@ -138,7 +138,7 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-enum Outgoing {
+pub(crate) enum Outgoing {
     Frame(Frame),
     Flush(std::sync::mpsc::Sender<()>),
 }
@@ -150,12 +150,12 @@ pub struct DaemonClient {
 }
 
 /// What the handshake returned.
-struct Hello {
-    instance: String,
-    claude_dir: Option<PathBuf>,
-    daemon_version: Option<String>,
-    daemon_commit: Option<String>,
-    panes: Vec<PaneInfo>,
+pub(crate) struct Hello {
+    pub(crate) instance: String,
+    pub(crate) claude_dir: Option<PathBuf>,
+    pub(crate) daemon_version: Option<String>,
+    pub(crate) daemon_commit: Option<String>,
+    pub(crate) panes: Vec<PaneInfo>,
 }
 
 /// A fresh daemon connection.
@@ -184,8 +184,7 @@ impl DaemonClient {
     ) -> Result<Connection, StartError> {
         let paths = paths.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
-        let (events_tx, events) = async_channel::bounded(EVENT_QUEUE);
+        let Link { client, outgoing: outgoing_rx, events_tx, events } = Link::new();
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(runtime) => runtime,
@@ -196,17 +195,8 @@ impl DaemonClient {
             };
             runtime.block_on(run_connection(paths, spawn, ready_tx, outgoing_rx, events_tx));
         });
-        let Hello { instance, claude_dir, daemon_version, daemon_commit, panes } =
-            ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
-        Ok(Connection {
-            client: DaemonClient { outgoing },
-            instance,
-            claude_dir,
-            daemon_version,
-            daemon_commit,
-            panes,
-            events,
-        })
+        let hello = ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
+        Ok(connection(client, hello, events))
     }
 
     /// Start a pane; answered by `Spawned`/`SpawnFailed` with the same `request`.
@@ -278,30 +268,46 @@ impl DaemonClient {
     }
 }
 
-async fn run_connection(
-    paths: Paths,
-    spawn: impl FnOnce() -> io::Result<()>,
-    ready: std::sync::mpsc::Sender<Result<Hello, StartError>>,
+/// The channels between a [`DaemonClient`] handle and the thread that runs its connection.
+pub(crate) struct Link {
+    pub(crate) client: DaemonClient,
+    pub(crate) outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    pub(crate) events_tx: async_channel::Sender<ClientEvent>,
+    pub(crate) events: async_channel::Receiver<ClientEvent>,
+}
+
+impl Link {
+    pub(crate) fn new() -> Link {
+        let (outgoing_tx, outgoing) = mpsc::unbounded_channel();
+        let (events_tx, events) = async_channel::bounded(EVENT_QUEUE);
+        Link { client: DaemonClient { outgoing: outgoing_tx }, outgoing, events_tx, events }
+    }
+}
+
+/// A connection from its handshake and its handle.
+pub(crate) fn connection(
+    client: DaemonClient,
+    hello: Hello,
+    events: async_channel::Receiver<ClientEvent>,
+) -> Connection {
+    let Hello { instance, claude_dir, daemon_version, daemon_commit, panes } = hello;
+    Connection { client, instance, claude_dir, daemon_version, daemon_commit, panes, events }
+}
+
+/// Run one connection over `recv`/`send`: the handshake (its result goes to `on_hello`), then the writer and the
+/// event loop until the stream ends. `Err` only when the handshake failed.
+pub(crate) async fn run_stream<R, W>(
+    mut recv: R,
+    mut send: W,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
     events: async_channel::Sender<ClientEvent>,
-) {
-    let stream = match connect_or_spawn(&paths, spawn).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            let _ = ready.send(Err(StartError::Io(err.into())));
-            return;
-        }
-    };
-    let (mut recv, mut send) = stream.split();
-    match hello(&mut recv, &mut send).await {
-        Ok(hello) => {
-            let _ = ready.send(Ok(hello));
-        }
-        Err(err) => {
-            let _ = ready.send(Err(err));
-            return;
-        }
-    }
+    on_hello: impl FnOnce(Hello),
+) -> Result<(), StartError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    on_hello(hello(&mut recv, &mut send).await?);
     let writer = tokio::spawn(async move {
         while let Some(item) = outgoing.recv().await {
             match item {
@@ -354,6 +360,32 @@ async fn run_connection(
         }
     }
     writer.abort();
+    Ok(())
+}
+
+async fn run_connection(
+    paths: Paths,
+    spawn: impl FnOnce() -> io::Result<()>,
+    ready: std::sync::mpsc::Sender<Result<Hello, StartError>>,
+    outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    events: async_channel::Sender<ClientEvent>,
+) {
+    let stream = match connect_or_spawn(&paths, spawn).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            let _ = ready.send(Err(StartError::Io(err.into())));
+            return;
+        }
+    };
+    let (recv, send) = stream.split();
+    let hello_ready = ready.clone();
+    let result = run_stream(recv, send, outgoing, events, move |hello| {
+        let _ = hello_ready.send(Ok(hello));
+    })
+    .await;
+    if let Err(err) = result {
+        let _ = ready.send(Err(err));
+    }
 }
 
 /// `Hello` → `Welcome`, then `ListPanes` → `Panes`. Returns the daemon instance and its live panes.

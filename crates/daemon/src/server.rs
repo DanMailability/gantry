@@ -768,6 +768,7 @@ fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnReq
         .cwd_from
         .and_then(|from| shared.lock().panes.get(&from).and_then(|pane| pane.pty.current_dir()))
         .unwrap_or_else(|| spec.cwd.clone());
+    let cwd = app_core::settings::expand_home(&cwd, std::env::home_dir().as_deref());
     let command = (spec.program.clone(), spec.args.clone());
     start_pane(shared, client_id, request, spec, cwd, |_| command, None);
 }
