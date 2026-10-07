@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use app_core::session_tree::{Tone, display_path};
-use app_core::settings::{Problem, Settings, hex};
+use app_core::settings::{Problem, Settings, hex, remove_ssh_host};
 use app_core::snapshot::Rgb;
 use app_core::text_field::TextField;
 use gpui::{
@@ -27,6 +27,7 @@ mod alerts;
 mod appearance;
 pub(crate) mod sessions;
 mod shortcuts;
+pub(crate) mod ssh_hosts;
 mod terminal;
 mod window;
 
@@ -47,17 +48,20 @@ pub(crate) enum Section {
     Shortcuts,
     /// Claude config dirs, recent sessions and favorites.
     Sessions,
+    /// SSH hosts: state, rename, edit, remove, add.
+    SshHosts,
     /// Start-up behaviour.
     Window,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    const ALL: [Section; 7] = [
         Section::Appearance,
         Section::Terminal,
         Section::Alerts,
         Section::Shortcuts,
         Section::Sessions,
+        Section::SshHosts,
         Section::Window,
     ];
 
@@ -68,6 +72,7 @@ impl Section {
             Section::Alerts => "Alerts",
             Section::Shortcuts => "Shortcuts",
             Section::Sessions => "Sessions",
+            Section::SshHosts => "SSH hosts",
             Section::Window => "Window",
         }
     }
@@ -79,6 +84,7 @@ impl Section {
             Section::Alerts => "For sessions running in Gantry's panes.",
             Section::Shortcuts => "Click a shortcut, then press the new keys. Esc cancels, Backspace unbinds.",
             Section::Sessions => "How new Claude and shell panes start.",
+            Section::SshHosts => "Remote machines that run Gantry over ssh.",
             Section::Window => "How Gantry starts.",
         }
     }
@@ -184,6 +190,21 @@ fn change(f: impl Fn(&mut Settings) + 'static) -> Handler {
 pub(crate) enum SettingsEvent {
     /// Open the setup wizard to look for Claude config dirs.
     DetectClaudeDirs,
+    /// Open the Add SSH host wizard.
+    AddSshHost,
+    /// A host was renamed in `sshHosts`; `reconnect`: it was connected, so it should connect again under the new name.
+    HostRenamed {
+        /// The old name.
+        from: String,
+        /// The new name.
+        to: String,
+        /// Connect it again afterwards.
+        reconnect: bool,
+    },
+    /// A host was removed from `sshHosts`: drop its panes and state.
+    HostRemoved(String),
+    /// Disconnect and connect the host again (its target was edited while connected).
+    ReconnectHost(String),
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -227,6 +248,13 @@ pub(crate) struct SettingsView {
     field_subs: HashMap<sessions::FieldKey, Vec<Subscription>>,
     /// Why the last edit on the Sessions page was refused.
     sessions_message: Option<String>,
+    /// The SSH hosts page: the host waiting for a remove confirmation.
+    confirm_remove: Option<String>,
+    /// Hosts whose target was edited while connected (they offer "Reconnect to apply").
+    edited_targets: std::collections::HashSet<String>,
+    /// Why the last edit on the SSH hosts page was refused.
+    ssh_message: Option<String>,
+    _host_statuses: Subscription,
 }
 
 impl SettingsView {
@@ -264,6 +292,10 @@ impl SettingsView {
             edit: TextField::default(),
             field_subs: HashMap::new(),
             sessions_message: None,
+            confirm_remove: None,
+            edited_targets: Default::default(),
+            ssh_message: None,
+            _host_statuses: cx.observe_global::<ssh_hosts::HostStatuses>(|_, cx| cx.notify()),
         }
     }
 
@@ -839,6 +871,7 @@ impl Render for SettingsView {
             Section::Alerts => self.alerts(&theme, &settings, window, cx),
             Section::Shortcuts => self.shortcuts(&theme, &settings, window, cx),
             Section::Sessions => self.sessions(&theme, &settings, window, cx),
+            Section::SshHosts => self.ssh_hosts_page(&theme, &settings, window, cx),
             Section::Window => self.window_page(&theme, &settings, window, cx),
         };
 

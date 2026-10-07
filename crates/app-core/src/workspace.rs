@@ -2288,4 +2288,23 @@ mod tests {
         assert_eq!(ws.tabs[0].root.leaves(), vec![mixed_local]);
         assert!(!ws.instances.contains_key(&dev));
     }
+
+    #[test]
+    fn removing_a_host_from_the_list_and_the_workspace_leaves_no_key_of_it() {
+        use crate::settings::{SshHost, add_ssh_host, remove_ssh_host};
+        let dev = HostId::named("dev");
+        let mut hosts = Vec::new();
+        let entry = SshHost { name: "dev".into(), target: "me@dev".into(), command: "~/.local/bin/gantry".into() };
+        add_ssh_host(&mut hosts, entry).unwrap();
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        ws.new_tab_on(shell("/a"), dev.clone());
+        ws.new_tab(shell("/b"));
+        assert!(remove_ssh_host(&mut hosts, "dev"));
+        ws.remove_host(&dev);
+        assert!(hosts.is_empty());
+        assert!(!ws.instances.contains_key(&dev));
+        assert!(ws.leaves.values().all(|leaf| leaf.host != dev));
+        assert_eq!(ws.tabs.len(), 1);
+    }
 }

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use app_core::session_tree::display_path;
-use app_core::settings::{ClaudeDir, Settings};
+use app_core::settings::{ClaudeDir, Settings, replace_ssh_host};
 use app_core::text_field::TextField;
 use app_core::theme_colors::ProjectColor;
 use app_core::workspace::ClaudeDirs;
@@ -246,6 +246,8 @@ impl SettingsView {
             }
             (SHELL_PROGRAM, _) => Some(settings.shell.program.clone()),
             (SHELL_ARGS, _) => Some(join_args(&settings.shell.args)),
+            (ssh_hosts::HOST_NAME, index) => settings.ssh_hosts.get(index).map(|host| host.name.clone()),
+            (ssh_hosts::HOST_TARGET, index) => settings.ssh_hosts.get(index).map(|host| host.target.clone()),
             _ => None,
         }
         .unwrap_or_default()
@@ -283,7 +285,24 @@ impl SettingsView {
         }
         let (daemon_dir, home) = (self.daemon_dir.clone(), std::env::home_dir());
         let mut refused = None;
+        let mut ssh_refused = None;
+        let mut renamed = None;
+        let mut retargeted = None;
         SettingsStore::update(cx, |settings| match key {
+            (ssh_hosts::HOST_NAME | ssh_hosts::HOST_TARGET, index) => {
+                let Some(old) = settings.ssh_hosts.get(index).cloned() else { return };
+                let mut new = old.clone();
+                if key.0 == ssh_hosts::HOST_NAME {
+                    new.name = text.trim().to_string();
+                } else {
+                    new.target = text.trim().to_string();
+                }
+                match replace_ssh_host(&mut settings.ssh_hosts, &old.name, new.clone()) {
+                    Ok(()) if key.0 == ssh_hosts::HOST_NAME => renamed = Some((old.name, new.name)),
+                    Ok(()) => retargeted = Some(new.name),
+                    Err(error) => ssh_refused = Some(error),
+                }
+            }
             (DIR_NAME, index) => {
                 materialize(settings, daemon_dir.as_deref(), home.as_deref());
                 if !rename_dir(settings, index, &text) {
@@ -307,7 +326,22 @@ impl SettingsView {
             (SHELL_ARGS, _) => settings.shell.args = split_args(&text),
             _ => {}
         });
-        self.sessions_message = refused.map(String::from);
+        if key.0 == ssh_hosts::HOST_NAME || key.0 == ssh_hosts::HOST_TARGET {
+            self.ssh_message = ssh_refused;
+            if let Some(name) = retargeted {
+                self.edited_targets.insert(name);
+            }
+            if let Some((from, to)) = renamed {
+                let connected = cx
+                    .try_global::<ssh_hosts::HostStatuses>()
+                    .and_then(|statuses| statuses.0.get(&to).or_else(|| statuses.0.get(&from)).cloned())
+                    .is_some_and(|status| status.dot == app_core::host_state::HostDot::Ok);
+                self.edited_targets.remove(&from);
+                cx.emit(SettingsEvent::HostRenamed { from, to, reconnect: connected });
+            }
+        } else {
+            self.sessions_message = refused.map(String::from);
+        }
         cx.notify();
     }
 
@@ -396,7 +430,7 @@ impl SettingsView {
 
     /// A small text button for a list row's trailing slot.
     #[allow(clippy::too_many_arguments)]
-    fn link(
+    pub(super) fn link(
         &mut self,
         name: &'static str,
         index: usize,

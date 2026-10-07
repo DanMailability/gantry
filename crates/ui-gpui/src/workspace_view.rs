@@ -47,6 +47,7 @@ use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
+use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
 use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
@@ -599,6 +600,7 @@ impl WorkspaceView {
         }
         let seconds = cx.global::<SettingsStore>().settings().alerts.finished_after_seconds;
         self.attention.set_finished_after_ms(u64::from(seconds) * 1000);
+        self.publish_hosts(cx);
         cx.notify();
     }
 
@@ -629,6 +631,86 @@ impl WorkspaceView {
             }
         }
         self.set_host_state(host, HostState::NotConnected, cx);
+    }
+
+    /// Settings renamed SSH host `from` to `to`: its leaves, daemon instance and waiting state move to the new name. A
+    /// connected host was dropped when the old name left `sshHosts`; `reconnect` connects it again under the new one
+    /// (its panes reattach, its sessions are listed again).
+    fn host_renamed(
+        &mut self,
+        from: &HostId,
+        to: &HostId,
+        reconnect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+        self.forget_host(from, cx);
+        self.workspace.rename_host(from, to);
+        self.host_states.remove(from);
+        if let Some(waiting) = self.queued.remove(from) {
+            self.queued.entry(to.clone()).or_default().extend(waiting);
+        }
+        for killed in &mut self.killed_offline {
+            if killed.0 == *from {
+                killed.0 = to.clone();
+            }
+        }
+        for open in self.pending_opens.values_mut() {
+            if open.host == *from {
+                open.host = to.clone();
+            }
+        }
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(from, Vec::new(), cx));
+        self.attention.reset(from, &[]);
+        self.set_host_state(to, HostState::NotConnected, cx);
+        self.save(cx);
+        if reconnect {
+            self.connect_host(to, true, window, cx);
+        }
+    }
+
+    /// Settings removed SSH host `host`: it is disconnected and its panes leave the layout. Nothing on the remote is
+    /// touched.
+    fn host_removed(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        self.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+        self.forget_host(host, cx);
+        let leaves: Vec<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| leaf.host == *host).map(|(id, _)| *id).collect();
+        self.workspace.remove_host(host);
+        for leaf in leaves {
+            self.slots.remove(&leaf);
+            self.marked_unread.remove(&leaf);
+            self.unseen.remove(&leaf);
+            self.pending.retain(|_, waiting| *waiting != leaf);
+        }
+        self.queued.remove(host);
+        self.killed_offline.retain(|killed| killed.0 != *host);
+        self.pending_opens.retain(|_, open| open.host != *host);
+        self.host_states.remove(host);
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+        self.attention.reset(host, &[]);
+        self.sync_unseen(cx);
+        self.focus_current(window, cx);
+        self.save(cx);
+        cx.notify();
+    }
+
+    /// Tell the Settings page where each listed host stands.
+    fn publish_hosts(&self, cx: &mut Context<Self>) {
+        let statuses: HashMap<String, HostStatus> = self
+            .ssh_hosts
+            .iter()
+            .map(|entry| {
+                let host = HostId::named(&entry.name);
+                let state = self.host_state(&host);
+                let panes = self.workspace.leaves.values().filter(|leaf| leaf.host == host).count();
+                (entry.name.clone(), HostStatus { label: state.label(), dot: state.dot(), panes })
+            })
+            .collect();
+        if cx.try_global::<HostStatuses>().is_none_or(|known| known.0 != statuses) {
+            cx.set_global(HostStatuses(statuses));
+        }
     }
 
     fn add_slot(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1580,6 +1662,7 @@ impl WorkspaceView {
     }
 
     fn sync_panes(&self, cx: &mut Context<Self>) {
+        self.publish_hosts(cx);
         let panes: Vec<PaneEntry> = self
             .workspace
             .leaves
@@ -2364,6 +2447,16 @@ impl WorkspaceView {
             self._settings_events =
                 Some(cx.subscribe_in(&view, window, |this, _, event: &SettingsEvent, window, cx| match event {
                     SettingsEvent::DetectClaudeDirs => this.show_setup(SetupMode::Rerun, window, cx),
+                    SettingsEvent::AddSshHost => this.open_ssh_wizard(WizardStart::Add, window, cx),
+                    SettingsEvent::HostRenamed { from, to, reconnect } => {
+                        this.host_renamed(&HostId::named(from), &HostId::named(to), *reconnect, window, cx)
+                    }
+                    SettingsEvent::HostRemoved(name) => this.host_removed(&HostId::named(name), window, cx),
+                    SettingsEvent::ReconnectHost(name) => {
+                        let host = HostId::named(name);
+                        this.forget_host(&host, cx);
+                        this.connect_host(&host, true, window, cx);
+                    }
                 }));
             self.settings = Some(view);
         }

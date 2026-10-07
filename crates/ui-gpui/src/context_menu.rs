@@ -54,7 +54,7 @@ impl Drop for OpenMenu {
 }
 
 /// The color of a host's state dot: the status tones of the sidebar, the danger and muted tokens.
-fn host_dot_color(theme: &Theme, dot: HostDot) -> u32 {
+pub(crate) fn host_dot_color(theme: &Theme, dot: HostDot) -> u32 {
     match dot {
         HostDot::Ok => theme.tone(Tone::Done).dot,
         HostDot::Busy => theme.tone(Tone::Working).dot,
