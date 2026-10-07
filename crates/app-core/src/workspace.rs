@@ -512,6 +512,38 @@ impl Workspace {
         leaf
     }
 
+    /// Move `from`'s leaves and its daemon instance to the name `to` (a rename of an SSH host).
+    pub fn rename_host(&mut self, from: &HostId, to: &HostId) {
+        let leaves = self
+            .leaves
+            .values_mut()
+            .chain(self.dropped.iter_mut().flat_map(|(_, leaves)| leaves.iter_mut().map(|(_, leaf)| leaf)));
+        for leaf in leaves.filter(|leaf| leaf.host == *from) {
+            leaf.host = to.clone();
+        }
+        if let Some(instance) = self.instances.remove(from) {
+            self.instances.insert(to.clone(), instance);
+        }
+    }
+
+    /// Drop every leaf of `host` (closing the tabs that empties) and its daemon instance. Returns the panes those
+    /// leaves had.
+    pub fn remove_host(&mut self, host: &HostId) -> Vec<PaneKey> {
+        let doomed: Vec<NodeId> =
+            self.leaves.iter().filter(|(_, leaf)| leaf.host == *host).map(|(id, _)| *id).collect();
+        let mut panes = Vec::new();
+        for id in doomed {
+            if let Some(leaf) = self.close(id) {
+                panes.extend(leaf.pane.map(|pane| PaneKey::new(host.clone(), pane)));
+            }
+        }
+        for (_, leaves) in &mut self.dropped {
+            leaves.retain(|(_, leaf)| leaf.host != *host);
+        }
+        self.instances.remove(host);
+        panes
+    }
+
     /// Name a shell pane (trimmed; empty clears it). False, changing nothing, for a missing or Claude leaf.
     pub fn rename_leaf(&mut self, leaf: NodeId, name: &str) -> bool {
         match self.leaves.get_mut(&leaf) {
@@ -2213,5 +2245,47 @@ mod tests {
         assert_eq!(ws.leaves[&other].pane, Some(1), "lab is not connected now but its leaf is not touched");
         assert!(attach.iter().all(|(_, key)| key.host == devbox));
         assert_eq!(ws.instances[&lab], "l1");
+    }
+
+    #[test]
+    fn rename_host_moves_leaves_and_the_instance_key() {
+        let (dev, main_pc) = (HostId::named("dev"), HostId::named("MainPC"));
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        ws.set_instance(&HostId::local(), "i1");
+        let a = ws.new_tab_on(shell("/a"), dev.clone());
+        let b = ws.new_tab_on(shell("/b"), dev.clone());
+        let local = ws.new_tab(shell("/c"));
+        ws.rename_host(&dev, &main_pc);
+        assert_eq!((ws.leaves[&a].host.clone(), ws.leaves[&b].host.clone()), (main_pc.clone(), main_pc.clone()));
+        assert!(ws.leaves[&local].host.is_local());
+        assert_eq!(ws.instances[&main_pc], "r1");
+        assert!(!ws.instances.contains_key(&dev));
+        assert_eq!(ws.instances[&HostId::local()], "i1");
+    }
+
+    #[test]
+    fn remove_host_drops_its_leaves_and_empty_tabs_keeping_other_hosts() {
+        let dev = HostId::named("dev");
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        let only = ws.new_tab_on(shell("/a"), dev.clone());
+        ws.pane_started(only, 4, "/a".into());
+        let mixed_local = ws.new_tab(shell("/b"));
+        let mixed_dev = ws.split_on(Axis::Horizontal, shell("/c"), dev.clone()).unwrap();
+        ws.pane_started(mixed_dev, 5, "/c".into());
+        let unstarted = ws.new_tab_on(shell("/d"), dev.clone());
+        let removed = ws.remove_host(&dev);
+        assert_eq!(removed.len(), 2, "only started panes have keys: {removed:?}");
+        for pane in [4, 5] {
+            assert!(removed.contains(&PaneKey::new(dev.clone(), pane)));
+        }
+        assert_eq!(ws.tabs.len(), 1, "the dev-only tabs are gone");
+        assert!(ws.leaves.contains_key(&mixed_local));
+        for gone in [only, mixed_dev, unstarted] {
+            assert!(!ws.leaves.contains_key(&gone));
+        }
+        assert_eq!(ws.tabs[0].root.leaves(), vec![mixed_local]);
+        assert!(!ws.instances.contains_key(&dev));
     }
 }

@@ -1630,6 +1630,7 @@ impl WorkspaceView {
             MenuAction::NewOnHost { host, claude } => {
                 self.new_session_on_host(&HostId::named(&host), claude, window, cx)
             }
+            MenuAction::AddSshHost => {}
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),

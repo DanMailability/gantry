@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use crate::ssh_config::{validate_name, validate_target};
 use crate::theme_colors::ProjectColor;
 
 /// Theme choice.
@@ -269,6 +270,36 @@ pub struct SshHost {
     pub target: String,
     /// The remote Gantry binary.
     pub command: String,
+}
+
+/// Add `host` to the list; its name must be valid and unused, its target valid.
+pub fn add_ssh_host(hosts: &mut Vec<SshHost>, host: SshHost) -> Result<(), String> {
+    let names: Vec<&str> = hosts.iter().map(|known| known.name.as_str()).collect();
+    validate_name(&host.name, &names)?;
+    validate_target(&host.target)?;
+    hosts.push(host);
+    Ok(())
+}
+
+/// Replace the entry called `old_name` with `host` (same place in the list); the name may stay or change but must not
+/// clash with another entry.
+pub fn replace_ssh_host(hosts: &mut [SshHost], old_name: &str, host: SshHost) -> Result<(), String> {
+    let Some(index) = hosts.iter().position(|known| known.name == old_name) else {
+        return Err(format!("no host called {old_name}"));
+    };
+    let others: Vec<&str> =
+        hosts.iter().enumerate().filter(|(at, _)| *at != index).map(|(_, known)| known.name.as_str()).collect();
+    validate_name(&host.name, &others)?;
+    validate_target(&host.target)?;
+    hosts[index] = host;
+    Ok(())
+}
+
+/// Remove the entry called `name`; whether there was one.
+pub fn remove_ssh_host(hosts: &mut Vec<SshHost>, name: &str) -> bool {
+    let before = hosts.len();
+    hosts.retain(|host| host.name != name);
+    hosts.len() != before
 }
 
 /// Everything in settings.json.
@@ -1615,5 +1646,38 @@ mod tests {
         let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["sshHosts"][0]["name"], "devbox");
         assert_eq!(written["sshHosts"][0]["command"], DEFAULT_REMOTE_COMMAND);
+    }
+
+    fn host(name: &str, target: &str) -> SshHost {
+        SshHost { name: name.into(), target: target.into(), command: DEFAULT_REMOTE_COMMAND.into() }
+    }
+
+    #[test]
+    fn add_ssh_host_rejects_clashes_and_bad_targets() {
+        let mut hosts = vec![host("a", "a")];
+        assert!(add_ssh_host(&mut hosts, host("b", "me@b")).is_ok());
+        assert!(add_ssh_host(&mut hosts, host("a", "x")).is_err());
+        assert!(add_ssh_host(&mut hosts, host("local", "x")).is_err());
+        assert!(add_ssh_host(&mut hosts, host("c", "-oProxyCommand=x")).is_err());
+        assert_eq!(hosts.len(), 2);
+    }
+
+    #[test]
+    fn replace_ssh_host_renames_without_clashing_with_others() {
+        let mut hosts = vec![host("a", "a"), host("b", "b")];
+        assert!(replace_ssh_host(&mut hosts, "a", host("a", "me@a")).is_ok());
+        assert_eq!(hosts[0].target, "me@a");
+        assert!(replace_ssh_host(&mut hosts, "a", host("b", "x")).is_err());
+        assert!(replace_ssh_host(&mut hosts, "a", host("c", "x")).is_ok());
+        assert_eq!(hosts[0].name, "c");
+        assert!(replace_ssh_host(&mut hosts, "zzz", host("d", "x")).is_err());
+    }
+
+    #[test]
+    fn remove_ssh_host_reports_whether_it_existed() {
+        let mut hosts = vec![host("a", "a")];
+        assert!(remove_ssh_host(&mut hosts, "a"));
+        assert!(!remove_ssh_host(&mut hosts, "a"));
+        assert!(hosts.is_empty());
     }
 }

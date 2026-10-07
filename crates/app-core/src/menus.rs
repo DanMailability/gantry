@@ -59,6 +59,8 @@ pub enum MenuAction {
         /// Claude (else a shell).
         claude: bool,
     },
+    /// Open the SSH host wizard.
+    AddSshHost,
     /// Copy text to the clipboard.
     Copy(String),
     /// Show a folder in the system file manager.
@@ -363,6 +365,8 @@ pub fn host_menu(claude: bool, hosts: &[(String, String, HostDot)]) -> Vec<MenuI
             dot: Some(*dot),
         })
     }));
+    items.push(MenuItem::Separator);
+    items.push(entry("Add SSH host…", MenuAction::AddSshHost));
     items
 }
 
@@ -624,7 +628,9 @@ mod tests {
             entry(&items[3]),
             Some(("lab · needs sign-in".into(), MenuAction::NewOnHost { host: "lab".into(), claude: true }))
         );
-        assert_eq!(items.len(), 4);
+        assert!(matches!(items[4], MenuItem::Separator));
+        assert_eq!(entry(&items[5]), Some(("Add SSH host…".into(), MenuAction::AddSshHost)));
+        assert_eq!(items.len(), 6);
         let dot = |item: &MenuItem| match item {
             MenuItem::Entry(entry) => entry.dot,
             _ => None,
