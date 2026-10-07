@@ -3,6 +3,7 @@
 pub mod attention;
 pub mod bidi;
 pub mod fuzzy;
+pub mod host_state;
 pub mod input;
 pub mod launcher;
 pub mod layout;
