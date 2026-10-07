@@ -20,7 +20,7 @@ use protocol::message::{SearchHit, SessionInfo, Speaker};
 
 use crate::field;
 use crate::settings_store::{SettingsStore, dir_badge_for};
-use crate::theme::{RADIUS, RADIUS_LARGE, Theme, container_icon, dir_badge, side_line, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, Theme, container_icon, dir_badge, side_line, ssh_icon, theme};
 
 const ROW_HEIGHT: f32 = 36.0;
 /// Height of a conversation hit's row (two lines).
@@ -427,6 +427,7 @@ impl RecentsView {
                         )
                         .child(div().flex_1().min_w_0().truncate().child(title_text(session, marks)))
                         .when(session.container.is_some(), |pill| pill.child(container_icon(theme.tokens.text, &theme)))
+                        .when(!session.host.is_local(), |pill| pill.child(ssh_icon(theme.tokens.text, &theme)))
                         .children(
                             dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
                                 .map(|badge| dir_badge(&badge, &theme)),
@@ -474,6 +475,9 @@ impl RecentsView {
                                     })
                                     .when(session.container.is_some(), |line| {
                                         line.child(container_icon(theme.tokens.text, &theme))
+                                    })
+                                    .when(!session.host.is_local(), |line| {
+                                        line.child(ssh_icon(theme.tokens.text, &theme))
                                     })
                                     .children(
                                         dir_badge_for(

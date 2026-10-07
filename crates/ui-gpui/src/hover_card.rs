@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::context_menu;
-use crate::theme::{RADIUS_SMALL, UI_FONT, container_icon, dir_badge, theme};
+use crate::theme::{RADIUS_SMALL, UI_FONT, container_icon, dir_badge, ssh_icon, theme};
 
 /// The mark before a title: tones without a fill need one (the fill already says the rest), and a row marked unread
 /// carries a pin so it is told apart from Done.
@@ -46,6 +46,8 @@ pub(crate) struct HoverCard {
     pub dir: Option<DirBadge>,
     /// Runs in a dev container.
     pub container: bool,
+    /// The SSH host it runs on; `None` for this machine.
+    pub host: Option<String>,
     /// Its folder, `~`-shortened.
     pub folder: Option<String>,
 }
@@ -121,6 +123,14 @@ impl Render for HoverCard {
                         .child("Dev container"),
                 )
             })
+            .children(self.host.clone().map(|host| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(ssh_icon(theme.tokens.text, &theme))
+                    .child(format!("Host: {host}"))
+            }))
             .children(
                 self.folder.clone().map(|folder| div().text_xs().text_color(rgb(theme.tokens.muted)).child(folder)),
             )

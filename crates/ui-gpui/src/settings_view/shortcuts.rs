@@ -299,6 +299,7 @@ impl SettingsView {
                     status: Some("Programs there no longer get it.".into()),
                     dir: None,
                     container: false,
+                    host: None,
                     folder: None,
                 };
                 key.tooltip(hover_card::tooltip(card)).child(warn_mark(theme))

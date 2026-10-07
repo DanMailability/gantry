@@ -28,7 +28,8 @@ use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
 use crate::theme::{
-    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pin_icon, side_line, sweeping, theme, working_sweep,
+    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pin_icon, side_line, ssh_icon, sweeping, theme,
+    working_sweep,
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
@@ -691,6 +692,7 @@ impl SidebarView {
                     status: Some(note.clone()),
                     dir: dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()),
                     container: session.container.is_some(),
+                    host: session.host.remote_name().map(String::from),
                     folder: Some(display_path(&session.cwd, std::env::home_dir().as_deref())),
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
@@ -705,6 +707,7 @@ impl SidebarView {
                                 .when(*tone == Tone::NeedsInput, |title| title.font_weight(FontWeight::SEMIBOLD)),
                         )
                         .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
+                        .when(!session.host.is_local(), |pill| pill.child(ssh_icon(colors.ink, &theme)))
                         .children(
                             dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
                                 .map(|badge| dir_badge(&badge, &theme)),
@@ -718,6 +721,7 @@ impl SidebarView {
                     status: Some(note.clone()),
                     dir: None,
                     container: false,
+                    host: entry.host.remote_name().map(String::from),
                     folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
                 }))
                 .child(
@@ -728,6 +732,7 @@ impl SidebarView {
                             self.rename_field(RenameTarget::Pane(entry.leaf), &theme, cx)
                                 .unwrap_or_else(|| title(entry.title.clone())),
                         )
+                        .when(!entry.host.is_local(), |pill| pill.child(ssh_icon(theme.tokens.muted, &theme)))
                         .children(project()),
                 ),
             RowKind::Pane { entry, tone, note } => {
@@ -737,6 +742,7 @@ impl SidebarView {
                     status: Some(note.clone()),
                     dir: None,
                     container: false,
+                    host: entry.host.remote_name().map(String::from),
                     folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
@@ -747,6 +753,7 @@ impl SidebarView {
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(title("New session".into()))
+                        .when(!entry.host.is_local(), |pill| pill.child(ssh_icon(colors.ink, &theme)))
                         .children(project()),
                 )
             }

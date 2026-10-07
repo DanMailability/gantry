@@ -45,8 +45,8 @@ use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itsel
 use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
-    RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, pin_icon, side_line, sweeping,
-    theme, working_sweep,
+    RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, pin_icon, side_line, ssh_icon,
+    sweeping, theme, working_sweep,
 };
 use crate::update_watch::{self, DaemonBuild};
 use crate::window_frame;
@@ -1353,7 +1353,7 @@ impl WorkspaceView {
                 None => label.to_string(),
             };
             let title = if can_split { title } else { format!("{title} ({MAX_PANES_PER_TAB} panes max)") };
-            let card = HoverCard { title, status: None, dir: None, container: false, folder: None };
+            let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None };
             div()
                 .id((label, index))
                 .flex_none()
@@ -1388,7 +1388,8 @@ impl WorkspaceView {
                 None => "Close pane".to_string(),
             }
         };
-        let close_card = HoverCard { title: close_title, status: None, dir: None, container: false, folder: None };
+        let close_card =
+            HoverCard { title: close_title, status: None, dir: None, container: false, host: None, folder: None };
         let danger = theme.tokens.danger;
         div()
             .absolute()
@@ -2047,6 +2048,7 @@ impl WorkspaceView {
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
         let unseen = self.unseen_of(leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());
+        let remote = self.workspace.leaves.get(&leaf).and_then(|leaf| leaf.host.remote_name().map(String::from));
         let dir = self.leaf_dir_badge(leaf, cx);
         let cwd = self.leaf_cwd(leaf, cx);
         let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
@@ -2059,6 +2061,7 @@ impl WorkspaceView {
             status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
             dir: dir.clone(),
             container,
+            host: remote.clone(),
             folder: cwd.as_deref().map(|cwd| display_path(cwd, std::env::home_dir().as_deref())),
         };
         let sidebar = self.sidebar.read(cx);
@@ -2108,6 +2111,7 @@ impl WorkspaceView {
                     .children(pin)
                     .child(div().min_w_0().truncate().child(title))
                     .when(container, |chip| chip.child(container_icon(ink, &theme)))
+                    .when(remote.is_some(), |chip| chip.child(ssh_icon(ink, &theme)))
                     .children(dir.map(|badge| dir_badge(&badge, &theme)))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -2195,6 +2199,7 @@ impl WorkspaceView {
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
                 let unseen = self.unseen_of(leaf);
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
+                let host = self.workspace.leaves.get(&leaf).and_then(|leaf| leaf.host.remote_name().map(String::from));
                 let dir = self.leaf_dir_badge(leaf, cx);
                 let project = self.leaf_project_color(leaf, cx);
                 let folder = self
@@ -2234,7 +2239,8 @@ impl WorkspaceView {
                                 }))
                                 .when(multiple, |pane| {
                                     pane.child(pane_header(
-                                        index, title, status, unseen, animate, container, dir, folder, project, &theme,
+                                        index, title, status, unseen, animate, container, host, dir, folder, project,
+                                        &theme,
                                     ))
                                 })
                                 .when_some(last_prompt, |pane, text| {
@@ -2342,6 +2348,7 @@ fn pane_header(
     unseen: Unseen,
     animate: bool,
     container: bool,
+    host: Option<String>,
     dir: Option<DirBadge>,
     folder: Option<String>,
     project: Option<u32>,
@@ -2356,6 +2363,7 @@ fn pane_header(
         status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
         dir: dir.clone(),
         container,
+        host: host.clone(),
         folder,
     };
     div()
@@ -2382,6 +2390,9 @@ fn pane_header(
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| {
             header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
+        })
+        .when(host.is_some(), |header| {
+            header.child(ssh_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
         })
         .children(dir.map(|badge| dir_badge(&badge, theme)))
 }

@@ -15,7 +15,7 @@ use gpui::{
     div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
 };
 
-use crate::assets::{CONTAINER_ICON, PIN_ICON};
+use crate::assets::{CONTAINER_ICON, PIN_ICON, SSH_ICON};
 
 /// The colors and sizes views draw with, a GPUI global replaced whenever the settings change.
 #[derive(Clone)]
@@ -95,6 +95,11 @@ const FONTS: [&[u8]; 5] = [
 /// The dev container icon, in `ink` (slightly softened).
 pub(crate) fn container_icon(ink: u32, theme: &Theme) -> Svg {
     svg().path(CONTAINER_ICON).flex_none().size(theme.ui(14.)).text_color(rgba((ink << 8) | 0xd9))
+}
+
+/// The SSH host icon, in `ink` (slightly softened). Marks a session that runs on another machine.
+pub(crate) fn ssh_icon(ink: u32, theme: &Theme) -> Svg {
+    svg().path(SSH_ICON).flex_none().size(theme.ui(14.)).text_color(rgba((ink << 8) | 0xd9))
 }
 
 /// The pin of a row marked unread, in `dot`.
