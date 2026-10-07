@@ -5,6 +5,12 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- SSH hosts: list remote machines in `sshHosts` in settings.json (name and ssh target); the New buttons then offer Local and the hosts, connect on first use with sign-in dialogs, and reconnect by themselves. Gantry must already be installed on the remote.
+
+### Changed
+- Needs a daemon restart: new panes starting in `~` now open in the home folder.
+
 ## [0.3.0] - 2026-10-07
 
 ### Added
