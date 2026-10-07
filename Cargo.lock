@@ -2203,9 +2203,11 @@ name = "gantry"
 version = "0.3.0"
 dependencies = [
  "app-core",
+ "async-channel",
  "daemon",
  "protocol",
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -6427,6 +6429,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

@@ -17,6 +17,8 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("daemon") => return daemon_main(),
+        Some("bridge") => return bridge_main(),
+        Some("askpass") => return askpass_main(argv),
         Some("internal-print-env") => {
             println!("{}", daemon::shell_env::print_env_json());
             return ExitCode::SUCCESS;
@@ -35,6 +37,54 @@ fn main() -> ExitCode {
     };
     ui_gpui::run(launch, resume_sessions);
     ExitCode::SUCCESS
+}
+
+/// `gantry bridge`: what ssh runs on a remote machine. Joins stdin/stdout to this machine's daemon socket.
+/// Stdout carries only protocol bytes, so nothing here logs.
+fn bridge_main() -> ExitCode {
+    let paths = Paths::for_profile(&current_profile());
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("gantry bridge: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(daemon::bridge::run_bridge(
+        &paths,
+        daemon::launch::spawn_detached_daemon,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    ));
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("gantry bridge: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `gantry askpass <prompt>`: ssh's `SSH_ASKPASS` helper. Asks the GUI that started this attempt and prints the
+/// answer; the answer is never logged.
+fn askpass_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
+    let _ = argv.next();
+    let prompt = argv.next().unwrap_or_default();
+    let Some(socket) = std::env::var_os("GANTRY_ASKPASS_SOCKET") else {
+        eprintln!("gantry askpass: only ssh attempts started by Gantry can ask");
+        return ExitCode::FAILURE;
+    };
+    match daemon::askpass::run_helper(std::path::Path::new(&socket), &prompt) {
+        Ok(Some(answer)) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::FAILURE,
+        Err(err) => {
+            eprintln!("gantry askpass: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Set on a daemon re-launched by `daemon_main`, so it never re-launches again.

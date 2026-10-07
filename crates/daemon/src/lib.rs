@@ -12,4 +12,5 @@ pub mod search;
 pub mod server;
 pub mod sessions;
 pub mod shell_env;
+pub mod ssh;
 pub mod take_over;
