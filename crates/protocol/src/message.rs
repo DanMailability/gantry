@@ -307,6 +307,12 @@ pub enum DaemonMessage {
         /// The daemon's default Claude config dir.
         #[serde(default)]
         claude_dir: Option<PathBuf>,
+        /// The daemon's app version (`protocol::build::VERSION`); older daemons send none.
+        #[serde(default)]
+        app_version: Option<String>,
+        /// The daemon's git commit (`protocol::build::COMMIT`); older daemons send none.
+        #[serde(default)]
+        app_commit: Option<String>,
     },
     /// Handshake rejected; only `StopAll` is accepted afterwards.
     VersionMismatch {
@@ -443,8 +449,16 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 instance: "123-456".into(),
                 claude_dir: Some("/home/u/.claude".into()),
+                app_version: Some("0.3.0".into()),
+                app_commit: Some("a1b2c3d".into()),
             },
-            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "1".into(), claude_dir: None },
+            DaemonMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                instance: "1".into(),
+                claude_dir: None,
+                app_version: None,
+                app_commit: None,
+            },
             DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
         ] {
             let json = serde_json::to_string(&reply).unwrap();
@@ -562,6 +576,30 @@ mod tests {
     }
 
     #[test]
+    fn welcome_without_app_version_decodes() {
+        let old = r#"{"type":"welcome","protocol":7,"instance":"x"}"#;
+        assert_eq!(
+            serde_json::from_str::<DaemonMessage>(old).unwrap(),
+            DaemonMessage::Welcome {
+                protocol: 7,
+                instance: "x".into(),
+                claude_dir: None,
+                app_version: None,
+                app_commit: None
+            }
+        );
+        let new = DaemonMessage::Welcome {
+            protocol: 7,
+            instance: "x".into(),
+            claude_dir: None,
+            app_version: Some("0.3.0".into()),
+            app_commit: Some("a1b2c3d".into()),
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), new);
+    }
+
+    #[test]
     fn set_claude_dirs_and_phase2_fields_round_trip() {
         let msg = ClientMessage::SetClaudeDirs { dirs: vec!["/a".into(), "/b".into()] };
         let json = serde_json::to_string(&msg).unwrap();
@@ -570,7 +608,13 @@ mod tests {
         let old_welcome = r#"{"type":"welcome","protocol":5,"instance":"x"}"#;
         assert_eq!(
             serde_json::from_str::<DaemonMessage>(old_welcome).unwrap(),
-            DaemonMessage::Welcome { protocol: 5, instance: "x".into(), claude_dir: None }
+            DaemonMessage::Welcome {
+                protocol: 5,
+                instance: "x".into(),
+                claude_dir: None,
+                app_version: None,
+                app_commit: None
+            }
         );
         let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
         let spec = serde_json::from_str::<SpawnRequest>(spawn).unwrap();

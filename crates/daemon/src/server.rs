@@ -427,6 +427,8 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             protocol: PROTOCOL_VERSION,
             instance: shared.instance.clone(),
             claude_dir: shared.claude_dir.clone(),
+            app_version: Some(protocol::build::VERSION.into()),
+            app_commit: Some(protocol::build::COMMIT.into()),
         }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id

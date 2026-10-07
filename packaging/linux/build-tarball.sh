@@ -27,8 +27,10 @@ if [ "$here" != "$common" ] && [ ! -d "$target/release/deps" ] && [ -d "$main_ta
 fi
 $podman build -q -t gantry-build-ubuntu22 --build-arg "RUST_TOOLCHAIN=$toolchain" \
   -f "$root/packaging/linux/ubuntu-22.04.Containerfile" "$root/packaging/linux" >/dev/null
+# The container cannot always read git (a worktree's .git points outside /src): pass the commit in.
+commit=$(git -C "$root" rev-parse --short=7 HEAD)
 $podman run --rm -v "$root:/src:Z" -v gantry-cargo-ubuntu22:/cargo-home -w /src \
-  -e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/src/target/ubuntu-22.04 -e CARGO_BUILD_JOBS=4 \
+  -e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/src/target/ubuntu-22.04 -e CARGO_BUILD_JOBS=4 -e GANTRY_COMMIT="$commit" \
   gantry-build-ubuntu22 packaging/linux/pack-tarball.sh >/dev/null
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)
 echo "$root/dist/gantry-$version-x86_64-linux.tar.gz"

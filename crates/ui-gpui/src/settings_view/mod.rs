@@ -21,6 +21,7 @@ use gpui::{
 use crate::field;
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, theme};
+use crate::update_watch::{DaemonBuild, footer_lines};
 
 mod alerts;
 mod appearance;
@@ -769,6 +770,7 @@ impl Render for SettingsView {
                 .when(!active, |el| el.hover(|style| style.bg(rgb(theme.tokens.raised))))
                 .child(item.label())
         });
+        let [app_line, daemon_line] = footer_lines(cx.try_global::<DaemonBuild>());
         let foot = div()
             .flex()
             .flex_col()
@@ -776,7 +778,16 @@ impl Render for SettingsView {
             .gap(theme.ui(8.))
             .px_3()
             .child(muted(&theme, format!("Saved to {path}")).max_w_full())
-            .child(self.open_settings_button(0, window, cx));
+            .child(self.open_settings_button(0, window, cx))
+            .child(div().w_full().h(px(1.)).bg(rgb(theme.tokens.line)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.ui(2.))
+                    .child(muted(&theme, app_line))
+                    .child(muted(&theme, daemon_line)),
+            );
         let menu = div()
             .flex_none()
             .w(theme.ui(230.))

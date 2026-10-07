@@ -12,6 +12,10 @@ use daemon::paths::{Paths, current_profile};
 fn main() -> ExitCode {
     let mut argv = std::env::args().skip(1).peekable();
     match argv.peek().map(String::as_str) {
+        Some("--version") => {
+            println!("{}", protocol::build::version_line());
+            return ExitCode::SUCCESS;
+        }
         Some("daemon") => return daemon_main(),
         Some("internal-print-env") => {
             println!("{}", daemon::shell_env::print_env_json());
@@ -20,17 +24,16 @@ fn main() -> ExitCode {
         _ => {}
     }
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
-    let launch = match LaunchArgs::parse(argv)
-        .map_err(|m| m.to_string())
-        .and_then(|a| a.into_launch().map_err(|e| e.to_string()))
-    {
+    let parsed = LaunchArgs::parse(argv);
+    let resume_sessions = parsed.as_ref().is_ok_and(|args| args.resume_sessions);
+    let launch = match parsed.and_then(|a| a.into_launch().map_err(|e| e.to_string())) {
         Ok(launch) => launch,
         Err(message) => {
             eprintln!("gantry: {message}");
             return ExitCode::from(2);
         }
     };
-    ui_gpui::run(launch);
+    ui_gpui::run(launch, resume_sessions);
     ExitCode::SUCCESS
 }
 

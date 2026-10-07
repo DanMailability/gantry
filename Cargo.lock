@@ -2204,6 +2204,7 @@ version = "0.2.0"
 dependencies = [
  "app-core",
  "daemon",
+ "protocol",
  "tempfile",
  "tracing",
  "tracing-appender",
