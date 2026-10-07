@@ -23,6 +23,7 @@ use gpui::{
     Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
 };
 use notify::RecommendedWatcher;
+use protocol::host::PaneKey;
 use protocol::message::{
     ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
 };
@@ -367,10 +368,10 @@ impl WorkspaceView {
         for leaf in leaves {
             this.add_slot(leaf, window, cx);
         }
-        for (leaf, pane) in &restored.attach {
+        for (leaf, key) in &restored.attach {
             let launch = this.workspace.leaves[leaf].launch.clone();
-            this.slots[leaf].view.update(cx, |view, cx| view.attach(*pane, launch, cx));
-            this.client.attach(*pane);
+            this.slots[leaf].view.update(cx, |view, cx| view.attach(key.pane, launch, cx));
+            this.client.attach(key.pane);
         }
         for (leaf, slot) in &this.slots {
             if this.workspace.leaves[leaf].pane.is_none() && !restored.spawn.contains(leaf) {
@@ -490,12 +491,14 @@ impl WorkspaceView {
         for event in events {
             match &event {
                 ClientEvent::Output { pane, .. } | ClientEvent::Resync { pane, .. } => {
-                    if let Some(slot) = self.workspace.leaf_for_pane(*pane).and_then(|leaf| self.slots.get(&leaf)) {
+                    if let Some(slot) =
+                        self.workspace.leaf_for_pane(&PaneKey::local(*pane)).and_then(|leaf| self.slots.get(&leaf))
+                    {
                         slot.view.update(cx, |view, cx| view.on_event(&event, cx));
                     }
                 }
                 ClientEvent::Exited { pane, code } => {
-                    if let Some(leaf) = self.workspace.pane_exited(*pane) {
+                    if let Some(leaf) = self.workspace.pane_exited(&PaneKey::local(*pane)) {
                         self.slots[&leaf].view.update(cx, |view, cx| view.exited(Some(*code), cx));
                         self.save(cx);
                     }
@@ -571,7 +574,7 @@ impl WorkspaceView {
         let mut changed = false;
         for session in sessions {
             if let SessionState::Managed { pane } = session.state {
-                changed |= self.workspace.session_seen(pane, &session.id);
+                changed |= self.workspace.session_seen(&PaneKey::local(pane), &session.id);
             }
         }
         if changed {
@@ -586,7 +589,7 @@ impl WorkspaceView {
         }
         for session in sessions {
             let SessionState::Managed { pane } = session.state else { continue };
-            let Some(leaf) = self.workspace.leaf_for_pane(pane) else { continue };
+            let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::local(pane)) else { continue };
             if status_tone(session.status.as_ref(), Unseen::No) != Tone::Idle && self.marked_unread.remove(&leaf) {
                 self.unseen.remove(&leaf);
                 self.sync_unseen(cx);
@@ -596,7 +599,7 @@ impl WorkspaceView {
 
     /// Raise `alert` on the channels the settings allow for its pane (badge, notification, sound).
     fn raise(&mut self, alert: Alert, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(leaf) = self.workspace.leaf_for_pane(alert.pane) else { return };
+        let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::local(alert.pane)) else { return };
         let settings = cx.global::<SettingsStore>().settings().clone();
         let visible = self.workspace.is_visible(leaf);
         let channels = alert_channels(&settings.alerts, &alert.kind, visible, window.is_window_active());
@@ -714,8 +717,8 @@ impl WorkspaceView {
         let session = entry.session.clone();
         match entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref()) {
             Rerun::Start(launch) => self.start_leaf(leaf, launch, cx),
-            Rerun::Focus(pane) => {
-                if let Some(running) = self.workspace.leaf_for_pane(pane) {
+            Rerun::Focus(key) => {
+                if let Some(running) = self.workspace.leaf_for_pane(&key) {
                     self.focus_leaf(running, window, cx);
                 }
             }
@@ -1357,7 +1360,7 @@ impl WorkspaceView {
         match event {
             SidebarEvent::Activate { activation, split } => match activation {
                 Activation::FocusPane(pane) => {
-                    if let Some(leaf) = self.workspace.leaf_for_pane(pane) {
+                    if let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::local(pane)) {
                         self.focus_leaf(leaf, window, cx);
                     }
                 }

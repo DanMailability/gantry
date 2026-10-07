@@ -56,7 +56,7 @@ mod tests {
 
     fn sample() -> Workspace {
         let mut ws = Workspace::default();
-        ws.instance = "i".into();
+        ws.set_instance(&protocol::host::HostId::local(), "i");
         let a = ws.new_tab(PaneLaunch::claude("/repo".into()));
         ws.pane_started(a, 3, "/repo".into());
         ws.split(crate::split_tree::Axis::Vertical, PaneLaunch::claude("/repo".into()));

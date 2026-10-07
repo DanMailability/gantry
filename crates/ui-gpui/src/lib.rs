@@ -149,8 +149,12 @@ fn workspace(
         .map(|(id, _)| *id)
         .collect();
     let keep = if resume_sessions { was_live.clone() } else { HashSet::new() };
-    let mut restored =
-        restore(saved, &connection.instance, &connection.panes, launch, window_settings.restore_layout, &keep);
+    let hosts = [app_core::workspace::HostLive {
+        host: protocol::host::HostId::local(),
+        instance: &connection.instance,
+        panes: &connection.panes,
+    }];
+    let mut restored = restore(saved, &hosts, launch, window_settings.restore_layout, &keep);
     let resume = resume_mode(&window_settings, resume_sessions, was_live);
     restored.workspace.sidebar.visible = window_settings.sidebar_at_start.visible(restored.workspace.sidebar.visible);
     let default_cwd: PathBuf = launch.default.cwd.clone();
