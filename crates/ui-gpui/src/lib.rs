@@ -1,6 +1,7 @@
 //! GPUI user interface for Gantry. The only crate in the workspace that depends on GPUI.
 
 mod alerts;
+mod askpass_view;
 mod assets;
 mod context_menu;
 mod field;

@@ -1,7 +1,7 @@
 //! The window's root view: tabs of split panes, routing daemon events to them, and saving the layout.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -39,6 +39,7 @@ use app_core::settings::{Settings, ShellSettings, SshHost};
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
+use crate::askpass_view::{AskpassEvent, AskpassView};
 use crate::assets::{CLOSE_ICON, LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
@@ -197,10 +198,12 @@ pub struct WorkspaceView {
     retries: HashMap<HostId, Task<()>>,
     /// Where ssh's questions go (the dialog is drawn from the receiver, see the sign-in task).
     askpass_prompts: async_channel::Sender<AskPrompt>,
-    /// Where ssh's questions arrive.
-    // Read by the sign-in dialog (the sign-in task).
-    #[allow(dead_code)]
-    askpass_receiver: async_channel::Receiver<AskPrompt>,
+    /// The sign-in dialog on screen, while ssh asks something.
+    askpass: Option<(Entity<AskpassView>, Subscription)>,
+    /// Questions waiting for the one on screen.
+    askpass_queue: VecDeque<AskPrompt>,
+    /// Receives ssh's questions.
+    _askpass_task: Task<()>,
     layout_file: PathBuf,
     default_cwd: PathBuf,
     /// The daemon's own Claude config dir (its panes need no `CLAUDE_CONFIG_DIR`).
@@ -371,6 +374,13 @@ impl WorkspaceView {
             }
         });
         let (askpass_prompts, askpass_receiver) = async_channel::unbounded::<AskPrompt>();
+        let askpass_task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(prompt) = askpass_receiver.recv().await {
+                if this.update_in(cx, |view, window, cx| view.ask(prompt, window, cx)).is_err() {
+                    return;
+                }
+            }
+        });
         let host_states: HashMap<HostId, HostState> =
             hosts.keys().filter(|host| !host.is_local()).map(|host| (host.clone(), HostState::Connected)).collect();
         let mut this = WorkspaceView {
@@ -387,7 +397,9 @@ impl WorkspaceView {
             queued: HashMap::new(),
             retries: HashMap::new(),
             askpass_prompts,
-            askpass_receiver,
+            askpass: None,
+            askpass_queue: VecDeque::new(),
+            _askpass_task: askpass_task,
             layout_file,
             default_cwd,
             dirs: ClaudeDirs::from_settings(
@@ -1350,6 +1362,10 @@ impl WorkspaceView {
             setup.focus_handle(cx).focus(window, cx);
             return;
         }
+        if let Some((askpass, _)) = &self.askpass {
+            askpass.focus_handle(cx).focus(window, cx);
+            return;
+        }
         let (open, active) = (self.workspace.settings_tab().is_some(), self.settings_active());
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_settings(open, active, cx));
         let settings =
@@ -1912,6 +1928,29 @@ impl WorkspaceView {
         });
         view.focus_handle(cx).focus(window, cx);
         self.launcher = Some((view, subscription));
+        cx.notify();
+    }
+
+    /// A question from ssh: show it now, or after the ones before it.
+    fn ask(&mut self, prompt: AskPrompt, window: &mut Window, cx: &mut Context<Self>) {
+        self.askpass_queue.push_back(prompt);
+        if self.askpass.is_none() {
+            self.show_next_question(window, cx);
+        }
+    }
+
+    fn show_next_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.askpass_queue.pop_front() else {
+            self.askpass = None;
+            self.focus_current(window, cx);
+            cx.notify();
+            return;
+        };
+        let view = cx.new(|cx| AskpassView::new(prompt, cx));
+        let subscription =
+            cx.subscribe_in(&view, window, |this, _, _: &AskpassEvent, window, cx| this.show_next_question(window, cx));
+        view.focus_handle(cx).focus(window, cx);
+        self.askpass = Some((view, subscription));
         cx.notify();
     }
 
@@ -2873,6 +2912,23 @@ impl Render for WorkspaceView {
                 root.child(
                     div()
                         .id("setup-overlay")
+                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(theme.ui(16.))
+                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
+                        .child(view),
+                )
+            })
+            .when_some(self.askpass.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div()
+                        .id("askpass-overlay")
                         .occlude()
                         .absolute()
                         .top_0()
