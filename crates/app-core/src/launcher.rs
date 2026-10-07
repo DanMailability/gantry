@@ -50,7 +50,7 @@ fn urgency(tone: Tone) -> u8 {
     match tone {
         Tone::NeedsInput => 0,
         Tone::Working => 1,
-        Tone::Done => 2,
+        Tone::Done | Tone::Unread => 2,
         _ => 3,
     }
 }

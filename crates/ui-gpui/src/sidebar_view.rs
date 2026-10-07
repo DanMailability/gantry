@@ -27,7 +27,7 @@ use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
 use crate::theme::{
-    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, side_line, sweeping, theme, working_sweep,
+    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pin_icon, side_line, sweeping, theme, working_sweep,
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
@@ -106,6 +106,7 @@ pub struct SidebarView {
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
     unseen: HashSet<String>,
+    marked: HashSet<String>,
     /// The Working glow runs: the setting is on and the window is active.
     animate: bool,
     /// Every row with no filter, every project expanded and no details: the order Ctrl+Tab and the title bar use.
@@ -164,6 +165,7 @@ impl SidebarView {
             toggled: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
+            marked: HashSet::new(),
             animate: false,
             all_rows: Vec::new(),
             rows: Vec::new(),
@@ -238,10 +240,11 @@ impl SidebarView {
         self.rebuild(cx);
     }
 
-    /// Sessions to mark with the unseen badge.
-    pub fn set_unseen(&mut self, unseen: HashSet<String>, cx: &mut Context<Self>) {
-        if unseen != self.unseen {
+    /// Sessions to mark with the unseen badge, and those of them marked unread by hand.
+    pub fn set_unseen(&mut self, unseen: HashSet<String>, marked: HashSet<String>, cx: &mut Context<Self>) {
+        if unseen != self.unseen || marked != self.marked {
             self.unseen = unseen;
+            self.marked = marked;
             self.rebuild(cx);
         }
     }
@@ -321,6 +324,7 @@ impl SidebarView {
                     toggled,
                     details,
                     unseen: &self.unseen,
+                    marked: &self.marked,
                     tabs: &self.tabs,
                     project_of: &project_of,
                     now_ms,
@@ -852,10 +856,12 @@ impl Render for DraggedProject {
 }
 
 /// Small rounded counters in the tones of a project's live sessions.
-/// The mark before a row's title: a ring for Closed, `↗` for Elsewhere, none for the filled tones.
+/// The mark before a row's title: a ring for Closed, `↗` for Elsewhere, a pin for Unread, none for the other filled
+/// tones.
 fn lead_mark(tone: Tone, colors: &ToneColors, theme: &Theme) -> Option<gpui::Div> {
     match lead(tone) {
         Lead::None => None,
+        Lead::Pin => Some(div().flex_none().child(pin_icon(colors.dot, theme))),
         Lead::Ring => {
             Some(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot)))
         }

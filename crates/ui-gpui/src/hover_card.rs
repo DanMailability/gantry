@@ -11,7 +11,8 @@ use gpui::{
 use crate::context_menu;
 use crate::theme::{RADIUS_SMALL, UI_FONT, container_icon, dir_badge, theme};
 
-/// The mark before a title: only tones without a fill need one (the fill already says the rest).
+/// The mark before a title: tones without a fill need one (the fill already says the rest), and a row marked unread
+/// carries a pin so it is told apart from Done.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lead {
     /// No mark.
@@ -20,6 +21,8 @@ pub(crate) enum Lead {
     Ring,
     /// `↗` (running outside Gantry).
     Arrow,
+    /// A pin (marked unread by hand).
+    Pin,
 }
 
 /// The lead mark of `tone`.
@@ -27,6 +30,7 @@ pub(crate) fn lead(tone: Tone) -> Lead {
     match tone {
         Tone::Closed => Lead::Ring,
         Tone::Elsewhere => Lead::Arrow,
+        Tone::Unread => Lead::Pin,
         _ => Lead::None,
     }
 }
@@ -146,11 +150,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_tones_without_a_fill_keep_a_lead_mark() {
+    fn only_tones_without_a_fill_and_unread_keep_a_lead_mark() {
         for tone in [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle] {
             assert_eq!(lead(tone), Lead::None, "{tone:?}");
         }
         assert_eq!(lead(Tone::Closed), Lead::Ring);
         assert_eq!(lead(Tone::Elsewhere), Lead::Arrow);
+        assert_eq!(lead(Tone::Unread), Lead::Pin);
     }
 }

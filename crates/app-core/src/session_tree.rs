@@ -18,6 +18,8 @@ pub enum Tone {
     Working,
     /// Idle with a result the user has not seen.
     Done,
+    /// Idle, marked unread by hand.
+    Unread,
     /// Idle (or not reporting yet), nothing new.
     Idle,
     /// Running outside Gantry.
@@ -154,6 +156,8 @@ pub struct ActiveInput<'a> {
     pub details: Option<&'a str>,
     /// Sessions with an alert the user has not seen.
     pub unseen: &'a HashSet<String>,
+    /// Sessions the user marked unread by hand (also in `unseen`).
+    pub marked: &'a HashSet<String>,
     /// Tabs of the layout; those with several panes are listed as a heading with their panes under it.
     pub tabs: &'a [TabEntry],
     /// The project a directory belongs to (see [`project_root`]).
@@ -370,18 +374,30 @@ impl Row {
     }
 }
 
-/// Tone of a session in a Gantry pane from its status; `unseen` = it has an alert the user has not seen.
-pub fn status_tone(status: Option<&SessionStatus>, unseen: bool) -> Tone {
-    match status {
-        Some(SessionStatus::NeedsInput { .. }) => Tone::NeedsInput,
-        Some(SessionStatus::Busy) => Tone::Working,
-        _ if unseen => Tone::Done,
-        _ => Tone::Idle,
+/// Whether a session's result is unseen, and why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unseen {
+    /// Nothing new.
+    No,
+    /// An alert the user has not seen.
+    Alert,
+    /// Marked unread by hand.
+    Marked,
+}
+
+/// Tone of a session in a Gantry pane from its status and whether its result is unseen.
+pub fn status_tone(status: Option<&SessionStatus>, unseen: Unseen) -> Tone {
+    match (status, unseen) {
+        (Some(SessionStatus::NeedsInput { .. }), _) => Tone::NeedsInput,
+        (Some(SessionStatus::Busy), _) => Tone::Working,
+        (_, Unseen::Alert) => Tone::Done,
+        (_, Unseen::Marked) => Tone::Unread,
+        (_, Unseen::No) => Tone::Idle,
     }
 }
 
 /// Tone of any session.
-pub fn tone(session: &SessionInfo, unseen: bool) -> Tone {
+pub fn tone(session: &SessionInfo, unseen: Unseen) -> Tone {
     match session.state {
         SessionState::Managed { .. } => status_tone(session.status.as_ref(), unseen),
         SessionState::External { .. } => Tone::Elsewhere,
@@ -669,7 +685,12 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
                 (SessionState::Closed, Some(pane)) if pane.ended => (Tone::Closed, "Exited · tab open".to_string()),
                 (SessionState::Closed, _) => (Tone::Idle, "Starting".to_string()),
                 _ => {
-                    let tone = tone(session, input.unseen.contains(&session.id));
+                    let unseen = match (input.unseen.contains(&session.id), input.marked.contains(&session.id)) {
+                        (_, true) => Unseen::Marked,
+                        (true, false) => Unseen::Alert,
+                        (false, false) => Unseen::No,
+                    };
+                    let tone = tone(session, unseen);
                     (tone, format!("{} · {age}", tone_word(tone)))
                 }
             };
@@ -693,6 +714,7 @@ pub fn tone_word(tone: Tone) -> &'static str {
         Tone::NeedsInput => "Needs input",
         Tone::Working => "Working",
         Tone::Done => "Done",
+        Tone::Unread => "Unread",
         Tone::Idle => "Idle",
         Tone::Elsewhere => "Elsewhere",
         Tone::Closed => "Closed",
@@ -895,6 +917,7 @@ mod tests {
         toggled: HashSet<PathBuf>,
         details: Option<String>,
         unseen: HashSet<String>,
+        marked: HashSet<String>,
         tabs: Vec<TabEntry>,
         arrivals: Arrivals,
         order: ProjectOrder,
@@ -915,6 +938,7 @@ mod tests {
                 toggled: &self.toggled,
                 details: self.details.as_deref(),
                 unseen: &self.unseen,
+                marked: &self.marked,
                 tabs: &self.tabs,
                 project_of: &project_of,
                 now_ms: NOW,
@@ -1160,20 +1184,42 @@ mod tests {
     #[test]
     fn tone_follows_state_status_and_whether_the_result_was_seen() {
         let idle = with(managed("i", "/a", 1), SessionStatus::Idle);
-        assert_eq!(tone(&idle, false), Tone::Idle);
-        assert_eq!(tone(&idle, true), Tone::Done);
-        assert_eq!(tone(&managed("starting", "/a", 1), false), Tone::Idle);
-        assert_eq!(tone(&with(managed("b", "/a", 1), SessionStatus::Busy), true), Tone::Working);
+        assert_eq!(tone(&idle, Unseen::No), Tone::Idle);
+        assert_eq!(tone(&idle, Unseen::Alert), Tone::Done);
+        assert_eq!(tone(&idle, Unseen::Marked), Tone::Unread);
+        assert_eq!(tone(&managed("starting", "/a", 1), Unseen::No), Tone::Idle);
+        for unseen in [Unseen::Alert, Unseen::Marked] {
+            assert_eq!(tone(&with(managed("b", "/a", 1), SessionStatus::Busy), unseen), Tone::Working);
+            assert_eq!(
+                tone(&with(managed("n", "/a", 1), SessionStatus::NeedsInput { reason: None }), unseen),
+                Tone::NeedsInput
+            );
+            assert_eq!(tone(&closed("c", "/a", 1), unseen), Tone::Closed);
+        }
         assert_eq!(
-            tone(&with(managed("n", "/a", 1), SessionStatus::NeedsInput { reason: None }), true),
-            Tone::NeedsInput
-        );
-        assert_eq!(
-            tone(&with(external("e", "/a", 1), SessionStatus::NeedsInput { reason: None }), false),
+            tone(&with(external("e", "/a", 1), SessionStatus::NeedsInput { reason: None }), Unseen::No),
             Tone::Elsewhere
         );
-        assert_eq!(tone(&closed("c", "/a", 1), true), Tone::Closed);
-        assert_eq!(status_tone(None, false), Tone::Idle);
+        assert_eq!(status_tone(None, Unseen::No), Tone::Idle);
+    }
+
+    #[test]
+    fn a_session_marked_unread_by_hand_has_the_unread_tone_not_done() {
+        let mut fx = Fixture::of(
+            vec![with(managed("m", "/a", 1), SessionStatus::Idle), with(managed("d", "/a", 2), SessionStatus::Idle)],
+            vec![],
+        );
+        fx.unseen = HashSet::from(["m".to_string(), "d".to_string()]);
+        fx.marked = HashSet::from(["m".to_string()]);
+        let tones: HashMap<String, Tone> = fx
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row.kind {
+                RowKind::Session { session, tone, .. } => Some((session.id, tone)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!((tones["m"], tones["d"]), (Tone::Unread, Tone::Done));
     }
 
     #[test]

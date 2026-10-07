@@ -26,7 +26,7 @@ use protocol::message::{
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{
-    Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone, tone_word,
+    Activation, PaneEntry, TabEntry, Tone, Unseen, display_path, session_title, status_tone, tone_word,
 };
 use app_core::settings::Settings;
 use app_core::shortcuts::{self, Platform};
@@ -43,8 +43,8 @@ use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itsel
 use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
-    RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme,
-    working_sweep,
+    RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, pin_icon, side_line, sweeping,
+    theme, working_sweep,
 };
 use crate::window_frame;
 
@@ -503,7 +503,7 @@ impl WorkspaceView {
         for session in sessions {
             let SessionState::Managed { pane } = session.state else { continue };
             let Some(leaf) = self.workspace.leaf_for_pane(pane) else { continue };
-            if status_tone(session.status.as_ref(), false) != Tone::Idle && self.marked_unread.remove(&leaf) {
+            if status_tone(session.status.as_ref(), Unseen::No) != Tone::Idle && self.marked_unread.remove(&leaf) {
                 self.unseen.remove(&leaf);
                 self.sync_unseen(cx);
             }
@@ -548,9 +548,21 @@ impl WorkspaceView {
 
     /// Tell the sidebar which sessions carry the unseen badge.
     fn sync_unseen(&self, cx: &mut Context<Self>) {
-        let sessions: HashSet<String> =
-            self.unseen.keys().filter_map(|leaf| self.workspace.leaves.get(leaf)?.session.clone()).collect();
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, cx));
+        let session_of = |leaf: &NodeId| self.workspace.leaves.get(leaf)?.session.clone();
+        let sessions: HashSet<String> = self.unseen.keys().filter_map(session_of).collect();
+        let marked: HashSet<String> = self.marked_unread.iter().filter_map(session_of).collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, marked, cx));
+    }
+
+    /// Why `leaf`'s result is unseen, if it is.
+    fn unseen_of(&self, leaf: NodeId) -> Unseen {
+        if self.marked_unread.contains(&leaf) {
+            Unseen::Marked
+        } else if self.unseen.contains_key(&leaf) {
+            Unseen::Alert
+        } else {
+            Unseen::No
+        }
     }
 
     /// The badge of the Claude config dir `leaf` runs in, when two or more are configured.
@@ -1128,7 +1140,7 @@ impl WorkspaceView {
             };
             let idle = leaf.session.as_deref().and_then(|id| sessions.get(id)).is_some_and(|info| {
                 matches!(info.state, SessionState::Managed { .. })
-                    && status_tone(info.status.as_ref(), false) == Tone::Idle
+                    && status_tone(info.status.as_ref(), Unseen::No) == Tone::Idle
             });
             let unread = self.unseen.contains_key(&tab.focused);
             let mark = (idle || unread).then_some((tab.focused, unread));
@@ -1402,7 +1414,7 @@ impl WorkspaceView {
                 Some(OpenPane {
                     cwd: leaf.launch.cwd.clone(),
                     claude: leaf.launch.is_claude(),
-                    tone: status_tone(status, self.unseen.contains_key(&id)),
+                    tone: status_tone(status, self.unseen_of(id)),
                 })
             })
             .collect();
@@ -1824,11 +1836,13 @@ impl WorkspaceView {
         let title =
             tab_name.or_else(|| self.sidebar.read(cx).leaf_title(leaf)).unwrap_or_else(|| self.tab_title(index, cx));
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
-        let unseen = self.unseen.contains_key(&leaf);
+        let unseen = self.unseen_of(leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());
         let dir = self.leaf_dir_badge(leaf, cx);
         let cwd = self.leaf_cwd(leaf, cx);
         let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
+        let pin = (status_tone(status.as_ref(), unseen) == Tone::Unread)
+            .then(|| pin_icon(colors.map_or(theme.tokens.text, |colors| colors.dot), &theme));
         let ink = colors.map_or(theme.tokens.text, |colors| colors.ink);
         let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
         let card = HoverCard {
@@ -1881,6 +1895,7 @@ impl WorkspaceView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .when_some(colors.and_then(|colors| colors.fill), |chip, fill| chip.bg(rgb(fill)))
                     .when(sweep, |chip| chip.child(working_sweep("sweep-title", px(RADIUS_SMALL), &theme)))
+                    .children(pin)
                     .child(div().min_w_0().truncate().child(title))
                     .when(container, |chip| chip.child(container_icon(ink, &theme)))
                     .children(dir.map(|badge| dir_badge(&badge, &theme)))
@@ -1968,7 +1983,7 @@ impl WorkspaceView {
                 let title = self.workspace.leaf_name(leaf).map_or_else(|| view.read(cx).title(), String::from);
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
-                let unseen = self.unseen.contains_key(&leaf);
+                let unseen = self.unseen_of(leaf);
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
                 let dir = self.leaf_dir_badge(leaf, cx);
                 let project = self.leaf_project_color(leaf, cx);
@@ -2114,7 +2129,7 @@ fn pane_header(
     index: usize,
     title: String,
     status: Option<SessionStatus>,
-    unseen: bool,
+    unseen: Unseen,
     animate: bool,
     container: bool,
     dir: Option<DirBadge>,
@@ -2123,6 +2138,8 @@ fn pane_header(
     theme: &Theme,
 ) -> impl IntoElement {
     let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
+    let pin = (status_tone(status.as_ref(), unseen) == Tone::Unread)
+        .then(|| pin_icon(colors.map_or(theme.tokens.text, |colors| colors.dot), theme));
     let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
     let card = HoverCard {
         title: title.clone(),
@@ -2151,6 +2168,7 @@ fn pane_header(
         .text_color(rgb(colors.map_or(theme.tokens.text, |colors| colors.ink)))
         .when(sweep, |header| header.child(working_sweep(("sweep-pane", index), px(RADIUS_SMALL), theme)))
         .when_some(project, |header, color| header.child(side_line(color, theme)))
+        .children(pin)
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| {
             header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
