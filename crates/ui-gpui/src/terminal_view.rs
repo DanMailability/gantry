@@ -5,6 +5,7 @@ use std::ops::Range;
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, Theme, UI_FONT, theme};
 use app_core::bidi::{RowOrder, logical_hit, to_display};
+use app_core::host_state::HostCard;
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
 use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
@@ -188,6 +189,8 @@ pub enum PaneEvent {
     Close,
     /// The program changed the title.
     TitleChanged,
+    /// The button on the host's card was pressed (Connect, Reconnect, Sign in).
+    HostAction,
 }
 
 /// One terminal pane, showing a daemon-owned session.
@@ -211,6 +214,8 @@ pub struct TerminalView {
     row_orders: Vec<Option<RowOrder>>,
     /// Input typed while Starting, sent on attach.
     held_input: Vec<u8>,
+    /// The state card of this pane's host, while the host is not usable.
+    host_card: Option<HostCard>,
 }
 
 impl EventEmitter<PaneEvent> for TerminalView {}
@@ -242,7 +247,23 @@ impl TerminalView {
             hovered_link: None,
             row_orders: Vec::new(),
             held_input: Vec::new(),
+            host_card: None,
         }
+    }
+
+    /// Use `client` for this pane's input and resizes (the host reconnected, or connected for the first time).
+    pub fn set_client(&mut self, client: Option<DaemonClient>) {
+        self.client = client;
+    }
+
+    /// Show the state card of this pane's host (`None` clears it). A pane that is attached stops taking input while
+    /// the card is up.
+    pub fn set_host_card(&mut self, card: Option<HostCard>, cx: &mut Context<Self>) {
+        if card.is_some() && self.pane.is_some() {
+            self.state = PaneState::Disconnected;
+        }
+        self.host_card = card;
+        cx.notify();
     }
 
     /// The theme changed: use its terminal colors.
@@ -254,6 +275,7 @@ impl TerminalView {
     /// Show daemon pane `pane`, running `launch` (a fresh terminal; its output or replay follows).
     pub fn attach(&mut self, pane: PaneId, launch: PaneLaunch, cx: &mut Context<Self>) {
         self.pane = Some(pane);
+        self.host_card = None;
         self.launch = launch;
         self.state = PaneState::Live;
         self.term = new_term(self.grid_size.0, self.grid_size.1, cx);
@@ -297,6 +319,7 @@ impl TerminalView {
     /// The process ended.
     pub fn exited(&mut self, code: Option<u32>, cx: &mut Context<Self>) {
         self.pane = None;
+        self.host_card = None;
         self.state = PaneState::Exited(code);
         self.held_input.clear();
         cx.notify();
@@ -359,6 +382,9 @@ impl TerminalView {
 
     /// Banner text and whether Continue/Restart + Close apply.
     fn banner(&self) -> Option<(String, bool)> {
+        if self.host_card.is_some() {
+            return None;
+        }
         match &self.state {
             PaneState::Starting | PaneState::Live => None,
             PaneState::Exited(Some(code)) => Some((format!("Process exited (code {code})"), true)),
@@ -758,6 +784,50 @@ impl Render for TerminalView {
                 .flex_1()
                 .w_full(),
             )
+            .when_some(self.host_card.clone(), |this, card| {
+                // The host is not usable: its state, in the middle of the pane.
+                this.child(
+                    div().absolute().size_full().flex().items_center().justify_center().p(theme.ui(16.)).child(
+                        div()
+                            .max_w(theme.ui(320.))
+                            .px(theme.ui(20.))
+                            .py(theme.ui(18.))
+                            .flex()
+                            .flex_col()
+                            .gap(theme.ui(14.))
+                            .rounded(px(RADIUS))
+                            .bg(rgb(theme.tokens.raised))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .shadow_lg()
+                            .text_color(rgb(theme.tokens.text))
+                            .font_family(UI_FONT)
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(card.title))
+                            .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(card.detail))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(theme.ui(8.))
+                                    .when_some(card.button, |row, label| {
+                                        row.child(banner_button(
+                                            "host-action",
+                                            label,
+                                            true,
+                                            &theme,
+                                            cx.listener(|_, _, _, cx| cx.emit(PaneEvent::HostAction)),
+                                        ))
+                                    })
+                                    .child(banner_button(
+                                        "host-close",
+                                        "Close",
+                                        false,
+                                        &theme,
+                                        cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Close)),
+                                    )),
+                            ),
+                    ),
+                )
+            })
             .when_some(self.banner(), |this, (text, actions)| {
                 let rerun = if self.launch.is_claude() { "Continue" } else { "Restart" };
                 // A message in the middle of the pane, over the (still visible) terminal text.
