@@ -36,7 +36,7 @@ use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortc
 use app_core::session_tree::{
     Activation, PaneEntry, TabEntry, Tone, Unseen, display_path, leaf_tone, session_title, status_tone, tone_word,
 };
-use app_core::settings::{Settings, ShellSettings, SshHost};
+use app_core::settings::{Settings, ShellSettings, SshHost, add_ssh_host};
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
@@ -50,6 +50,7 @@ use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
 use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
+use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
     RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, pin_icon, side_line, ssh_icon,
@@ -239,6 +240,8 @@ pub struct WorkspaceView {
     recents: Option<(Entity<RecentsView>, Subscription)>,
     /// The open setup wizard overlay.
     setup: Option<(Entity<SetupView>, Subscription)>,
+    /// The open SSH install wizard overlay.
+    ssh_wizard: Option<(Entity<SshWizard>, Subscription)>,
     /// The Settings page, while its tab is open.
     settings: Option<Entity<SettingsView>>,
     /// Listens to the open Settings page.
@@ -434,6 +437,7 @@ impl WorkspaceView {
             launcher: None,
             recents: None,
             setup: None,
+            ssh_wizard: None,
             settings: None,
             _settings_events: None,
             before_settings: None,
@@ -1304,10 +1308,16 @@ impl WorkspaceView {
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
             PaneEvent::HostAction => {
                 if let Some(host) = self.workspace.leaves.get(&leaf).map(|leaf| leaf.host.clone()) {
-                    if self.host_state(&host) == HostState::Connecting {
-                        self.cancel_connecting(&host, cx);
-                    } else {
-                        self.connect_host(&host, true, window, cx);
+                    let entry = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned();
+                    match (self.host_state(&host), entry) {
+                        (HostState::Connecting, _) => self.cancel_connecting(&host, cx),
+                        (HostState::NotInstalled, Some(entry)) => {
+                            self.open_ssh_wizard(WizardStart::Install(entry), window, cx)
+                        }
+                        (HostState::UpdateNeeded { .. }, Some(entry)) => {
+                            self.open_ssh_wizard(WizardStart::Update(entry), window, cx)
+                        }
+                        _ => self.connect_host(&host, true, window, cx),
                     }
                 }
             }
@@ -1515,6 +1525,10 @@ impl WorkspaceView {
             askpass.focus_handle(cx).focus(window, cx);
             return;
         }
+        if let Some((wizard, _)) = &self.ssh_wizard {
+            wizard.focus_handle(cx).focus(window, cx);
+            return;
+        }
         let (open, active) = (self.workspace.settings_tab().is_some(), self.settings_active());
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_settings(open, active, cx));
         let settings =
@@ -1630,7 +1644,7 @@ impl WorkspaceView {
             MenuAction::NewOnHost { host, claude } => {
                 self.new_session_on_host(&HostId::named(&host), claude, window, cx)
             }
-            MenuAction::AddSshHost => {}
+            MenuAction::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
@@ -2071,7 +2085,7 @@ impl WorkspaceView {
 
     /// Open the launcher; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
     fn show_launcher(&mut self, claude_first: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.setup.is_some() {
+        if self.setup.is_some() || self.ssh_wizard.is_some() {
             return;
         }
         self.recents = None;
@@ -2126,13 +2140,51 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Open the SSH install wizard for `start`; one at a time, a second request focuses the open one.
+    fn open_ssh_wizard(&mut self, start: WizardStart, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((wizard, _)) = &self.ssh_wizard {
+            wizard.focus_handle(cx).focus(window, cx);
+            return;
+        }
+        self.launcher = None;
+        self.recents = None;
+        let existing: Vec<String> = self.ssh_hosts.iter().map(|host| host.name.clone()).collect();
+        let prompts = self.askpass_prompts.clone();
+        let runtime_dir = Paths::for_profile(&current_profile()).runtime_dir;
+        let view = cx.new(|cx| SshWizard::new(start, existing, prompts, runtime_dir, cx));
+        let subscription = cx.subscribe_in(&view, window, |this, _, event: &WizardEvent, window, cx| match event {
+            WizardEvent::Closed { draft } => {
+                this.ssh_wizard = None;
+                this.withdraw_questions(&HostId::named(draft), cx);
+                this.focus_current(window, cx);
+                cx.notify();
+            }
+            WizardEvent::Finished { host, add } => {
+                this.ssh_wizard = None;
+                if *add {
+                    let host = host.clone();
+                    SettingsStore::update(cx, |settings| {
+                        let _ = add_ssh_host(&mut settings.ssh_hosts, host);
+                    });
+                    this.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+                }
+                this.focus_current(window, cx);
+                this.connect_host(&HostId::named(&host.name), true, window, cx);
+                cx.notify();
+            }
+        });
+        view.focus_handle(cx).focus(window, cx);
+        self.ssh_wizard = Some((view, subscription));
+        cx.notify();
+    }
+
     fn open_recents(&mut self, _: &OpenRecents, window: &mut Window, cx: &mut Context<Self>) {
         self.show_recents(None, window, cx);
     }
 
     /// Open the recent sessions pop-up, on `project`'s sessions when given.
     fn show_recents(&mut self, project: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.setup.is_some() {
+        if self.setup.is_some() || self.ssh_wizard.is_some() {
             return;
         }
         self.launcher = None;
@@ -3083,6 +3135,23 @@ impl Render for WorkspaceView {
                 root.child(
                     div()
                         .id("setup-overlay")
+                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(theme.ui(16.))
+                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
+                        .child(view),
+                )
+            })
+            .when_some(self.ssh_wizard.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div()
+                        .id("ssh-wizard-overlay")
                         .occlude()
                         .absolute()
                         .top_0()

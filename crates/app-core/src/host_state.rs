@@ -202,18 +202,18 @@ impl HostState {
                 format!("Update Gantry on {host}"),
                 match remote {
                     Some(remote) => {
-                        format!("{host} runs a different Gantry ({remote}). The installer arrives in a later release.")
+                        format!("{host} runs a different Gantry ({remote}). Update it from this Gantry.")
                     }
                     None => {
-                        format!("{host} runs a different Gantry version. The installer arrives in a later release.")
+                        format!("{host} runs a different Gantry version. Update it from this Gantry.")
                     }
                 },
-                None,
+                Some("Update and restart"),
             ),
             HostState::NotInstalled => card(
                 format!("Gantry is not installed on {host}"),
-                "Gantry was not found there. The installer arrives in a later release.".into(),
-                None,
+                "Gantry was not found there. Install it from this Gantry.".into(),
+                Some("Install…"),
             ),
             HostState::Failed { reason } => {
                 card(format!("Could not connect to {host}"), reason.clone(), Some("Reconnect"))
@@ -391,16 +391,15 @@ mod tests {
         assert_eq!((card.title.as_str(), card.button), ("Not connected", Some("Connect")));
         assert_eq!(HostState::NeedsSignIn.card("devbox").unwrap().button, Some("Sign in"));
         assert_eq!(HostState::Failed { reason: "refused".into() }.card("devbox").unwrap().detail, "refused");
-        for state in
-            [HostState::Reconnecting { attempt: 1 }, HostState::UpdateNeeded { remote: None }, HostState::NotInstalled]
-        {
-            assert_eq!(state.card("devbox").unwrap().button, None, "{state:?} has no button");
-        }
+        assert_eq!(HostState::Reconnecting { attempt: 1 }.card("devbox").unwrap().button, None);
+        assert_eq!(HostState::UpdateNeeded { remote: None }.card("devbox").unwrap().button, Some("Update and restart"));
         let card = HostState::Reconnecting { attempt: 3 }.card("devbox").unwrap();
         assert_eq!(card.title, "Reconnecting to devbox…");
         assert!(card.detail.contains("Attempt 3 of 4"), "{}", card.detail);
         let card = HostState::UpdateNeeded { remote: Some("protocol 6".into()) }.card("devbox").unwrap();
         assert!(card.detail.contains("protocol 6"), "{}", card.detail);
+        assert_eq!(card.button, Some("Update and restart"));
+        assert_eq!(HostState::NotInstalled.card("devbox").unwrap().button, Some("Install…"));
     }
 
     #[test]
