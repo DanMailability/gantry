@@ -6,9 +6,13 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use app_core::version::{Version, parse_version_output};
-use gpui::{Context, Global, Task};
+use gpui::Global;
+#[cfg(target_os = "linux")]
+use gpui::{Context, Task};
+#[cfg(target_os = "linux")]
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+#[cfg(target_os = "linux")]
 use crate::workspace_view::WorkspaceView;
 
 /// The connected daemon's build, as its `Welcome` said.
@@ -33,6 +37,7 @@ pub(crate) fn footer_lines(daemon: Option<&DaemonBuild>) -> [String; 2] {
 }
 
 /// Quiet time after the last change before probing: installers replace the file in several steps.
+#[cfg(target_os = "linux")]
 pub(crate) const SETTLE: Duration = Duration::from_millis(500);
 
 /// How long `--version` may take.
@@ -64,6 +69,22 @@ pub(crate) fn probe(path: &Path, timeout: Duration) -> Option<Version> {
     parse_version_output(&output)
 }
 
+/// Polls until the daemon's lock file can be locked (the daemon holds it for as long as it runs), up to `timeout`.
+pub(crate) fn wait_for_lock_free(path: &Path, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        let free =
+            std::fs::OpenOptions::new().create(true).append(true).open(path).is_ok_and(|file| file.try_lock().is_ok());
+        if free {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Whether a file event means the file changed: running `--version` on it opens and closes it for reading, which must
 /// not count (it would probe again forever).
 #[cfg(target_os = "linux")]
@@ -87,6 +108,7 @@ fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 }
 
 /// Watch `path`'s directory; after changes to `path` settle, probe it off the UI thread and report the version.
+#[cfg(target_os = "linux")]
 pub(crate) fn watch(path: &Path, cx: &mut Context<WorkspaceView>) -> Option<(RecommendedWatcher, Task<()>)> {
     let dir = path.parent()?;
     let name = path.file_name()?.to_owned();
@@ -171,6 +193,17 @@ mod tests {
         assert_eq!(footer_lines(None)[1], "daemon version unknown");
         let no_commit = DaemonBuild { version: Some("0.3.0".into()), commit: None };
         assert_eq!(footer_lines(Some(&no_commit))[1], "daemon 0.3.0 (unknown)");
+    }
+
+    #[test]
+    fn lock_wait_ends_when_the_holder_lets_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.lock");
+        let holder = std::fs::File::create(&path).unwrap();
+        holder.lock().unwrap();
+        assert!(!wait_for_lock_free(&path, Duration::from_millis(150)));
+        drop(holder);
+        assert!(wait_for_lock_free(&path, Duration::from_millis(150)));
     }
 
     #[cfg(target_os = "linux")]

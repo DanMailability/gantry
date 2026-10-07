@@ -16,6 +16,7 @@ use app_core::version::{self, Note, Update, Version};
 use app_core::workspace::{ClaudeDirs, DirBadge, MAX_PANES_PER_TAB, PaneLaunch, Rerun, Restored, Workspace};
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
+use daemon::paths::{Paths, current_profile};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
@@ -398,6 +399,7 @@ impl WorkspaceView {
     }
 
     /// A version was found at the start path.
+    #[cfg(target_os = "linux")]
     pub(crate) fn installed_version(&mut self, version: Version, cx: &mut Context<Self>) {
         self.installed = Some(version);
         cx.notify();
@@ -413,13 +415,20 @@ impl WorkspaceView {
     /// Restart and update: Stop all when the daemon is older, start the new GUI, quit.
     fn restart_and_update(&mut self, cx: &mut Context<Self>) {
         let (Some(update), Some(path)) = (self.update_notice(), self.start_path.clone()) else { return };
-        if !path.is_file() {
-            self.update_error = Some(format!("Could not start {}: the file is missing", path.display()));
+        // Nothing is stopped unless the file there really is the new version (not half written, not older).
+        if !update_watch::probe(&path, update_watch::PROBE_TIMEOUT).is_some_and(|version| version >= update.target) {
+            self.update_error =
+                Some(format!("Could not start {}: it does not report version {}", path.display(), update.target));
             cx.notify();
             return;
         }
         if update.restart_daemon {
             self.client.stop_all_and_wait(Duration::from_secs(2));
+            // The new GUI must not connect to the dying daemon: wait until it has let go of its lock.
+            let lock = Paths::for_profile(&current_profile()).lock_file;
+            if !update_watch::wait_for_lock_free(&lock, Duration::from_secs(5)) {
+                tracing::warn!("the daemon was still running 5 s after Stop all; starting the new window anyway");
+            }
         }
         match update_watch::restart_command(&path, update.restart_daemon).spawn() {
             Ok(_) => cx.quit(),
