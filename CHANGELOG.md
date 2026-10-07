@@ -8,6 +8,10 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - SSH hosts: list remote machines in `sshHosts` in settings.json (name and ssh target); the New buttons then offer Local and the hosts, connect on first use with sign-in dialogs, and reconnect by themselves. Gantry must already be installed on the remote. A connecting host can be cancelled, a host taken over by another Gantry says so instead of reconnecting, and Stop all sessions on quit only stops this machine's sessions. The remote needs lingering (`loginctl enable-linger`) to keep sessions after the last ssh session ends.
 
+- Add SSH host wizard: pick a host from your ssh config or type one, and Gantry installs itself there (Linux x86_64 hosts), checks it, offers to turn on lingering, then saves and connects the host.
+- Update and restart for remote hosts, and Install on a host without Gantry, from the host's card.
+- Settings > SSH hosts: see each host's state, rename it, edit its target, remove it, or add one.
+
 ### Changed
 - Needs a daemon restart: new panes starting in `~` now open in the home folder.
 
