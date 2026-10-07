@@ -78,10 +78,12 @@ pub enum SidebarEvent {
         /// The new name, as typed.
         name: String,
     },
-    /// Open the launcher (Claude first, or shell first).
+    /// A New button was pressed: the launcher (Claude first, or shell first), or a list of hosts.
     New {
         /// Claude (true) or a shell.
         claude: bool,
+        /// Where the button was clicked.
+        position: Point<Pixels>,
     },
     /// Open the recent sessions pop-up.
     OpenRecents,
@@ -1078,7 +1080,9 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(|style| style.opacity(0.9))
                             .child("New Claude session")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: true }))),
+                            .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
+                                cx.emit(SidebarEvent::New { claude: true, position: event.position() })
+                            })),
                     )
                     .child(
                         div()
@@ -1096,7 +1100,9 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                             .child(">_")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: false }))),
+                            .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
+                                cx.emit(SidebarEvent::New { claude: false, position: event.position() })
+                            })),
                     ),
             )
             .when_some(self.menu.as_ref(), |el, menu| {

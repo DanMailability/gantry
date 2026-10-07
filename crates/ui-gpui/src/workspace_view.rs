@@ -35,7 +35,7 @@ use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortc
 use app_core::session_tree::{
     Activation, PaneEntry, TabEntry, Tone, Unseen, display_path, session_title, status_tone, tone_word,
 };
-use app_core::settings::{Settings, SshHost};
+use app_core::settings::{Settings, ShellSettings, SshHost};
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
@@ -237,6 +237,8 @@ pub struct WorkspaceView {
     tab_menu: Option<OpenMenu>,
     /// The open popup of a pane's split button (Claude or Terminal).
     pane_menu: Option<OpenMenu>,
+    /// The open list of `Local` and the SSH hosts, from a New button.
+    host_menu: Option<OpenMenu>,
     /// The binary this window started from (resolved at start, before an install can replace it).
     start_path: Option<PathBuf>,
     /// The version found at `start_path` after a change; `None` until one was probed.
@@ -411,6 +413,7 @@ impl WorkspaceView {
             before_settings: None,
             tab_menu: None,
             pane_menu: None,
+            host_menu: None,
             start_path: None,
             installed: None,
             daemon_version: None,
@@ -1457,6 +1460,10 @@ impl WorkspaceView {
                     self.open(claude, Some(axis));
                 }
             }
+            MenuAction::NewLocal { claude } => self.show_launcher(claude, window, cx),
+            MenuAction::NewOnHost { host, claude } => {
+                self.new_session_on_host(&HostId::named(&host), claude, window, cx)
+            }
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
@@ -1685,6 +1692,40 @@ impl WorkspaceView {
             )
     }
 
+    /// A New button was pressed: the launcher, or first a list of `Local` and the SSH hosts.
+    fn new_pressed(&mut self, claude: bool, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ssh_hosts.is_empty() {
+            self.show_launcher(claude, window, cx);
+            return;
+        }
+        let hosts: Vec<(String, String)> = self
+            .ssh_hosts
+            .iter()
+            .map(|host| (host.name.clone(), self.host_state(&HostId::named(&host.name)).label()))
+            .collect();
+        let items = menus::host_menu(claude, &hosts);
+        // The buttons are at the bottom of the window: open the list upward from the click.
+        let height = px(30. * items.len() as f32 + 8.);
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        self.host_menu = Some(OpenMenu::new(items, position - gpui::point(px(0.), height), focus));
+        cx.notify();
+    }
+
+    /// A new Claude session (else a shell) on SSH host `host`, in its home folder; connects first when needed.
+    fn new_session_on_host(&mut self, host: &HostId, claude: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let launch = if claude {
+            PaneLaunch::claude("~".into())
+        } else {
+            PaneLaunch::shell("~".into(), &ShellSettings::default())
+        };
+        let leaf = self.workspace.new_tab_on(launch, host.clone());
+        self.add_slot(leaf, window, cx);
+        self.spawn_leaf(leaf, None, window, cx); // queues the leaf and connects when the host is not connected
+        self.focus_current(window, cx);
+        self.save(cx);
+    }
+
     /// Open the Claude / Terminal popup of pane `leaf`'s split button at `position`.
     fn open_pane_menu(
         &mut self,
@@ -1738,7 +1779,7 @@ impl WorkspaceView {
                 }
             }
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
-            SidebarEvent::New { claude } => self.show_launcher(claude, window, cx),
+            SidebarEvent::New { claude, position } => self.new_pressed(claude, position, window, cx),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
             SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
@@ -2936,6 +2977,27 @@ impl Render for WorkspaceView {
                 });
                 root.child(context_menu::render(
                     "pane-menu",
+                    menu,
+                    &theme,
+                    cx.global::<SettingsStore>().settings(),
+                    move |action, window, cx| pick(action, window, cx),
+                    move |window, cx| dismiss(&(), window, cx),
+                ))
+            })
+            .when_some(self.host_menu.as_ref(), |root, menu| {
+                let pick = cx.listener(|this, action: &MenuAction, window, cx| {
+                    this.host_menu = None;
+                    this.focus_current(window, cx);
+                    this.run_menu_action(action.clone(), window, cx);
+                    cx.notify();
+                });
+                let dismiss = cx.listener(|this, _: &(), window, cx| {
+                    this.host_menu = None;
+                    this.focus_current(window, cx);
+                    cx.notify();
+                });
+                root.child(context_menu::render(
+                    "host-menu",
                     menu,
                     &theme,
                     cx.global::<SettingsStore>().settings(),
