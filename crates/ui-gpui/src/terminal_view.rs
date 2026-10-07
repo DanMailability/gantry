@@ -194,7 +194,7 @@ pub enum PaneEvent {
 pub struct TerminalView {
     focus_handle: FocusHandle,
     term: TermState,
-    client: DaemonClient,
+    client: Option<DaemonClient>,
     pane: Option<PaneId>,
     launch: PaneLaunch,
     state: PaneState,
@@ -223,7 +223,7 @@ impl Focusable for TerminalView {
 
 impl TerminalView {
     /// A pane that will show `launch` once `attach` is called.
-    pub fn new(client: DaemonClient, launch: PaneLaunch, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Option<DaemonClient>, launch: PaneLaunch, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         TerminalView {
             focus_handle: cx.focus_handle(),
             term: new_term(80, 24, cx),
@@ -258,11 +258,15 @@ impl TerminalView {
         self.state = PaneState::Live;
         self.term = new_term(self.grid_size.0, self.grid_size.1, cx);
         self.title = None;
-        if let Some((cols, rows, width, height)) = resize_on_attach(self.grid_size, self.cell) {
-            self.client.resize(pane, cols, rows, width, height);
+        if let Some((cols, rows, width, height)) = resize_on_attach(self.grid_size, self.cell)
+            && let Some(client) = &self.client
+        {
+            client.resize(pane, cols, rows, width, height);
         }
-        if !self.held_input.is_empty() {
-            self.client.input(pane, &std::mem::take(&mut self.held_input));
+        if !self.held_input.is_empty()
+            && let Some(client) = &self.client
+        {
+            client.input(pane, &std::mem::take(&mut self.held_input));
         }
         cx.notify();
     }
@@ -342,8 +346,10 @@ impl TerminalView {
     fn write_pty(&mut self, bytes: &[u8]) {
         match input_fate(&self.state) {
             InputFate::Send => {
-                if let Some(pane) = self.pane {
-                    self.client.input(pane, bytes);
+                if let Some(pane) = self.pane
+                    && let Some(client) = &self.client
+                {
+                    client.input(pane, bytes);
                 }
             }
             InputFate::Hold => self.held_input.extend_from_slice(bytes),
@@ -385,8 +391,10 @@ impl TerminalView {
         if dims != self.grid_size {
             self.grid_size = dims;
             self.term.resize(dims.0, dims.1);
-            if let Some(pane) = self.pane {
-                self.client.resize(pane, dims.0, dims.1, cell.0, cell.1);
+            if let Some(pane) = self.pane
+                && let Some(client) = &self.client
+            {
+                client.resize(pane, dims.0, dims.1, cell.0, cell.1);
             }
             cx.notify();
         }

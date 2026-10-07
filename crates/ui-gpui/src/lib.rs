@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use app_core::layout_store;
 use app_core::settings::WindowSettings;
 use app_core::split_tree::NodeId;
-use app_core::workspace::{Launch, restore};
+use app_core::workspace::{HostLive, Launch, restore};
 use daemon::client::{Connection, DaemonClient, StartError, restart_daemon};
 use daemon::launch::spawn_detached_daemon;
 use daemon::paths::{Paths, current_profile};
@@ -31,6 +31,8 @@ use gpui::{
     App, AppContext, Bounds, Context, IntoElement, PromptLevel, Render, Styled, TitlebarOptions, Window, WindowBounds,
     WindowHandle, WindowOptions, div, px, rgb, size,
 };
+
+use protocol::host::HostId;
 
 use crate::settings_store::SettingsStore;
 use crate::workspace_view::{Resume, WorkspaceView};
@@ -128,6 +130,30 @@ pub fn run(launch: Launch, resume_sessions: bool) {
     });
 }
 
+/// Debug builds only: other daemons of this machine, shown as hosts, from `GANTRY_EXTRA_HOSTS=name=profile[,…]`.
+/// A test seam until SSH hosts exist.
+#[cfg(debug_assertions)]
+fn extra_hosts() -> Vec<(HostId, Connection)> {
+    let Ok(spec) = std::env::var("GANTRY_EXTRA_HOSTS") else { return Vec::new() };
+    spec.split(',')
+        .filter_map(|entry| {
+            let (name, profile) = entry.split_once('=')?;
+            match DaemonClient::connect(&Paths::for_profile(profile), spawn_detached_daemon) {
+                Ok(connection) => Some((HostId::named(name), connection)),
+                Err(err) => {
+                    tracing::warn!("extra host {name}: {err}");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(debug_assertions))]
+fn extra_hosts() -> Vec<(HostId, Connection)> {
+    Vec::new()
+}
+
 /// The root view for a fresh connection: the saved layout reconciled with the daemon's panes.
 fn workspace(
     connection: Connection,
@@ -149,16 +175,21 @@ fn workspace(
         .map(|(id, _)| *id)
         .collect();
     let keep = if resume_sessions { was_live.clone() } else { HashSet::new() };
-    let hosts = [app_core::workspace::HostLive {
-        host: protocol::host::HostId::local(),
-        instance: &connection.instance,
-        panes: &connection.panes,
-    }];
-    let mut restored = restore(saved, &hosts, launch, window_settings.restore_layout, &keep);
+    let extra = extra_hosts();
+    let mut restored = {
+        let mut hosts =
+            vec![HostLive { host: HostId::local(), instance: &connection.instance, panes: &connection.panes }];
+        hosts.extend(extra.iter().map(|(host, connection)| HostLive {
+            host: host.clone(),
+            instance: &connection.instance,
+            panes: &connection.panes,
+        }));
+        restore(saved, &hosts, launch, window_settings.restore_layout, &keep)
+    };
     let resume = resume_mode(&window_settings, resume_sessions, was_live);
     restored.workspace.sidebar.visible = window_settings.sidebar_at_start.visible(restored.workspace.sidebar.visible);
     let default_cwd: PathBuf = launch.default.cwd.clone();
-    WorkspaceView::new(connection, restored, paths.layout_file.clone(), default_cwd, resume, window, cx)
+    WorkspaceView::new(connection, extra, restored, paths.layout_file.clone(), default_cwd, resume, window, cx)
 }
 
 fn install_quit_prompt(window: WindowHandle<WorkspaceView>, cx: &mut App) {

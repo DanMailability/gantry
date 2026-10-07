@@ -24,9 +24,7 @@ use gpui::{
 };
 use notify::RecommendedWatcher;
 use protocol::host::{HostId, PaneKey};
-use protocol::message::{
-    ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
-};
+use protocol::message::{ContainerChoice, PaletteColors, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{
@@ -156,7 +154,14 @@ struct PendingOpen {
     pick: Option<String>,
     cwd: PathBuf,
     axis: Option<Axis>,
-    cwd_from: Option<PaneId>,
+    cwd_from: Option<PaneKey>,
+}
+
+/// One connected host's daemon.
+struct HostConn {
+    client: DaemonClient,
+    /// Keeps routing this host's events to the view.
+    _events: Task<()>,
 }
 
 /// Root view of the Gantry window.
@@ -172,7 +177,7 @@ pub struct WorkspaceView {
     search_indexing: Option<u8>,
     /// Whether the daemon said conversation search does not work.
     search_unavailable: bool,
-    client: DaemonClient,
+    hosts: HashMap<HostId, HostConn>,
     layout_file: PathBuf,
     default_cwd: PathBuf,
     /// The daemon's own Claude config dir (its panes need no `CLAUDE_CONFIG_DIR`).
@@ -240,7 +245,6 @@ pub struct WorkspaceView {
     /// Leaves whose notification was clicked.
     clicked: async_channel::Sender<NodeId>,
     _clicks: Task<()>,
-    _events: Task<()>,
 }
 
 /// Which finished leaves resume by themselves on start.
@@ -255,9 +259,43 @@ pub enum Resume {
 }
 
 impl WorkspaceView {
-    /// Show `restored`, attaching and spawning what it says, and start routing `connection`'s events.
+    /// The connection to `host`, if it is connected.
+    fn client(&self, host: &HostId) -> Option<&DaemonClient> {
+        self.hosts.get(host).map(|conn| &conn.client)
+    }
+
+    /// This machine's daemon (always connected: the window needs it to start).
+    fn local_client(&self) -> &DaemonClient {
+        &self.hosts[&HostId::local()].client
+    }
+
+    /// Route `host`'s events to the view, in batches, until the connection ends.
+    fn listen(
+        host: HostId,
+        events: async_channel::Receiver<ClientEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(first) = events.recv().await {
+                let batch = batch_events(first, &events, MAX_BATCH_BYTES);
+                if this.update_in(cx, |view, window, cx| view.on_events(&host, batch, window, cx)).is_err() {
+                    return;
+                }
+                // Yield so keystrokes (e.g. Ctrl+C) are handled between batches.
+                cx.background_executor().timer(Duration::ZERO).await;
+            }
+            let _ = this
+                .update_in(cx, |view, window, cx| view.on_events(&host, vec![ClientEvent::Disconnected], window, cx));
+        })
+    }
+
+    /// Show `restored`, attaching and spawning what it says, and start routing the events of `connection` and of the
+    /// `extra` hosts.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         connection: Connection,
+        extra: Vec<(HostId, Connection)>,
         restored: Restored,
         layout_file: PathBuf,
         default_cwd: PathBuf,
@@ -267,17 +305,15 @@ impl WorkspaceView {
     ) -> Self {
         let Connection { client, events, claude_dir: daemon_dir, daemon_version, daemon_commit, .. } = connection;
         cx.set_global(DaemonBuild { version: daemon_version.clone(), commit: daemon_commit });
-        let events_task = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(first) = events.recv().await {
-                let batch = batch_events(first, &events, MAX_BATCH_BYTES);
-                if this.update_in(cx, |view, window, cx| view.on_events(batch, window, cx)).is_err() {
-                    return;
-                }
-                // Yield so keystrokes (e.g. Ctrl+C) are handled between batches.
-                cx.background_executor().timer(Duration::ZERO).await;
-            }
-            let _ = this.update_in(cx, |view, window, cx| view.on_events(vec![ClientEvent::Disconnected], window, cx));
-        });
+        let mut hosts = HashMap::new();
+        hosts.insert(HostId::local(), HostConn { client, _events: Self::listen(HostId::local(), events, window, cx) });
+        for (host, connection) in extra {
+            let conn = HostConn {
+                client: connection.client,
+                _events: Self::listen(host.clone(), connection.events, window, cx),
+            };
+            hosts.insert(host, conn);
+        }
         let sidebar = cx.new(SidebarView::new);
         let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
             this.on_sidebar_event(event.clone(), window, cx)
@@ -313,7 +349,7 @@ impl WorkspaceView {
             next_request: 0,
             search_indexing: None,
             search_unavailable: false,
-            client,
+            hosts,
             layout_file,
             default_cwd,
             dirs: ClaudeDirs::from_settings(
@@ -356,7 +392,6 @@ impl WorkspaceView {
             _appearance: appearance,
             clicked,
             _clicks: clicks_task,
-            _events: events_task,
         };
         this.start_path = std::env::current_exe().ok();
         this.daemon_version = daemon_version.as_deref().and_then(Version::parse);
@@ -371,7 +406,7 @@ impl WorkspaceView {
         for (leaf, key) in &restored.attach {
             let launch = this.workspace.leaves[leaf].launch.clone();
             this.slots[leaf].view.update(cx, |view, cx| view.attach(key.pane, launch, cx));
-            this.client.attach(key.pane);
+            this.hosts[&key.host].client.attach(key.pane);
         }
         for (leaf, slot) in &this.slots {
             if this.workspace.leaves[leaf].pane.is_none() && !restored.spawn.contains(leaf) {
@@ -424,7 +459,7 @@ impl WorkspaceView {
             return;
         }
         if update.restart_daemon {
-            self.client.stop_all_and_wait(Duration::from_secs(2));
+            self.local_client().stop_all_and_wait(Duration::from_secs(2));
             // The new GUI must not connect to the dying daemon: wait until it has let go of its lock.
             let lock = Paths::for_profile(&current_profile()).lock_file;
             if !update_watch::wait_for_lock_free(&lock, Duration::from_secs(5)) {
@@ -448,7 +483,9 @@ impl WorkspaceView {
             slot.view.update(cx, |view, cx| view.apply_theme(cx));
         }
         if self.sent_palette != Some(preset) {
-            self.client.set_palette(PaletteColors::from(terminal_palette(preset)));
+            for conn in self.hosts.values() {
+                conn.client.set_palette(PaletteColors::from(terminal_palette(preset)));
+            }
             self.sent_palette = Some(preset);
         }
         let settings = cx.global::<SettingsStore>().settings();
@@ -459,7 +496,7 @@ impl WorkspaceView {
             self.dirs.dirs.iter().map(|dir| dir.path.clone()).collect()
         };
         if self.sent_dirs.as_ref() != Some(&configured) {
-            self.client.set_claude_dirs(configured.clone());
+            self.local_client().set_claude_dirs(configured.clone());
             self.sent_dirs = Some(configured);
         }
         let seconds = cx.global::<SettingsStore>().settings().alerts.finished_after_seconds;
@@ -469,7 +506,7 @@ impl WorkspaceView {
 
     fn add_slot(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let launch = self.workspace.leaves[&leaf].launch.clone();
-        let client = self.client.clone();
+        let client = self.client(&self.workspace.leaves[&leaf].host).cloned();
         let view = cx.new(|cx| TerminalView::new(client, launch, window, cx));
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &PaneEvent, window, cx| {
             this.on_pane_event(leaf, *event, window, cx)
@@ -477,28 +514,37 @@ impl WorkspaceView {
         self.slots.insert(leaf, Slot { view, _subscription: subscription });
     }
 
-    fn spawn_leaf(&mut self, leaf: NodeId, cwd_from: Option<PaneId>, cx: &mut Context<Self>) {
+    fn spawn_leaf(&mut self, leaf: NodeId, cwd_from: Option<PaneKey>, cx: &mut Context<Self>) {
         let Some(slot) = self.slots.get(&leaf) else { return };
+        let host = self.workspace.leaves[&leaf].host.clone();
+        let Some(client) = self.client(&host).cloned() else {
+            let message = format!("Host {} is not connected", host.name());
+            slot.view.update(cx, |view, cx| view.failed(message, cx));
+            return;
+        };
         let (cols, rows) = slot.view.read(cx).grid_size();
         let scrollback = cx.global::<SettingsStore>().settings().window.scrollback;
+        // Pane ids belong to one daemon: only a pane of the same host can lend its directory.
+        let cwd_from = cwd_from.filter(|key| key.host == host).map(|key| key.pane);
         self.next_request += 1;
         self.pending.insert(self.next_request, leaf);
-        self.client
-            .spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
+        client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
     }
 
-    fn on_events(&mut self, events: Vec<ClientEvent>, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_events(&mut self, host: &HostId, events: Vec<ClientEvent>, window: &mut Window, cx: &mut Context<Self>) {
         for event in events {
             match &event {
                 ClientEvent::Output { pane, .. } | ClientEvent::Resync { pane, .. } => {
-                    if let Some(slot) =
-                        self.workspace.leaf_for_pane(&PaneKey::local(*pane)).and_then(|leaf| self.slots.get(&leaf))
+                    if let Some(slot) = self
+                        .workspace
+                        .leaf_for_pane(&PaneKey::new(host.clone(), *pane))
+                        .and_then(|leaf| self.slots.get(&leaf))
                     {
                         slot.view.update(cx, |view, cx| view.on_event(&event, cx));
                     }
                 }
                 ClientEvent::Exited { pane, code } => {
-                    if let Some(leaf) = self.workspace.pane_exited(&PaneKey::local(*pane)) {
+                    if let Some(leaf) = self.workspace.pane_exited(&PaneKey::new(host.clone(), *pane)) {
                         self.slots[&leaf].view.update(cx, |view, cx| view.exited(Some(*code), cx));
                         self.save(cx);
                     }
@@ -508,13 +554,19 @@ impl WorkspaceView {
                         self.workspace.pane_started(leaf, *pane, cwd.clone());
                         let launch = self.workspace.leaves[&leaf].launch.clone();
                         self.slots[&leaf].view.update(cx, |view, cx| view.attach(*pane, launch, cx));
-                        if self.workspace.focused() == Some(leaf) {
-                            self.client.focus(*pane);
+                        if self.workspace.focused() == Some(leaf)
+                            && let Some(client) = self.client(host)
+                        {
+                            client.focus(*pane);
                         }
                         self.save(cx);
                     }
                     // The leaf was closed while its process was starting.
-                    None => self.client.kill(*pane),
+                    None => {
+                        if let Some(client) = self.client(host) {
+                            client.kill(*pane);
+                        }
+                    }
                 },
                 ClientEvent::SpawnFailed { request, error } => {
                     if let Some(leaf) = self.pending.remove(request) {
@@ -522,18 +574,18 @@ impl WorkspaceView {
                     }
                 }
                 ClientEvent::Sessions { sessions } => {
-                    self.track_sessions(sessions, cx);
-                    self.attention.reset(&HostId::local(), sessions);
+                    self.track_sessions(host, sessions, cx);
+                    self.attention.reset(host, sessions);
                     let sessions = sessions.clone();
-                    self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(&HostId::local(), sessions, cx));
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
                     self.resume_finished(cx);
                 }
                 ClientEvent::SessionsChanged { upserted, removed } => {
-                    self.track_sessions(upserted, cx);
-                    self.drop_marks_of_changed(upserted, cx);
-                    let alerts = self.attention.update(&HostId::local(), upserted, removed);
+                    self.track_sessions(host, upserted, cx);
+                    self.drop_marks_of_changed(host, upserted, cx);
+                    let alerts = self.attention.update(host, upserted, removed);
                     let upserted = upserted.clone();
-                    self.sidebar.update(cx, |sidebar, cx| sidebar.apply(&HostId::local(), upserted, removed, cx));
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
                     for alert in alerts {
                         self.raise(alert, window, cx);
                     }
@@ -558,10 +610,22 @@ impl WorkspaceView {
                     self.search_unavailable = true;
                     self.push_search_state(cx);
                 }
-                ClientEvent::TakenOver => cx.quit(),
-                ClientEvent::Disconnected => {
-                    for slot in self.slots.values() {
-                        slot.view.update(cx, |view, cx| view.disconnected(cx));
+                ClientEvent::TakenOver | ClientEvent::Disconnected => {
+                    if matches!(event, ClientEvent::TakenOver) && host.is_local() {
+                        cx.quit();
+                        continue;
+                    }
+                    let leaves: Vec<NodeId> = self
+                        .workspace
+                        .leaves
+                        .iter()
+                        .filter(|(_, leaf)| &leaf.host == host)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for leaf in leaves {
+                        if let Some(slot) = self.slots.get(&leaf) {
+                            slot.view.update(cx, |view, cx| view.disconnected(cx));
+                        }
                     }
                 }
             }
@@ -570,11 +634,11 @@ impl WorkspaceView {
     }
 
     /// Leaves follow the session their pane runs (it changes on `/clear`).
-    fn track_sessions(&mut self, sessions: &[SessionInfo], cx: &mut Context<Self>) {
+    fn track_sessions(&mut self, host: &HostId, sessions: &[SessionInfo], cx: &mut Context<Self>) {
         let mut changed = false;
         for session in sessions {
             if let SessionState::Managed { pane } = session.state {
-                changed |= self.workspace.session_seen(&PaneKey::local(pane), &session.id);
+                changed |= self.workspace.session_seen(&PaneKey::new(host.clone(), pane), &session.id);
             }
         }
         if changed {
@@ -583,13 +647,13 @@ impl WorkspaceView {
     }
 
     /// Drop the hand-made unread mark of every session whose status is no longer Idle.
-    fn drop_marks_of_changed(&mut self, sessions: &[SessionInfo], cx: &mut Context<Self>) {
+    fn drop_marks_of_changed(&mut self, host: &HostId, sessions: &[SessionInfo], cx: &mut Context<Self>) {
         if self.marked_unread.is_empty() {
             return;
         }
         for session in sessions {
             let SessionState::Managed { pane } = session.state else { continue };
-            let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::local(pane)) else { continue };
+            let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::new(host.clone(), pane)) else { continue };
             if status_tone(session.status.as_ref(), Unseen::No) != Tone::Idle && self.marked_unread.remove(&leaf) {
                 self.unseen.remove(&leaf);
                 self.sync_unseen(cx);
@@ -701,14 +765,21 @@ impl WorkspaceView {
 
     /// Start what the last run left finished, once the session list is in. A session that runs elsewhere stays a card.
     fn resume_finished(&mut self, cx: &mut Context<Self>) {
+        let mut waiting = Vec::new();
         for leaf in std::mem::take(&mut self.to_resume) {
             let Some(entry) = self.workspace.leaves.get(&leaf).filter(|entry| entry.pane.is_none()) else { continue };
+            // Each leaf waits for the session list of its own host.
+            if !self.sidebar.read(cx).sessions().loaded(&entry.host) {
+                waiting.push(leaf);
+                continue;
+            }
             if let Rerun::Start(launch) =
                 entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref())
             {
                 self.start_leaf(leaf, launch, cx);
             }
         }
+        self.to_resume = waiting;
     }
 
     /// Continue / Restart a finished leaf. If its session already runs in another pane, show that one. If it runs
@@ -757,7 +828,7 @@ impl WorkspaceView {
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
                 let _ = this.update_in(cx, |this, _, _| {
-                    this.client.take_over(&session, false);
+                    this.local_client().take_over(&session, false);
                     this.take_overs.insert(session, target);
                 });
             }
@@ -805,7 +876,7 @@ impl WorkspaceView {
                     let force = answer.await == Ok(0);
                     let _ = this.update_in(cx, |this, _, _| {
                         if force {
-                            this.client.take_over(&session, true);
+                            this.local_client().take_over(&session, true);
                         } else {
                             this.take_overs.remove(&session);
                         }
@@ -844,8 +915,9 @@ impl WorkspaceView {
             return;
         }
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
+        let source = source.filter(|leaf| axis.is_some() || leaf.host.is_local());
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
-        let cwd_from = source.and_then(|leaf| leaf.pane);
+        let cwd_from = source.and_then(|leaf| leaf.key());
         self.open_new(claude, cwd, axis, cwd_from, None);
     }
 
@@ -860,11 +932,11 @@ impl WorkspaceView {
         claude: bool,
         cwd: PathBuf,
         axis: Option<Axis>,
-        cwd_from: Option<PaneId>,
+        cwd_from: Option<PaneKey>,
         pick: Option<String>,
     ) {
         self.next_request += 1;
-        self.client.find_container(self.next_request, &cwd);
+        self.local_client().find_container(self.next_request, &cwd);
         self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from });
     }
 
@@ -974,7 +1046,7 @@ impl WorkspaceView {
         &mut self,
         launch: PaneLaunch,
         axis: Option<Axis>,
-        cwd_from: Option<PaneId>,
+        cwd_from: Option<PaneKey>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -992,8 +1064,10 @@ impl WorkspaceView {
     }
 
     fn close_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.workspace.close(leaf).and_then(|removed| removed.pane) {
-            self.client.kill(pane);
+        if let Some(key) = self.workspace.close(leaf).and_then(|removed| removed.key())
+            && let Some(client) = self.client(&key.host)
+        {
+            client.kill(key.pane);
         }
         self.slots.remove(&leaf);
         self.marked_unread.remove(&leaf);
@@ -1031,8 +1105,10 @@ impl WorkspaceView {
         match self.workspace.focused().and_then(|leaf| self.slots.get(&leaf).map(|slot| (leaf, slot))) {
             Some((leaf, slot)) => {
                 slot.view.focus_handle(cx).focus(window, cx);
-                if let Some(pane) = self.workspace.leaves[&leaf].pane {
-                    self.client.focus(pane);
+                if let Some(key) = self.workspace.leaves[&leaf].key()
+                    && let Some(client) = self.client(&key.host)
+                {
+                    client.focus(key.pane);
                 }
             }
             None => self.focus_handle.focus(window, cx),
@@ -1592,7 +1668,7 @@ impl WorkspaceView {
     fn on_recents_event(&mut self, event: RecentsEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             RecentsEvent::Search { request, query } => {
-                self.client.search(request, &query, SEARCH_LIMIT);
+                self.local_client().search(request, &query, SEARCH_LIMIT);
                 return;
             }
             RecentsEvent::Resume { session, cwd, split } => {
@@ -1655,11 +1731,14 @@ impl WorkspaceView {
             &["Detach", "Stop all sessions", "Cancel"],
             cx,
         );
-        let (client, prompting) = (self.client.clone(), self.prompting.clone());
+        let (clients, prompting): (Vec<DaemonClient>, _) =
+            (self.hosts.values().map(|conn| conn.client.clone()).collect(), self.prompting.clone());
         cx.spawn(async move |_, cx| match answer.await {
             Ok(0) => cx.update(|cx| cx.quit()),
             Ok(1) => {
-                client.stop_all_and_wait(Duration::from_secs(2));
+                for client in &clients {
+                    client.stop_all_and_wait(Duration::from_secs(2));
+                }
                 cx.update(|cx| cx.quit());
             }
             _ => prompting.set(false),
