@@ -577,6 +577,12 @@ impl WorkspaceView {
             self.forget_host(&host, cx);
         }
         self.retries.retain(|host, _| listed.contains(host.name()));
+        // Added or removed hosts change what the cards of their restored leaves say, whatever their state.
+        let remote: HashSet<HostId> =
+            self.workspace.leaves.values().filter(|leaf| !leaf.host.is_local()).map(|leaf| leaf.host.clone()).collect();
+        for host in remote {
+            self.refresh_host_cards(&host, cx);
+        }
         self.dirs = ClaudeDirs::from_settings(&settings, self.daemon_dir.as_deref(), std::env::home_dir().as_deref());
         let configured: Vec<PathBuf> = if settings.claude_dirs.is_empty() {
             Vec::new()
@@ -592,6 +598,16 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Take down `host`'s open sign-in dialog and drop its queued questions (each is answered Cancel).
+    fn withdraw_questions(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        self.askpass_queue.retain(|prompt| prompt.host != host.name());
+        if let Some((view, _)) = &self.askpass
+            && view.read(cx).host() == host.name()
+        {
+            view.update(cx, |view, cx| view.cancel(cx));
+        }
+    }
+
     /// `host` is no longer in `sshHosts`: drop its connection, retry timer, attempt and questions, and show it as not
     /// connected.
     fn forget_host(&mut self, host: &HostId, cx: &mut Context<Self>) {
@@ -599,12 +615,7 @@ impl WorkspaceView {
         if let Some((_, handle)) = self.attempts.remove(host) {
             handle.cancel();
         }
-        self.askpass_queue.retain(|prompt| prompt.host != host.name());
-        if let Some((view, _)) = &self.askpass
-            && view.read(cx).host() == host.name()
-        {
-            view.update(cx, |view, cx| view.cancel(cx));
-        }
+        self.withdraw_questions(host, cx);
         self.hosts.remove(host);
         for (id, leaf) in &self.workspace.leaves {
             if &leaf.host == host
@@ -674,10 +685,15 @@ impl WorkspaceView {
     /// Put the card of `host`'s state on every pane of the host (or take it off when connected).
     fn refresh_host_cards(&mut self, host: &HostId, cx: &mut Context<Self>) {
         let mut card = self.host_state(host).card(host.name());
-        // A host that is not in `sshHosts` cannot be connected: its card has no button.
+        // A host that is not in `sshHosts` cannot be connected: its card has no button (and a host that was never
+        // connected says it is not listed).
         if !self.ssh_hosts.iter().any(|entry| entry.name == host.name())
             && let Some(card) = &mut card
         {
+            if self.host_state(host) == HostState::NotConnected {
+                card.title = "Not listed".into();
+                card.detail = format!("{} is not listed in sshHosts.", host.name());
+            }
             card.button = None;
         }
         for (id, leaf) in &self.workspace.leaves {
@@ -746,12 +762,7 @@ impl WorkspaceView {
             handle.cancel();
         }
         self.retries.remove(host);
-        self.askpass_queue.retain(|prompt| prompt.host != host.name());
-        if let Some((view, _)) = &self.askpass
-            && view.read(cx).host() == host.name()
-        {
-            view.update(cx, |view, cx| view.cancel(cx));
-        }
+        self.withdraw_questions(host, cx);
         self.set_host_state(host, state.next(HostEvent::Cancel), cx);
     }
 
@@ -772,6 +783,8 @@ impl WorkspaceView {
         match result {
             Ok(connection) => self.host_connected(host, connection, window, cx),
             Err(kind) => {
+                // Whatever ended it, a question of this attempt still on screen is stale.
+                self.withdraw_questions(host, cx);
                 let next = self.host_state(host).next(HostEvent::AttemptFailed(kind));
                 self.set_host_state(host, next.clone(), cx);
                 if let HostState::Reconnecting { attempt } = next {

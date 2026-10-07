@@ -257,6 +257,8 @@ pub fn classify_failure(
         }
         return FailKind::NeedsInput;
     }
+    // A plain end of stream says nothing: the exit code does better. Only another handshake error is named.
+    let handshake_error = handshake_error.filter(|error| *error != "daemon closed the connection");
     let reason = match (last_line, handshake_error, exit_code) {
         (Some(line), _, _) => line,
         (None, Some(error), _) => error.to_string(),
@@ -452,6 +454,14 @@ mod tests {
             classify_failure(Some(255), stderr, None, false, None),
             FailKind::NeedsInput,
             "asked, or background"
+        );
+    }
+
+    #[test]
+    fn a_silent_ssh_exit_with_only_an_eof_handshake_error_reports_the_exit_code() {
+        assert_eq!(
+            classify_failure(Some(3), "", None, false, Some("daemon closed the connection")),
+            FailKind::Other { reason: "ssh ended with exit code 3".into() }
         );
     }
 

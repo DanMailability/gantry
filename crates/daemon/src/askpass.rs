@@ -4,7 +4,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// What the user answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +31,10 @@ pub struct AskpassState {
     asked: AtomicBool,
     cancelled: AtomicBool,
     wake: tokio::sync::Notify,
+    /// Questions that wait for the user right now.
+    pending: AtomicUsize,
+    /// Signalled whenever `pending` changes.
+    changed: tokio::sync::Notify,
 }
 
 impl AskpassState {
@@ -42,6 +46,26 @@ impl AskpassState {
     /// Whether a question was cancelled (the dialog closed or answered Cancel).
     pub fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Whether a question waits for the user (the handshake timeout does not run meanwhile).
+    pub fn waiting(&self) -> bool {
+        self.pending.load(Ordering::SeqCst) > 0
+    }
+
+    /// Resolves when a question starts or ends waiting.
+    pub async fn wait_changed(&self) {
+        self.changed.notified().await;
+    }
+
+    #[cfg(unix)]
+    fn set_waiting(&self, waiting: bool) {
+        if waiting {
+            self.pending.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.changed.notify_one();
     }
 
     /// Resolves once a question was cancelled.
@@ -143,6 +167,7 @@ mod imp {
             None
         } else {
             state.asked.store(true, Ordering::SeqCst);
+            state.set_waiting(true);
             let answer = if prompts.send(AskPrompt { host, prompt: request.prompt, reply }).await.is_ok() {
                 match answers.recv().await {
                     Ok(AskAnswer::Answer(text)) => Some(text),
@@ -151,6 +176,7 @@ mod imp {
             } else {
                 None
             };
+            state.set_waiting(false);
             if answer.is_none() {
                 state.cancel();
             }

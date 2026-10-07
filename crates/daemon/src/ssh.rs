@@ -96,6 +96,22 @@ pub fn connect(
     }
 }
 
+/// Resolves after `total` of time during which no sign-in question waits for the user.
+async fn timeout_without_questions(state: &AskpassState, total: Duration) {
+    let mut left = total;
+    loop {
+        if state.waiting() {
+            state.wait_changed().await;
+            continue;
+        }
+        let started = tokio::time::Instant::now();
+        tokio::select! {
+            () = tokio::time::sleep(left) => return,
+            () = state.wait_changed() => left = left.saturating_sub(started.elapsed()),
+        }
+    }
+}
+
 /// Why an attempt was ended from outside, before its handshake finished.
 enum Abort {
     Cancelled,
@@ -177,7 +193,7 @@ async fn run(
             let reason = tokio::select! {
                 () = handle.cancel.notified() => Abort::Cancelled,
                 () = state.wait_cancelled() => Abort::Cancelled,
-                () = tokio::time::sleep(handshake_timeout) => Abort::TimedOut,
+                () = timeout_without_questions(&state, handshake_timeout) => Abort::TimedOut,
             };
             if handshaken.load(std::sync::atomic::Ordering::SeqCst) {
                 std::future::pending::<()>().await;

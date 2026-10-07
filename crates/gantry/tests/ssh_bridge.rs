@@ -281,3 +281,43 @@ fn an_interactive_attempt_that_is_refused_without_a_question_says_authentication
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn the_handshake_timeout_waits_while_a_question_is_open() {
+    let env = setup("sshbridge11", Fake { ask: Some("me@devbox's password: "), ..Fake::default() });
+    let (prompts_tx, prompts_rx) = async_channel::unbounded::<AskPrompt>();
+    std::thread::spawn(move || {
+        let prompt = prompts_rx.recv_blocking().unwrap();
+        // The user takes longer than the 1 s handshake timeout.
+        std::thread::sleep(Duration::from_secs(2));
+        prompt.reply.send_blocking(AskAnswer::Answer("hunter2".into())).unwrap();
+    });
+    let attempt = Attempt::Interactive { prompts: prompts_tx, runtime_dir: env.path("run") };
+    let connection =
+        connect_with(env.fake.to_str().unwrap(), &spec(), attempt, &AttemptHandle::default(), Duration::from_secs(1))
+            .expect("the time spent answering does not count");
+    // The sign-in socket is gone once the handshake is done.
+    let leftovers = std::fs::read_dir(env.path("run"))
+        .unwrap()
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("askpass-"));
+    assert!(!leftovers, "the askpass socket is removed after a successful handshake");
+    stop_daemon(&connection);
+}
+
+#[test]
+fn an_interactive_attempt_that_asks_nothing_still_times_out() {
+    let env = setup("sshbridge12", Fake { body: Some("sleep 60".into()), ..Fake::default() });
+    let (prompts_tx, _prompts_rx) = async_channel::unbounded::<AskPrompt>();
+    let attempt = Attempt::Interactive { prompts: prompts_tx, runtime_dir: env.path("run") };
+    let error = connect_with(
+        env.fake.to_str().unwrap(),
+        &spec(),
+        attempt,
+        &AttemptHandle::default(),
+        Duration::from_millis(500),
+    )
+    .err()
+    .expect("times out");
+    assert_eq!(error, FailKind::Other { reason: "timed out waiting for Gantry on the host".into() });
+}
