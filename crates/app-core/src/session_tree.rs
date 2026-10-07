@@ -46,6 +46,8 @@ pub struct PaneEntry {
     pub claude: bool,
     /// Its process ended; the pane shows Continue / Restart.
     pub ended: bool,
+    /// Its host is not connected (an SSH host that is connecting, lost or never connected): the Closed look.
+    pub offline: bool,
     /// Its tab has no other pane.
     pub alone: bool,
     /// Host folder of the dev container it runs in.
@@ -405,6 +407,12 @@ pub fn status_tone(status: Option<&SessionStatus>, unseen: Unseen) -> Tone {
     }
 }
 
+/// Tone of a leaf's title-bar chip or pane header: Closed while its host is not connected, else from its status
+/// (`None` = no status to color it by).
+pub fn leaf_tone(status: Option<&SessionStatus>, unseen: Unseen, offline: bool) -> Option<Tone> {
+    if offline { Some(Tone::Closed) } else { status.map(|status| status_tone(Some(status), unseen)) }
+}
+
 /// Tone of any session.
 pub fn tone(session: &SessionInfo, unseen: Unseen) -> Tone {
     match session.state {
@@ -697,6 +705,7 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
             let age = age(input.now_ms, session.last_active_ms);
             let (tone, note) = match (session.state, leaf) {
                 (SessionState::Closed, Some(pane)) if pane.ended => (Tone::Closed, "Exited · tab open".to_string()),
+                (_, Some(pane)) if pane.offline => (Tone::Closed, "Not connected".to_string()),
                 (SessionState::Closed, _) => (Tone::Idle, "Starting".to_string()),
                 _ => {
                     let unseen = match (input.unseen.contains(&session.id), input.marked.contains(&session.id)) {
@@ -712,6 +721,7 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
         }
         EntryKind::Pane(pane) => {
             let (tone, note) = match (pane.claude, pane.ended) {
+                (_, false) if pane.offline => (Tone::Closed, "Not connected"),
                 (true, true) => (Tone::Closed, "Exited · tab open"),
                 (true, false) => (Tone::Idle, "Idle"),
                 (false, true) => (Tone::Closed, "Exited"),
@@ -926,6 +936,7 @@ mod tests {
             session: session.map(String::from),
             claude: session.is_some(),
             ended: false,
+            offline: false,
             alone: true,
             container: None,
         }
@@ -1014,6 +1025,28 @@ mod tests {
                 "  e (Elsewhere · 2h)",
             ]
         );
+    }
+
+    #[test]
+    fn a_leaf_of_a_host_that_is_not_connected_has_the_closed_look_whatever_its_last_status() {
+        let mut busy = pane(4, "/r/app", Some("m"));
+        busy.offline = true;
+        let mut shell = shell_pane(5, "/r/app");
+        shell.offline = true;
+        let mut fixture =
+            Fixture::of(vec![with(managed("m", "/r/app", NOW - HOUR_MS), SessionStatus::Busy)], vec![busy, shell]);
+        let rows = fixture.rows();
+        let tones: Vec<(Tone, &str)> = rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::Session { tone, note, .. } | RowKind::Pane { tone, note, .. } => Some((*tone, note.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tones, vec![(Tone::Closed, "Not connected"), (Tone::Closed, "Not connected")]);
+        assert_eq!(leaf_tone(Some(&SessionStatus::Busy), Unseen::No, true), Some(Tone::Closed));
+        assert_eq!(leaf_tone(Some(&SessionStatus::Busy), Unseen::No, false), Some(Tone::Working));
+        assert_eq!(leaf_tone(None, Unseen::No, false), None);
     }
 
     #[test]

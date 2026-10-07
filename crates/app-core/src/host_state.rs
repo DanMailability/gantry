@@ -47,6 +47,23 @@ pub enum HostState {
         /// Why.
         reason: String,
     },
+    /// Another Gantry took this host over; no retry (two windows would fight), waits for the user's Reconnect.
+    TakenOver,
+}
+
+/// A small status dot for a host in the New menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostDot {
+    /// Connected.
+    Ok,
+    /// Working on it (connecting, reconnecting).
+    Busy,
+    /// Needs the user (sign-in, update, opened elsewhere).
+    Warn,
+    /// Not usable (lost, not installed, failed).
+    Bad,
+    /// Nothing to say (not connected yet).
+    None,
 }
 
 /// Why an attempt failed, as read from ssh's exit and the handshake.
@@ -79,6 +96,10 @@ pub enum HostEvent {
     Dropped,
     /// An attempt failed.
     AttemptFailed(FailKind),
+    /// Another Gantry took the host's daemon over while connected.
+    TakenOver,
+    /// The user cancelled the attempt that was connecting.
+    Cancel,
 }
 
 /// The message card of a host that is not usable.
@@ -104,6 +125,8 @@ impl HostState {
             (state, HostEvent::Connect) if state.can_connect() => HostState::Connecting,
             (HostState::Connecting | HostState::Reconnecting { .. }, HostEvent::Established) => HostState::Connected,
             (HostState::Connected, HostEvent::Dropped) => HostState::Reconnecting { attempt: 1 },
+            (HostState::Connected, HostEvent::TakenOver) => HostState::TakenOver,
+            (HostState::Connecting, HostEvent::Cancel) => HostState::NotConnected,
             (HostState::Connecting | HostState::Reconnecting { .. }, HostEvent::AttemptFailed(kind)) => match kind {
                 FailKind::NeedsInput => HostState::NeedsSignIn,
                 FailKind::UpdateNeeded { remote } => HostState::UpdateNeeded { remote },
@@ -132,6 +155,18 @@ impl HostState {
             HostState::UpdateNeeded { .. } => "update needed".into(),
             HostState::NotInstalled => "not installed".into(),
             HostState::Failed { .. } => "failed".into(),
+            HostState::TakenOver => "opened elsewhere".into(),
+        }
+    }
+
+    /// The dot shown beside the host's name in the New menu.
+    pub fn dot(&self) -> HostDot {
+        match self {
+            HostState::Connected => HostDot::Ok,
+            HostState::Connecting | HostState::Reconnecting { .. } => HostDot::Busy,
+            HostState::NeedsSignIn | HostState::UpdateNeeded { .. } | HostState::TakenOver => HostDot::Warn,
+            HostState::Disconnected | HostState::NotInstalled | HostState::Failed { .. } => HostDot::Bad,
+            HostState::NotConnected => HostDot::None,
         }
     }
 
@@ -146,7 +181,7 @@ impl HostState {
             HostState::Connecting => card(
                 format!("Connecting to {host}…"),
                 "Starting ssh. A sign-in dialog opens here if it asks for anything.".into(),
-                None,
+                Some("Cancel"),
             ),
             HostState::Reconnecting { attempt } => card(
                 format!("Reconnecting to {host}…"),
@@ -183,28 +218,50 @@ impl HostState {
             HostState::Failed { reason } => {
                 card(format!("Could not connect to {host}"), reason.clone(), Some("Reconnect"))
             }
+            HostState::TakenOver => card(
+                "Opened from another Gantry".into(),
+                format!("Another Gantry took over {host}. Your sessions keep running there."),
+                Some("Reconnect"),
+            ),
         }
     }
 }
 
 /// Read a failed attempt. `exit_code`: ssh's exit status when it ended by itself; `stderr`: what it printed;
-/// `version_mismatch`: the remote daemon's protocol version when the handshake said it differs.
-pub fn classify_failure(exit_code: Option<i32>, stderr: &str, version_mismatch: Option<u32>) -> FailKind {
+/// `version_mismatch`: the remote daemon's protocol version when the handshake said it differs;
+/// `interactive_unasked`: the attempt was interactive and ssh never asked a question (so "Permission denied" is not
+/// something a dialog can fix); `handshake_error`: why the handshake failed, when it did.
+pub fn classify_failure(
+    exit_code: Option<i32>,
+    stderr: &str,
+    version_mismatch: Option<u32>,
+    interactive_unasked: bool,
+    handshake_error: Option<&str>,
+) -> FailKind {
     if let Some(protocol) = version_mismatch {
         return FailKind::UpdateNeeded { remote: Some(format!("protocol {protocol}")) };
     }
     let lower = stderr.to_lowercase();
-    if exit_code == Some(127) || lower.contains("command not found") {
+    if exit_code == Some(127) {
         return FailKind::NotInstalled;
     }
+    if lower.contains("remote host identification has changed") {
+        return FailKind::Other { reason: "The host key of the host changed. Check ~/.ssh/known_hosts.".into() };
+    }
+    let last_line = stderr.lines().rev().find(|line| !line.trim().is_empty()).map(|line| line.trim().to_string());
     let wants_input = ["permission denied", "host key verification failed", "passphrase", "authentication failed"];
     if exit_code == Some(255) && wants_input.iter().any(|needle| lower.contains(needle)) {
+        if interactive_unasked && lower.contains("permission denied") {
+            let line = last_line.unwrap_or_default();
+            return FailKind::Other { reason: format!("Authentication failed (ssh asked for nothing): {line}") };
+        }
         return FailKind::NeedsInput;
     }
-    let reason = match (stderr.lines().rev().find(|line| !line.trim().is_empty()), exit_code) {
-        (Some(line), _) => line.trim().to_string(),
-        (None, Some(code)) => format!("ssh ended with exit code {code}"),
-        (None, None) => "the connection closed".to_string(),
+    let reason = match (last_line, handshake_error, exit_code) {
+        (Some(line), _, _) => line,
+        (None, Some(error), _) => error.to_string(),
+        (None, None, Some(code)) => format!("ssh ended with exit code {code}"),
+        (None, None, None) => "the connection closed".to_string(),
     };
     FailKind::Other { reason }
 }
@@ -270,6 +327,7 @@ mod tests {
             HostState::UpdateNeeded { remote: None },
             HostState::NotInstalled,
             HostState::Failed { reason: "x".into() },
+            HostState::TakenOver,
         ] {
             assert!(state.can_connect(), "{state:?}");
             assert_eq!(state.next(HostEvent::Connect), HostState::Connecting, "{state:?}");
@@ -331,12 +389,9 @@ mod tests {
         assert_eq!((card.title.as_str(), card.button), ("Not connected", Some("Connect")));
         assert_eq!(HostState::NeedsSignIn.card("devbox").unwrap().button, Some("Sign in"));
         assert_eq!(HostState::Failed { reason: "refused".into() }.card("devbox").unwrap().detail, "refused");
-        for state in [
-            HostState::Connecting,
-            HostState::Reconnecting { attempt: 1 },
-            HostState::UpdateNeeded { remote: None },
-            HostState::NotInstalled,
-        ] {
+        for state in
+            [HostState::Reconnecting { attempt: 1 }, HostState::UpdateNeeded { remote: None }, HostState::NotInstalled]
+        {
             assert_eq!(state.card("devbox").unwrap().button, None, "{state:?} has no button");
         }
         let card = HostState::Reconnecting { attempt: 3 }.card("devbox").unwrap();
@@ -348,12 +403,16 @@ mod tests {
 
     #[test]
     fn a_failed_attempt_is_read_from_the_exit_code_and_ssh_s_last_words() {
-        let read = |code, stderr| classify_failure(code, stderr, None);
+        let read = |code, stderr| classify_failure(code, stderr, None, false, None);
         assert_eq!(
             read(Some(127), "bash: line 1: ~/.local/bin/gantry: No such file or directory"),
             FailKind::NotInstalled
         );
-        assert_eq!(read(Some(1), "sh: gantry: command not found"), FailKind::NotInstalled);
+        assert_eq!(
+            read(Some(1), "sh: gantry: command not found"),
+            FailKind::Other { reason: "sh: gantry: command not found".into() },
+            "only exit code 127 means not installed"
+        );
         assert_eq!(read(Some(255), "me@devbox: Permission denied (publickey,password)."), FailKind::NeedsInput);
         assert_eq!(read(Some(255), "Host key verification failed."), FailKind::NeedsInput);
         assert_eq!(
@@ -363,10 +422,90 @@ mod tests {
         assert_eq!(read(Some(3), ""), FailKind::Other { reason: "ssh ended with exit code 3".into() });
         assert_eq!(read(None, ""), FailKind::Other { reason: "the connection closed".into() });
         assert_eq!(
-            classify_failure(Some(255), "Permission denied", Some(6)),
+            classify_failure(Some(255), "Permission denied", Some(6), false, None),
             FailKind::UpdateNeeded { remote: Some("protocol 6".into()) },
             "a version mismatch wins"
         );
+    }
+
+    #[test]
+    fn a_changed_host_key_says_so_instead_of_asking_for_sign_in() {
+        let stderr =
+            "@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@\nHost key verification failed.";
+        assert_eq!(
+            classify_failure(Some(255), stderr, None, false, None),
+            FailKind::Other { reason: "The host key of the host changed. Check ~/.ssh/known_hosts.".into() }
+        );
+    }
+
+    #[test]
+    fn permission_denied_when_ssh_asked_nothing_is_an_authentication_failure_not_a_sign_in() {
+        let stderr = "me@devbox: Permission denied (publickey).";
+        assert_eq!(
+            classify_failure(Some(255), stderr, None, true, None),
+            FailKind::Other {
+                reason: "Authentication failed (ssh asked for nothing): me@devbox: Permission denied (publickey)."
+                    .into()
+            }
+        );
+        assert_eq!(
+            classify_failure(Some(255), stderr, None, false, None),
+            FailKind::NeedsInput,
+            "asked, or background"
+        );
+    }
+
+    #[test]
+    fn a_garbled_handshake_names_its_error_when_ssh_said_nothing() {
+        assert_eq!(
+            classify_failure(None, "", None, false, Some("unexpected handshake reply Exited")),
+            FailKind::Other { reason: "unexpected handshake reply Exited".into() }
+        );
+        assert_eq!(
+            classify_failure(None, "warning: x\n", None, false, Some("garbled")),
+            FailKind::Other { reason: "warning: x".into() },
+            "ssh's own words come first"
+        );
+    }
+
+    #[test]
+    fn a_remote_take_over_ends_in_opened_elsewhere_and_never_retries() {
+        assert_eq!(HostState::Connected.next(HostEvent::TakenOver), HostState::TakenOver);
+        assert_eq!(HostState::NotConnected.next(HostEvent::TakenOver), HostState::NotConnected);
+        assert!(HostState::TakenOver.can_connect());
+        assert_eq!(HostState::TakenOver.next(HostEvent::Connect), HostState::Connecting);
+        assert_eq!(HostState::TakenOver.label(), "opened elsewhere");
+        let card = HostState::TakenOver.card("devbox").unwrap();
+        assert_eq!(card.title, "Opened from another Gantry");
+        assert_eq!(card.detail, "Another Gantry took over devbox. Your sessions keep running there.");
+        assert_eq!(card.button, Some("Reconnect"));
+    }
+
+    #[test]
+    fn cancelling_a_connecting_host_returns_it_to_not_connected() {
+        assert_eq!(HostState::Connecting.next(HostEvent::Cancel), HostState::NotConnected);
+        assert_eq!(HostState::Connected.next(HostEvent::Cancel), HostState::Connected);
+        assert_eq!(HostState::Connecting.card("devbox").unwrap().button, Some("Cancel"));
+    }
+
+    #[test]
+    fn every_state_has_a_dot() {
+        use HostDot::*;
+        let dots = [
+            (HostState::NotConnected, None),
+            (HostState::Connecting, Busy),
+            (HostState::Connected, Ok),
+            (HostState::Reconnecting { attempt: 1 }, Busy),
+            (HostState::Disconnected, Bad),
+            (HostState::NeedsSignIn, Warn),
+            (HostState::UpdateNeeded { remote: Option::None }, Warn),
+            (HostState::NotInstalled, Bad),
+            (HostState::Failed { reason: "x".into() }, Bad),
+            (HostState::TakenOver, Warn),
+        ];
+        for (state, dot) in dots {
+            assert_eq!(state.dot(), dot, "{state:?}");
+        }
     }
 
     #[test]

@@ -2,21 +2,41 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use app_core::host_state::{FailKind, classify_failure};
 use tokio::io::AsyncReadExt;
+use tokio::sync::Notify;
 
-use crate::askpass::{AskPrompt, AskpassServer};
+use crate::askpass::{AskPrompt, AskpassServer, AskpassState};
 use crate::client::{ClientEvent, Connection, Hello, Link, Outgoing, StartError, connection, run_stream};
 
 /// Where to connect: what follows `ssh`, and the Gantry command on the remote.
 #[derive(Clone, Debug)]
 pub struct SshHostSpec {
+    /// The host's name in `sshHosts`, for the sign-in dialogs.
+    pub name: String,
     /// An alias from `~/.ssh/config` or `user@host`.
     pub target: String,
     /// The remote Gantry binary, as the remote shell will run it.
     pub command: String,
+}
+
+/// How long the handshake (`Welcome` and `Panes`) may take once ssh runs.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Lets the caller end an attempt that is still connecting.
+#[derive(Clone, Default)]
+pub struct AttemptHandle {
+    cancel: Arc<Notify>,
+}
+
+impl AttemptHandle {
+    /// Kill the attempt's ssh; `connect` then fails with `NeedsInput`. No effect once the handshake is done.
+    pub fn cancel(&self) {
+        self.cancel.notify_one();
+    }
 }
 
 /// How an attempt may talk to the user.
@@ -47,11 +67,18 @@ pub fn ssh_args(spec: &SshHostSpec, background: bool) -> Vec<String> {
 }
 
 /// Connect to the remote daemon through `program` (normally `ssh`). Blocks until the handshake is done or failed;
-/// the returned connection keeps running on its own thread.
-pub fn connect(program: &str, spec: &SshHostSpec, attempt: Attempt) -> Result<Connection, FailKind> {
+/// the returned connection keeps running on its own thread. `handle.cancel()` ends the attempt; a handshake that
+/// takes longer than `handshake_timeout` fails it.
+pub fn connect(
+    program: &str,
+    spec: &SshHostSpec,
+    attempt: Attempt,
+    handle: &AttemptHandle,
+    handshake_timeout: Duration,
+) -> Result<Connection, FailKind> {
     let Link { client, outgoing, events_tx, events } = Link::new();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Hello, FailKind>>();
-    let (program, spec) = (program.to_string(), spec.clone());
+    let (program, spec, handle) = (program.to_string(), spec.clone(), handle.clone());
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
@@ -60,7 +87,7 @@ pub fn connect(program: &str, spec: &SshHostSpec, attempt: Attempt) -> Result<Co
                 return;
             }
         };
-        runtime.block_on(run(program, spec, attempt, ready_tx, outgoing, events_tx));
+        runtime.block_on(run(program, spec, attempt, handle, handshake_timeout, ready_tx, outgoing, events_tx));
     });
     match ready_rx.recv() {
         Ok(Ok(hello)) => Ok(connection(client, hello, events)),
@@ -69,10 +96,19 @@ pub fn connect(program: &str, spec: &SshHostSpec, attempt: Attempt) -> Result<Co
     }
 }
 
+/// Why an attempt was ended from outside, before its handshake finished.
+enum Abort {
+    Cancelled,
+    TimedOut,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run(
     program: String,
     spec: SshHostSpec,
     attempt: Attempt,
+    handle: AttemptHandle,
+    handshake_timeout: Duration,
     ready: std::sync::mpsc::Sender<Result<Hello, FailKind>>,
     outgoing: tokio::sync::mpsc::UnboundedReceiver<Outgoing>,
     events: async_channel::Sender<ClientEvent>,
@@ -80,13 +116,15 @@ async fn run(
     let fail = |kind: FailKind| {
         let _ = ready.send(Err(kind));
     };
-    let mut background = matches!(attempt, Attempt::Background);
+    let interactive = matches!(attempt, Attempt::Interactive { .. });
+    let mut background = !interactive;
     let mut command = tokio::process::Command::new(&program);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    // Kept alive until the attempt ends: dropping it removes the sign-in socket.
+    let state = Arc::new(AskpassState::default());
+    // Dropping the server removes the sign-in socket: it goes right after the handshake.
     let mut askpass: Option<AskpassServer> = None;
     if let Attempt::Interactive { prompts, runtime_dir } = &attempt {
-        match AskpassServer::start(runtime_dir, &spec.target, prompts.clone()).await {
+        match AskpassServer::start(runtime_dir, &spec.name, prompts.clone(), state.clone()).await {
             Ok(server) => {
                 if let Ok(exe) = std::env::current_exe() {
                     command
@@ -124,20 +162,53 @@ async fn run(
         }
         text[keep..].to_string()
     });
+    let handshaken = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hello_ready = ready.clone();
-    let outcome = run_stream(stdout, stdin, outgoing, events, move |hello| {
-        let _ = hello_ready.send(Ok(hello));
-    })
-    .await;
+    let done = handshaken.clone();
+    let outcome = {
+        let stream = run_stream(stdout, stdin, outgoing, events, move |hello| {
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            // The sign-in socket is only for the handshake.
+            drop(askpass);
+            let _ = hello_ready.send(Ok(hello));
+        });
+        // Only the handshake can be cancelled or time out; once it is done this never resolves.
+        let abort = async {
+            let reason = tokio::select! {
+                () = handle.cancel.notified() => Abort::Cancelled,
+                () = state.wait_cancelled() => Abort::Cancelled,
+                () = tokio::time::sleep(handshake_timeout) => Abort::TimedOut,
+            };
+            if handshaken.load(std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            reason
+        };
+        tokio::select! {
+            outcome = stream => Ok(outcome),
+            reason = abort => Err(reason),
+        }
+    };
     match outcome {
-        Ok(()) => {
+        Err(reason) => {
+            let _ = child.start_kill();
+            fail(match reason {
+                Abort::Cancelled => FailKind::NeedsInput,
+                Abort::TimedOut => FailKind::Other { reason: "timed out waiting for Gantry on the host".into() },
+            });
+        }
+        Ok(Ok(())) => {
             let _ = child.start_kill();
         }
-        Err(StartError::VersionMismatch { daemon_protocol }) => {
+        Ok(Err(StartError::VersionMismatch { daemon_protocol })) => {
             let _ = child.start_kill();
-            fail(classify_failure(None, "", Some(daemon_protocol)));
+            fail(classify_failure(None, "", Some(daemon_protocol), false, None));
         }
-        Err(StartError::Io(_)) => {
+        Ok(Err(StartError::Io(error))) => {
+            if state.cancelled() {
+                let _ = child.start_kill();
+                return fail(FailKind::NeedsInput);
+            }
             // Let ssh say why it ended (its exit code and last words), but do not wait for long.
             let code = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
                 Ok(Ok(status)) => status.code(),
@@ -148,10 +219,10 @@ async fn run(
             };
             let stderr = tokio::time::timeout(Duration::from_secs(2), stderr_text).await;
             let stderr = stderr.ok().and_then(Result::ok).unwrap_or_default();
-            fail(classify_failure(code, &stderr, None));
+            let unasked = interactive && !background && !state.asked();
+            fail(classify_failure(code, &stderr, None, unasked, Some(&format!("{error:#}"))));
         }
     }
-    drop(askpass);
 }
 
 #[cfg(test)]
@@ -159,7 +230,7 @@ mod tests {
     use super::*;
 
     fn spec() -> SshHostSpec {
-        SshHostSpec { target: "me@devbox".into(), command: "~/.local/bin/gantry".into() }
+        SshHostSpec { name: "devbox".into(), target: "me@devbox".into(), command: "~/.local/bin/gantry".into() }
     }
 
     #[test]

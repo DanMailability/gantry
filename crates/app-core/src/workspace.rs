@@ -874,8 +874,36 @@ pub fn reconcile(workspace: &mut Workspace, live: &HostLive<'_>) -> Vec<(NodeId,
     attach
 }
 
+/// A pane closed while its host was not connected: the host, the daemon instance it belonged to, and its id.
+pub type KilledOffline = (HostId, String, PaneId);
+
+/// Take `host`'s entries out of `killed` and apply them to the live panes of the daemon instance `instance` that
+/// just connected: returns the panes that are left to show, and the ones to kill now (closed while offline, still
+/// running). Entries of another instance of the host mean nothing now and are dropped.
+pub fn without_killed_offline(
+    killed: &mut Vec<KilledOffline>,
+    host: &HostId,
+    instance: &str,
+    panes: &[PaneInfo],
+) -> (Vec<PaneInfo>, Vec<PaneId>) {
+    let mut ours = HashSet::new();
+    killed.retain(|(killed_host, killed_instance, pane)| {
+        if killed_host != host {
+            return true;
+        }
+        if killed_instance == instance {
+            ours.insert(*pane);
+        }
+        false
+    });
+    let to_kill: Vec<PaneId> = panes.iter().map(|info| info.pane).filter(|pane| ours.contains(pane)).collect();
+    let kept = panes.iter().filter(|info| !ours.contains(&info.pane)).cloned().collect();
+    (kept, to_kill)
+}
+
 /// Rebuild the workspace at startup, host by host through `reconcile`. Leaves keep their live pane; leaves whose
-/// pane is gone (or belongs to another daemon instance, or to a host that is not connected) become dead; live panes
+/// pane is gone (or belongs to another daemon instance) become dead; leaves of a host that is not connected keep their
+/// saved pane and instance until `reconcile` runs for it (and are never dropped, even without `restore_layout`); live panes
 /// missing from the layout become new tabs (most recently focused last, and active); an explicit launch opens a new
 /// focused tab; an empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped
 /// from the workspace (live panes still reattach) but kept aside for `saveable`; leaves in `keep` (the ones that
@@ -888,13 +916,8 @@ pub fn restore(
     keep: &HashSet<NodeId>,
 ) -> Restored {
     let mut workspace = saved.unwrap_or_default();
-    // A host that is not connected has no live panes: its leaves are dead (they keep the host's saved instance).
+    // A host that is not connected keeps its leaves as saved (pane and instance): `reconcile` decides when it connects.
     let connected: HashSet<&HostId> = hosts.iter().map(|live| &live.host).collect();
-    for leaf in workspace.leaves.values_mut() {
-        if !connected.contains(&leaf.host) {
-            leaf.pane = None;
-        }
-    }
     let mut attach = Vec::new();
     for live in hosts {
         attach.extend(reconcile(&mut workspace, live));
@@ -903,7 +926,7 @@ pub fn restore(
         let dead: Vec<NodeId> = workspace
             .leaves
             .iter()
-            .filter(|(id, leaf)| leaf.pane.is_none() && !keep.contains(id))
+            .filter(|(id, leaf)| leaf.pane.is_none() && !keep.contains(id) && connected.contains(&leaf.host))
             .map(|(id, _)| *id)
             .collect();
         workspace.dropped = workspace.park(&dead);
@@ -1652,19 +1675,77 @@ mod tests {
         assert_ne!(adopted[0].0, remote);
     }
 
-    #[test]
-    fn restore_without_a_connection_leaves_a_hosts_leaves_dead_and_remembers_its_instance() {
+    fn saved_with_a_remote_leaf() -> (Workspace, NodeId) {
         let mut saved = workspace_on("i1");
         saved.set_instance(&HostId::named("devbox"), "r1");
         let remote = saved.new_tab(shell("/b"));
         on_host(&mut saved, remote, "devbox");
         saved.pane_started(remote, 3, "/b".into());
+        (saved, remote)
+    }
+
+    #[test]
+    fn restore_without_a_connection_keeps_a_hosts_leaves_and_their_panes_for_when_it_connects() {
+        let (saved, remote) = saved_with_a_remote_leaf();
         let restored = restore_local(Some(saved), "i1", &[], &launch(), true, &HashSet::new());
         let ws = &restored.workspace;
-        assert_eq!(ws.leaves[&remote].pane, None);
+        assert_eq!(ws.leaves[&remote].pane, Some(3), "the remote pane may still run: reconcile decides");
         assert!(restored.spawn.is_empty(), "nothing is started in place of a remote leaf");
+        assert!(restored.attach.is_empty(), "nothing is attached to a host that is not connected");
         assert_eq!(ws.instances[&HostId::named("devbox")], "r1", "kept for when the host is back");
+        assert!(ws.finished_leaves().is_empty(), "a remote leaf waiting for its host is not finished");
+    }
+
+    #[test]
+    fn a_pane_closed_while_offline_is_killed_and_left_out_when_the_host_connects() {
+        let (devbox, lab) = (HostId::named("devbox"), HostId::named("lab"));
+        let mut killed = vec![
+            (devbox.clone(), "r1".to_string(), 3),
+            (devbox.clone(), "r0".to_string(), 4),
+            (lab.clone(), "l1".to_string(), 3),
+        ];
+        let panes = [info(3, "bash", 1), info(4, "bash", 2), info(5, "bash", 3)];
+        let (kept, to_kill) = without_killed_offline(&mut killed, &devbox, "r1", &panes);
+        assert_eq!(kept.iter().map(|info| info.pane).collect::<Vec<_>>(), vec![4, 5], "only the same instance counts");
+        assert_eq!(to_kill, vec![3]);
+        assert_eq!(killed, vec![(lab, "l1".to_string(), 3)], "the host's entries are used up, the other host's stay");
+    }
+
+    #[test]
+    fn restore_then_reconcile_with_the_same_instance_reattaches_the_same_leaf() {
+        let (saved, remote) = saved_with_a_remote_leaf();
+        let mut ws = restore_local(Some(saved), "i1", &[], &launch(), true, &HashSet::new()).workspace;
+        let tabs = ws.tabs.len();
+        let panes = [info(3, "bash", 5)];
+        let devbox = HostId::named("devbox");
+        let attach = reconcile(&mut ws, &HostLive { host: devbox.clone(), instance: "r1", panes: &panes });
+        assert_eq!(attach, vec![(remote, PaneKey::new(devbox, 3))]);
+        assert_eq!(ws.tabs.len(), tabs, "no duplicate tab");
+    }
+
+    #[test]
+    fn restore_then_reconcile_with_a_new_instance_makes_the_leaf_dead_and_adopts_the_live_panes() {
+        let (saved, remote) = saved_with_a_remote_leaf();
+        let mut ws = restore_local(Some(saved), "i1", &[], &launch(), true, &HashSet::new()).workspace;
+        let panes = [info(3, "zsh", 5)];
+        let devbox = HostId::named("devbox");
+        let attach = reconcile(&mut ws, &HostLive { host: devbox, instance: "r2", panes: &panes });
+        assert_eq!(ws.leaves[&remote].pane, None);
         assert_eq!(ws.finished_leaves(), vec![remote]);
+        assert_eq!(attach.len(), 1);
+        assert_ne!(attach[0].0, remote, "the live pane became a tab of its own");
+    }
+
+    #[test]
+    fn restore_without_the_layout_keeps_the_leaves_of_hosts_that_are_not_connected() {
+        let (mut saved, remote) = saved_with_a_remote_leaf();
+        let dead = saved.new_tab(shell("/c"));
+        on_host(&mut saved, dead, "devbox");
+        let restored = restore_local(Some(saved), "i1", &[], &launch(), false, &HashSet::new());
+        let ws = &restored.workspace;
+        assert!(ws.leaves.contains_key(&remote), "a live-looking remote leaf stays");
+        assert!(ws.leaves.contains_key(&dead), "so does a finished one: its host is simply not connected yet");
+        assert!(ws.is_consistent());
     }
 
     #[test]

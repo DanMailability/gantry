@@ -53,6 +53,16 @@ impl AskpassView {
         }
     }
 
+    /// The name of the host this question is asked for.
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Answer Cancel (the attempt that asked was cancelled).
+    pub(crate) fn cancel(&mut self, cx: &mut Context<Self>) {
+        self.finish(AskAnswer::Cancel, cx);
+    }
+
     /// Send `answer` (once) and ask the window to take the dialog down. The typed text is dropped with it.
     fn finish(&mut self, answer: AskAnswer, cx: &mut Context<Self>) {
         if self.answered {
@@ -78,7 +88,13 @@ impl AskpassView {
             "escape" => self.finish(AskAnswer::Cancel, cx),
             "enter" => self.submit(cx),
             _ if self.kind != PromptKind::YesNo => {
-                if !field::edit(&mut self.field, keystroke, cx) {
+                // A password is never copied: the masked field ignores Copy and Cut.
+                let handled = if self.kind == PromptKind::Masked {
+                    field::edit_masked(&mut self.field, keystroke, cx)
+                } else {
+                    field::edit(&mut self.field, keystroke, cx)
+                };
+                if !handled {
                     return;
                 }
             }

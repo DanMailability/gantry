@@ -50,6 +50,32 @@ pub(crate) fn edit(field: &mut TextField, keystroke: &Keystroke, cx: &mut App) -
     edit_keys(field, keystroke)
 }
 
+/// How a key reaches the field of a masked prompt (a password): `None` for Copy and Cut, which would put the hidden
+/// text on the clipboard; word movement and word deletion become plain moves and deletes (the bullets have no words);
+/// anything else as it is.
+pub(crate) fn masked_key(keystroke: &Keystroke) -> Option<Keystroke> {
+    if command(keystroke) && !keystroke.modifiers.shift && matches!(keystroke.key.as_str(), "c" | "x") {
+        return None;
+    }
+    let words = ["backspace", "delete", "left", "right", "home", "end"];
+    if word(keystroke) && words.contains(&keystroke.key.as_str()) {
+        let mut plain = keystroke.clone();
+        plain.modifiers.control = false;
+        plain.modifiers.alt = false;
+        plain.modifiers.platform = false;
+        return Some(plain);
+    }
+    Some(keystroke.clone())
+}
+
+/// `edit` for a masked prompt: see [`masked_key`]. A key that is ignored still counts as handled.
+pub(crate) fn edit_masked(field: &mut TextField, keystroke: &Keystroke, cx: &mut App) -> bool {
+    match masked_key(keystroke) {
+        Some(keystroke) => edit(field, &keystroke, cx),
+        None => true,
+    }
+}
+
 /// Ctrl (Cmd on macOS) held alone, or with Shift.
 fn command(keystroke: &Keystroke) -> bool {
     let m = &keystroke.modifiers;
@@ -227,5 +253,23 @@ mod tests {
             assert!(!edit_keys(&mut field, &key(name, None, Modifiers::default())), "{name}");
         }
         assert_eq!(field.text(), "");
+    }
+
+    fn parsed(text: &str) -> Keystroke {
+        Keystroke::parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_masked_field_never_copies_or_cuts_and_words_become_plain_moves() {
+        let modifier = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+        assert_eq!(masked_key(&parsed(&format!("{modifier}-c"))), None);
+        assert_eq!(masked_key(&parsed(&format!("{modifier}-x"))), None);
+        assert!(masked_key(&parsed(&format!("{modifier}-v"))).is_some(), "paste is fine");
+        let word = if cfg!(target_os = "macos") { "alt" } else { "ctrl" };
+        let moved = masked_key(&parsed(&format!("{word}-backspace"))).unwrap();
+        let m = moved.modifiers;
+        assert_eq!(moved.key, "backspace");
+        assert!(!m.control && !m.alt && !m.platform, "a plain Backspace, not a word delete");
+        assert_eq!(masked_key(&parsed("a")), Some(parsed("a")));
     }
 }

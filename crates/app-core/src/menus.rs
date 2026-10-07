@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use protocol::message::{ContainerPlace, SessionState};
 
+use crate::host_state::HostDot;
 use crate::session_tree::{Row, RowKind, Tone};
 use crate::settings::Settings;
 use crate::split_tree::{Axis, NodeId};
@@ -129,6 +130,8 @@ pub struct MenuEntry {
     pub swatch: Option<ProjectColor>,
     /// Marked as the current choice.
     pub checked: bool,
+    /// A state dot drawn before the label (SSH hosts in the New menu).
+    pub dot: Option<HostDot>,
 }
 
 /// A menu line.
@@ -192,6 +195,7 @@ fn entry(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
+        dot: None,
     })
 }
 
@@ -203,6 +207,7 @@ fn with_shortcut(label: &str, shortcut: Shortcut, action: MenuAction) -> MenuIte
         action,
         swatch: None,
         checked: false,
+        dot: None,
     })
 }
 
@@ -214,6 +219,7 @@ fn accented(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
+        dot: None,
     })
 }
 
@@ -232,6 +238,7 @@ fn color_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
                 action,
                 swatch: Some(color),
                 checked: current == Some(color),
+                dot: None,
             })
         })
         .collect();
@@ -242,6 +249,7 @@ fn color_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
         action: MenuAction::SetProjectColor { root: root.to_path_buf(), color: None },
         swatch: None,
         checked: current.is_none(),
+        dot: None,
     }));
     MenuItem::Submenu { label: "Color".into(), items }
 }
@@ -340,11 +348,20 @@ pub fn split_menu(leaf: NodeId, axis: Axis) -> Vec<MenuItem> {
     ]
 }
 
-/// The list the New buttons open when SSH hosts are defined: `Local` first, then each host as (name, state label).
-pub fn host_menu(claude: bool, hosts: &[(String, String)]) -> Vec<MenuItem> {
+/// The list the New buttons open when SSH hosts are defined: `Local` first, then each host as (name, state label,
+/// state dot).
+pub fn host_menu(claude: bool, hosts: &[(String, String, HostDot)]) -> Vec<MenuItem> {
     let mut items = vec![entry("Local", MenuAction::NewLocal { claude }), MenuItem::Separator];
-    items.extend(hosts.iter().map(|(name, state)| {
-        entry(&format!("{name} · {state}"), MenuAction::NewOnHost { host: name.clone(), claude })
+    items.extend(hosts.iter().map(|(name, state, dot)| {
+        MenuItem::Entry(MenuEntry {
+            label: format!("{name} · {state}"),
+            shortcut: None,
+            accent: false,
+            action: MenuAction::NewOnHost { host: name.clone(), claude },
+            swatch: None,
+            checked: false,
+            dot: Some(*dot),
+        })
     }));
     items
 }
@@ -531,6 +548,7 @@ mod tests {
             session: claude.then(|| "new".to_string()),
             claude,
             ended,
+            offline: false,
             alone: true,
             container: None,
         };
@@ -587,8 +605,10 @@ mod tests {
 
     #[test]
     fn the_host_menu_lists_local_first_then_each_host_with_its_state() {
-        let hosts =
-            vec![("devbox".to_string(), "connected".to_string()), ("lab".to_string(), "needs sign-in".to_string())];
+        let hosts = vec![
+            ("devbox".to_string(), "connected".to_string(), HostDot::Ok),
+            ("lab".to_string(), "needs sign-in".to_string(), HostDot::Warn),
+        ];
         let items = host_menu(true, &hosts);
         let entry = |item: &MenuItem| match item {
             MenuItem::Entry(entry) => Some((entry.label.clone(), entry.action.clone())),
@@ -605,6 +625,11 @@ mod tests {
             Some(("lab · needs sign-in".into(), MenuAction::NewOnHost { host: "lab".into(), claude: true }))
         );
         assert_eq!(items.len(), 4);
+        let dot = |item: &MenuItem| match item {
+            MenuItem::Entry(entry) => entry.dot,
+            _ => None,
+        };
+        assert_eq!((dot(&items[0]), dot(&items[2]), dot(&items[3])), (None, Some(HostDot::Ok), Some(HostDot::Warn)));
         let shell = host_menu(false, &hosts);
         assert!(matches!(&shell[0], MenuItem::Entry(MenuEntry { action: MenuAction::NewLocal { claude: false }, .. })));
     }
