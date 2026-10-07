@@ -183,7 +183,7 @@ fn default_tone_colors(preset: Preset, tone: Tone) -> ToneColors {
     let (fill, ink, dot) = match tone {
         Tone::NeedsInput => (Some(0xf7c9a3), 0x3b2414, 0xc9773d),
         Tone::Working => (Some(0xb9d5f6), 0x132a43, 0x4f8fd6),
-        Tone::Done => (Some(0xc1e5cd), 0x143322, 0x4c9e6b),
+        Tone::Done | Tone::Unread => (Some(0xc1e5cd), 0x143322, 0x4c9e6b),
         Tone::Idle if light => (Some(0xe4e8ef), 0x2a3242, t.muted),
         Tone::Idle => (Some(0x2f3647), 0xd5dae6, t.muted),
         Tone::Elsewhere if light => (None, 0x3a4356, t.muted),
@@ -196,12 +196,15 @@ fn default_tone_colors(preset: Preset, tone: Tone) -> ToneColors {
 
 /// The colors of `tone` in `preset`, with the user's fills applied (via [`derive`]) where set and readable.
 pub fn tone_colors(preset: Preset, fills: &StatusFills, tone: Tone) -> ToneColors {
+    if tone == Tone::Unread {
+        return unread_colors(preset, fills);
+    }
     let custom = match tone {
         Tone::NeedsInput => fills.needs_input,
         Tone::Working => fills.working,
         Tone::Done => fills.done,
         Tone::Idle => fills.idle,
-        Tone::Elsewhere | Tone::Closed => None,
+        Tone::Unread | Tone::Elsewhere | Tone::Closed => None,
     };
     let t = tokens(preset);
     match custom {
@@ -209,6 +212,19 @@ pub fn tone_colors(preset: Preset, fills: &StatusFills, tone: Tone) -> ToneColor
         _ => default_tone_colors(preset, tone),
     }
 }
+
+/// A row marked unread by hand: the Done colors with the fill faded into the surface, so it reads as quieter than an
+/// alert. Follows a custom Done fill.
+fn unread_colors(preset: Preset, fills: &StatusFills) -> ToneColors {
+    let done = tone_colors(preset, fills, Tone::Done);
+    let t = tokens(preset);
+    let fill = mix(done.fill.unwrap_or(t.surface), t.surface, UNREAD_FILL_STRENGTH);
+    let ink = if contrast(done.ink, fill) >= contrast(t.text, fill) { done.ink } else { t.text };
+    ToneColors { fill: Some(fill), ink, dot: done.dot }
+}
+
+/// How much of the Done fill an Unread fill keeps (0..=1).
+const UNREAD_FILL_STRENGTH: f32 = 0.7;
 
 /// Ink and dot for a user-chosen fill.
 pub fn derive(fill: u32, tokens: &Tokens) -> ToneColors {
@@ -312,7 +328,8 @@ mod tests {
     use crate::snapshot::Rgb;
 
     const PRESETS: [Preset; 2] = [Preset::Mist, Preset::MistLight];
-    const TONES: [Tone; 6] = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
+    const TONES: [Tone; 7] =
+        [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed, Tone::Unread];
 
     #[test]
     fn palette_names_round_trip_and_values_are_verbatim() {
@@ -443,6 +460,23 @@ mod tests {
     fn defaults_untouched_without_fills() {
         let done = tone_colors(Preset::Mist, &StatusFills::default(), Tone::Done);
         assert_eq!(done, ToneColors { fill: Some(0xc1e5cd), ink: 0x143322, dot: 0x4c9e6b });
+    }
+
+    #[test]
+    fn unread_is_a_quieter_done_that_follows_a_custom_done_fill() {
+        for preset in PRESETS {
+            let t = tokens(preset);
+            let done = tone_colors(preset, &StatusFills::default(), Tone::Done);
+            let unread = tone_colors(preset, &StatusFills::default(), Tone::Unread);
+            assert_eq!(unread.dot, done.dot);
+            assert_ne!(unread.fill, done.fill);
+            assert!(
+                contrast(unread.fill.unwrap(), t.surface) < contrast(done.fill.unwrap(), t.surface),
+                "{preset:?}: closer to the surface than Done"
+            );
+            let fills = StatusFills { done: Some(0xffe08a), ..StatusFills::default() };
+            assert_ne!(tone_colors(preset, &fills, Tone::Unread), unread);
+        }
     }
 
     #[test]

@@ -383,8 +383,8 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     items.push(MenuItem::Separator);
                 }
             }
-            if let (Tone::Idle | Tone::Done, Some(leaf)) = (tone, leaf) {
-                items.push(read_mark_item(*leaf, *tone == Tone::Done));
+            if let (Tone::Idle | Tone::Done | Tone::Unread, Some(leaf)) = (tone, leaf) {
+                items.push(read_mark_item(*leaf, *tone != Tone::Idle));
             }
             items.push(entry("Copy session id", MenuAction::Copy(session.id.clone())));
             items.extend(folder_items(&session.cwd, vscode));
@@ -643,6 +643,7 @@ mod tests {
         for (tone, label) in [
             (Tone::Idle, Some("Mark as unread")),
             (Tone::Done, Some("Mark as read")),
+            (Tone::Unread, Some("Mark as read")),
             (Tone::Working, None),
             (Tone::NeedsInput, None),
         ] {
