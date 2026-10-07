@@ -257,6 +257,20 @@ pub fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
+/// The remote Gantry command when a host does not name one: where the tarball installer puts it.
+pub const DEFAULT_REMOTE_COMMAND: &str = "~/.local/bin/gantry";
+
+/// One SSH host the user listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshHost {
+    /// Unique, non-empty name without `/`, never `local`: shown in menus and project headings.
+    pub name: String,
+    /// What follows `ssh`: an alias from `~/.ssh/config` or `user@host`.
+    pub target: String,
+    /// The remote Gantry binary.
+    pub command: String,
+}
+
 /// Everything in settings.json.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -280,6 +294,8 @@ pub struct Settings {
     pub default_claude_dir: Option<String>,
     /// Folder to the name of the dir picked for it.
     pub folder_claude_dirs: BTreeMap<PathBuf, String>,
+    /// SSH hosts, connected on first use.
+    pub ssh_hosts: Vec<SshHost>,
     /// Shell for new shell panes.
     pub shell: ShellSettings,
     /// Recent sessions pop-up sizes.
@@ -344,6 +360,7 @@ impl Default for Settings {
             claude_dirs: Vec::new(),
             default_claude_dir: None,
             folder_claude_dirs: BTreeMap::new(),
+            ssh_hosts: Vec::new(),
             shell: ShellSettings::default(),
             recents: RecentsSettings { per_project: 5, chips: 6 },
             favorites: Vec::new(),
@@ -556,6 +573,43 @@ impl Reader {
         out
     }
 
+    fn ssh_hosts(&mut self, raw: &Map<String, Value>) -> Vec<SshHost> {
+        let items = match raw.get("sshHosts") {
+            None => return Vec::new(),
+            Some(Value::Array(items)) => items,
+            Some(_) => {
+                self.problem("sshHosts", "expected a list".into());
+                return Vec::new();
+            }
+        };
+        let mut hosts: Vec<SshHost> = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let key = format!("sshHosts[{index}]");
+            let Value::Object(map) = item else {
+                self.problem(&key, "expected an object; dropped".into());
+                continue;
+            };
+            let name = self.string(map, &format!("{key}."), "name");
+            let target = self.string(map, &format!("{key}."), "target");
+            let command = match map.get("command") {
+                None => DEFAULT_REMOTE_COMMAND.to_string(),
+                Some(_) => self.string(map, &format!("{key}."), "command"),
+            };
+            if name.is_empty() || target.is_empty() || command.is_empty() {
+                self.problem(&key, "needs a name, a target and a command; dropped".into());
+            } else if name.contains('/') {
+                self.problem(&key, format!("the name \"{name}\" may not contain /; dropped"));
+            } else if name.eq_ignore_ascii_case("local") {
+                self.problem(&key, "\"local\" is this machine; dropped".into());
+            } else if hosts.iter().any(|host| host.name == name) {
+                self.problem(&key, format!("the name \"{name}\" is used twice; dropped"));
+            } else {
+                hosts.push(SshHost { name, target, command });
+            }
+        }
+        hosts
+    }
+
     fn claude_dirs(&mut self, raw: &Map<String, Value>) -> Vec<ClaudeDir> {
         let items = match raw.get("claudeDirs") {
             None => return Vec::new(),
@@ -720,6 +774,7 @@ impl Reader {
             }
         };
         let folder_claude_dirs = self.folder_claude_dirs(raw, &names);
+        let ssh_hosts = self.ssh_hosts(raw);
 
         let map = self.object(raw, "", "shell");
         let shell = ShellSettings {
@@ -781,6 +836,7 @@ impl Reader {
             claude_dirs,
             default_claude_dir,
             folder_claude_dirs,
+            ssh_hosts,
             shell,
             recents,
             favorites,
@@ -864,6 +920,12 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         })
         .collect();
     add(&["claudeDirs"], Value::Array(dirs), !settings.claude_dirs.is_empty());
+    let ssh_hosts: Vec<Value> = settings
+        .ssh_hosts
+        .iter()
+        .map(|host| serde_json::json!({"name": host.name, "target": host.target, "command": host.command}))
+        .collect();
+    add(&["sshHosts"], Value::Array(ssh_hosts), !settings.ssh_hosts.is_empty());
     add(
         &["defaultClaudeDir"],
         settings.default_claude_dir.clone().map_or(Value::Null, Value::from),
@@ -951,7 +1013,7 @@ fn put(map: &mut Map<String, Value>, path: &[&str], value: Option<Value>) {
 
 /// Write `settings` to `path` atomically: `raw` with every known key replaced by its value in `settings`, and
 /// known keys equal to their default removed (an object left empty is removed too). Unknown keys stay. The
-/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `shortcuts`, `projectColors.folders`) are only rewritten when `settings`
+/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `sshHosts`, `shortcuts`, `projectColors.folders`) are only rewritten when `settings`
 /// differs from what `raw` loads as, so hand-written entries that failed validation, and unknown fields in them,
 /// survive other changes.
 pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::Result<()> {
@@ -960,6 +1022,7 @@ pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::R
         ["claudeDirs"] => settings.claude_dirs == loaded.claude_dirs,
         ["favorites"] => settings.favorites == loaded.favorites,
         ["folderClaudeDirs"] => settings.folder_claude_dirs == loaded.folder_claude_dirs,
+        ["sshHosts"] => settings.ssh_hosts == loaded.ssh_hosts,
         ["shortcuts"] => settings.shortcuts == loaded.shortcuts,
         ["projectColors", "folders"] => settings.project_colors.folders == loaded.project_colors.folders,
         _ => false,
@@ -1476,5 +1539,81 @@ mod tests {
         assert_eq!(hex(0xc1e5cd), "#c1e5cd");
         assert_eq!(parse_hex("c1e5cd"), None);
         assert_eq!(parse_hex("#c1e5c"), None);
+    }
+
+    #[test]
+    fn ssh_hosts_load_with_the_default_command() {
+        let loaded = parse(
+            r#"{"sshHosts": [
+                {"name": "devbox", "target": "me@devbox"},
+                {"name": "lab", "target": "lab", "command": "/opt/gantry/bin/gantry"}
+            ]}"#,
+        );
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let hosts = loaded.settings.unwrap().ssh_hosts;
+        assert_eq!(
+            hosts,
+            vec![
+                SshHost { name: "devbox".into(), target: "me@devbox".into(), command: DEFAULT_REMOTE_COMMAND.into() },
+                SshHost { name: "lab".into(), target: "lab".into(), command: "/opt/gantry/bin/gantry".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn bad_ssh_hosts_are_dropped_with_a_problem_and_the_others_load() {
+        let loaded = parse(
+            r#"{"sshHosts": [
+                {"name": "ok", "target": "ok"},
+                {"name": "", "target": "x"},
+                {"name": "no-target"},
+                {"name": "a/b", "target": "x"},
+                {"name": "Local", "target": "x"},
+                {"name": "ok", "target": "other"},
+                {"name": "empty-command", "target": "x", "command": ""},
+                "not an object"
+            ]}"#,
+        );
+        let hosts = loaded.settings.unwrap().ssh_hosts;
+        assert_eq!(hosts.iter().map(|host| host.name.as_str()).collect::<Vec<_>>(), ["ok"]);
+        let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["sshHosts[1]", "sshHosts[2]", "sshHosts[3]", "sshHosts[4]", "sshHosts[5]", "sshHosts[6]", "sshHosts[7]"]
+        );
+        let not_a_list = parse(r#"{"sshHosts": 3}"#);
+        assert_eq!(not_a_list.problems[0].key, "sshHosts");
+        assert!(not_a_list.settings.unwrap().ssh_hosts.is_empty());
+    }
+
+    #[test]
+    fn hand_written_ssh_hosts_survive_a_save_of_something_else() {
+        let text =
+            r#"{"theme": "Mist", "sshHosts": [{"name": "devbox", "target": "me@devbox", "note": 1}, {"name": ""}]}"#;
+        let loaded = parse(text);
+        let mut settings = loaded.settings.unwrap();
+        settings.animate_working = !settings.animate_working;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["sshHosts"], serde_json::from_str::<Value>(text).unwrap()["sshHosts"]);
+    }
+
+    #[test]
+    fn changed_ssh_hosts_are_written() {
+        let loaded = parse(r#"{}"#);
+        let mut settings = loaded.settings.unwrap();
+        settings.ssh_hosts.push(SshHost {
+            name: "devbox".into(),
+            target: "me@devbox".into(),
+            command: DEFAULT_REMOTE_COMMAND.into(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["sshHosts"][0]["name"], "devbox");
+        assert_eq!(written["sshHosts"][0]["command"], DEFAULT_REMOTE_COMMAND);
     }
 }
