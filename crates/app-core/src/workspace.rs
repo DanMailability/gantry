@@ -358,12 +358,12 @@ impl Leaf {
     /// leaf's session, refuse while it runs outside Gantry, else start `rerun` — resuming when the session is
     /// known, or when the list has not arrived yet.
     pub fn rerun_with(&self, sessions: &SessionStore, dirs: &ClaudeDirs, daemon_dir: Option<&Path>) -> Rerun {
-        let known = self.session.as_deref().and_then(|id| sessions.get(id));
+        let known = self.session.as_deref().and_then(|id| sessions.get(&self.host, id));
         match known.map(|session| session.state) {
             Some(SessionState::Managed { pane }) => Rerun::Focus(PaneKey::new(self.host.clone(), pane)),
             Some(SessionState::External { .. }) => Rerun::Busy,
             _ => Rerun::Start(self.rerun_resolved(
-                known.is_some() || !sessions.loaded(),
+                known.is_some() || !sessions.loaded(&self.host),
                 known.and_then(|info| info.claude_dir.as_deref()),
                 dirs,
                 daemon_dir,
@@ -716,7 +716,7 @@ impl Workspace {
     pub fn leaf_status<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s SessionStatus> {
         let leaf = self.leaves.get(&leaf)?;
         let pane = leaf.pane?;
-        let session = sessions.get(leaf.session.as_deref()?)?;
+        let session = sessions.get(&leaf.host, leaf.session.as_deref()?)?;
         if session.state != (SessionState::Managed { pane }) {
             return None;
         }
@@ -727,7 +727,7 @@ impl Workspace {
     pub fn leaf_last_prompt<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s str> {
         let leaf = self.leaves.get(&leaf)?;
         let pane = leaf.pane?;
-        let session = sessions.get(leaf.session.as_deref()?)?;
+        let session = sessions.get(&leaf.host, leaf.session.as_deref()?)?;
         if session.state != (SessionState::Managed { pane }) {
             return None;
         }
@@ -1366,13 +1366,13 @@ mod tests {
         let mut store = SessionStore::default();
         // Before the first list: assume it may exist and resume.
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
-        store.replace(vec![]);
+        store.replace(&HostId::local(), vec![]);
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(false)));
-        store.replace(vec![session_info("x", SessionState::Closed)]);
+        store.replace(&HostId::local(), vec![session_info("x", SessionState::Closed)]);
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
-        store.replace(vec![session_info("x", SessionState::Managed { pane: 4 })]);
+        store.replace(&HostId::local(), vec![session_info("x", SessionState::Managed { pane: 4 })]);
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Focus(PaneKey::local(4)));
-        store.replace(vec![session_info("x", SessionState::External { pid: Some(9) })]);
+        store.replace(&HostId::local(), vec![session_info("x", SessionState::External { pid: Some(9) })]);
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Busy);
         let sh = Leaf::new(shell("/r"));
         assert_eq!(sh.rerun_with(&store, &dirs, daemon), Rerun::Start(sh.launch.clone()));
@@ -1391,13 +1391,13 @@ mod tests {
         settings.claude_dirs[1].args = vec!["--model".into(), "sonnet".into()];
         let dirs = ClaudeDirs::from_settings(&settings, daemon, Some(Path::new("/home/me")));
         let mut store = SessionStore::default();
-        store.replace(vec![]);
+        store.replace(&HostId::local(), vec![]);
         let Rerun::Start(restart) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(
             (restart.program.as_str(), restart.args.clone()),
             ("claude-new", vec!["--model".to_string(), "sonnet".into(), "--session-id".into(), "sid".into()])
         );
-        store.replace(vec![session_info("sid", protocol::message::SessionState::Closed)]);
+        store.replace(&HostId::local(), vec![session_info("sid", protocol::message::SessionState::Closed)]);
         let Rerun::Start(resume) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(
             (resume.program.as_str(), resume.args.clone()),
@@ -1415,12 +1415,12 @@ mod tests {
         let mut info = session_info("sid", protocol::message::SessionState::Closed);
         info.claude_dir = Some("/home/me/.claude-work".into());
         let mut store = SessionStore::default();
-        store.replace(vec![info]);
+        store.replace(&HostId::local(), vec![info]);
         let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(launch.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
         assert_eq!(launch.claude_dir, Some(PathBuf::from("/home/me/.claude-work")));
         leaf.launch.claude_dir = Some("/home/me/.claude-work".into());
-        store.replace(vec![]);
+        store.replace(&HostId::local(), vec![]);
         let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(launch.env.len(), 1, "falls back to the leaf's own dir when the session is unknown");
     }
@@ -1439,16 +1439,19 @@ mod tests {
             ..session_info("a", SessionState::Managed { pane })
         };
         let mut store = SessionStore::default();
-        store.replace(vec![with(1, Some("what next"))]);
+        store.replace(&HostId::local(), vec![with(1, Some("what next"))]);
         assert_eq!(ws.leaf_last_prompt(a, &store), Some("what next"));
         assert_eq!(ws.leaf_last_prompt(sh, &store), None, "a shell has no session");
-        store.replace(vec![with(1, None)]);
+        store.replace(&HostId::local(), vec![with(1, None)]);
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "nothing yet");
-        store.replace(vec![with(1, Some(""))]);
+        store.replace(&HostId::local(), vec![with(1, Some(""))]);
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "empty text is nothing");
-        store.replace(vec![with(9, Some("old"))]);
+        store.replace(&HostId::local(), vec![with(9, Some("old"))]);
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "the session moved to another pane");
-        store.replace(vec![SessionInfo { last_prompt: Some("old".into()), ..session_info("a", SessionState::Closed) }]);
+        store.replace(
+            &HostId::local(),
+            vec![SessionInfo { last_prompt: Some("old".into()), ..session_info("a", SessionState::Closed) }],
+        );
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "an ended pane shows Continue, not a prompt");
     }
 
@@ -1466,13 +1469,15 @@ mod tests {
             status: Some(status),
             ..session_info(id, SessionState::Managed { pane })
         };
-        store
-            .replace(vec![with("a", 1, SessionStatus::Idle), with("b", 2, SessionStatus::NeedsInput { reason: None })]);
+        store.replace(
+            &HostId::local(),
+            vec![with("a", 1, SessionStatus::Idle), with("b", 2, SessionStatus::NeedsInput { reason: None })],
+        );
         assert_eq!(ws.leaf_status(a, &store), Some(&SessionStatus::Idle));
         assert_eq!(ws.tab_status(0, &store), Some(&SessionStatus::NeedsInput { reason: None }));
         assert_eq!((ws.leaf_status(other, &store), ws.tab_status(1, &store)), (None, None));
         // A stale entry for another pane (the leaf's process ended, the session moved) is not this leaf's status.
-        store.replace(vec![with("a", 9, SessionStatus::Busy)]);
+        store.replace(&HostId::local(), vec![with("a", 9, SessionStatus::Busy)]);
         assert_eq!(ws.leaf_status(a, &store), None);
         // The visible tab is the second one (opened last).
         assert_eq!((ws.is_visible(other), ws.is_visible(a)), (true, false));

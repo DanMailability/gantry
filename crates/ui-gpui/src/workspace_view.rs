@@ -23,7 +23,7 @@ use gpui::{
     Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
 };
 use notify::RecommendedWatcher;
-use protocol::host::PaneKey;
+use protocol::host::{HostId, PaneKey};
 use protocol::message::{
     ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
 };
@@ -523,17 +523,17 @@ impl WorkspaceView {
                 }
                 ClientEvent::Sessions { sessions } => {
                     self.track_sessions(sessions, cx);
-                    self.attention.reset(sessions);
+                    self.attention.reset(&HostId::local(), sessions);
                     let sessions = sessions.clone();
-                    self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(sessions, cx));
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(&HostId::local(), sessions, cx));
                     self.resume_finished(cx);
                 }
                 ClientEvent::SessionsChanged { upserted, removed } => {
                     self.track_sessions(upserted, cx);
                     self.drop_marks_of_changed(upserted, cx);
-                    let alerts = self.attention.update(upserted, removed);
+                    let alerts = self.attention.update(&HostId::local(), upserted, removed);
                     let upserted = upserted.clone();
-                    self.sidebar.update(cx, |sidebar, cx| sidebar.apply(upserted, removed, cx));
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.apply(&HostId::local(), upserted, removed, cx));
                     for alert in alerts {
                         self.raise(alert, window, cx);
                     }
@@ -599,7 +599,7 @@ impl WorkspaceView {
 
     /// Raise `alert` on the channels the settings allow for its pane (badge, notification, sound).
     fn raise(&mut self, alert: Alert, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::local(alert.pane)) else { return };
+        let Some(leaf) = self.workspace.leaf_for_pane(&alert.pane) else { return };
         let settings = cx.global::<SettingsStore>().settings().clone();
         let visible = self.workspace.is_visible(leaf);
         let channels = alert_channels(&settings.alerts, &alert.kind, visible, window.is_window_active());
@@ -612,7 +612,7 @@ impl WorkspaceView {
             return;
         }
         let sidebar = self.sidebar.read(cx);
-        let session = sidebar.sessions().get(&alert.session);
+        let session = sidebar.sessions().get(&alert.pane.host, &alert.session);
         let title = session.map(|session| session_title(session).to_string()).unwrap_or_default();
         let last_prompt = session.and_then(|session| session.last_prompt.as_deref());
         let (summary, body) = describe(&alert.kind, &title, last_prompt);
@@ -661,7 +661,7 @@ impl WorkspaceView {
         let recorded = entry
             .session
             .as_deref()
-            .and_then(|id| self.sidebar.read(cx).sessions().get(id))
+            .and_then(|id| self.sidebar.read(cx).sessions().get(&entry.host, id))
             .and_then(|info| info.claude_dir.clone());
         let path = recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone());
         dir_badge_for(cx.global::<SettingsStore>().settings(), path.as_deref())
@@ -681,7 +681,7 @@ impl WorkspaceView {
             entry
                 .session
                 .as_deref()
-                .and_then(|id| sessions.get(id))
+                .and_then(|id| sessions.get(&entry.host, id))
                 .map_or(&entry.launch.cwd, |info| &info.cwd)
                 .clone(),
         )
@@ -715,6 +715,7 @@ impl WorkspaceView {
     fn rerun_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
         let session = entry.session.clone();
+        let host = entry.host.clone();
         match entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref()) {
             Rerun::Start(launch) => self.start_leaf(leaf, launch, cx),
             Rerun::Focus(key) => {
@@ -724,7 +725,7 @@ impl WorkspaceView {
             }
             Rerun::Busy => {
                 let sessions = self.sidebar.read(cx).sessions();
-                let takeable = session.as_deref().and_then(|id| sessions.get(id)).is_some_and(|info| {
+                let takeable = session.as_deref().and_then(|id| sessions.get(&host, id)).is_some_and(|info| {
                     matches!(info.state, SessionState::External { pid: Some(_) }) && info.cwd_exists
                 });
                 if let (true, Some(session)) = (takeable, session) {
@@ -772,8 +773,12 @@ impl WorkspaceView {
                     self.open_launch(launch, axis, None, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
-                    let session_dir =
-                        self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.claude_dir.clone());
+                    let session_dir = self
+                        .sidebar
+                        .read(cx)
+                        .sessions()
+                        .get(&HostId::local(), &session)
+                        .and_then(|info| info.claude_dir.clone());
                     let launch = self.workspace.leaves.get(&leaf).map(|entry| {
                         entry.rerun_resolved(true, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
                     });
@@ -882,7 +887,8 @@ impl WorkspaceView {
 
     /// Resume `session` where it ran: with the command and config dir recorded for it.
     fn resume_launch(&self, session: &str, cwd: PathBuf, container: Option<PathBuf>, cx: &App) -> PaneLaunch {
-        let session_dir = self.sidebar.read(cx).sessions().get(session).and_then(|info| info.claude_dir.clone());
+        let session_dir =
+            self.sidebar.read(cx).sessions().get(&HostId::local(), session).and_then(|info| info.claude_dir.clone());
         PaneLaunch::resume_with(session, cwd, container, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
     }
 
@@ -1218,14 +1224,18 @@ impl WorkspaceView {
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
             let sessions = self.sidebar.read(cx).sessions();
-            let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
+            let place = leaf
+                .session
+                .as_deref()
+                .and_then(|id| sessions.get(&leaf.host, id))
+                .and_then(|info| info.container.clone());
             let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
             let context = if leaf.launch.container.is_some() {
                 MenuContext::default()
             } else {
                 MenuContext::for_folder(cx.global::<SettingsStore>().settings(), &leaf.launch.cwd)
             };
-            let idle = leaf.session.as_deref().and_then(|id| sessions.get(id)).is_some_and(|info| {
+            let idle = leaf.session.as_deref().and_then(|id| sessions.get(&leaf.host, id)).is_some_and(|info| {
                 matches!(info.state, SessionState::Managed { .. })
                     && status_tone(info.status.as_ref(), Unseen::No) == Tone::Idle
             });
@@ -1372,7 +1382,7 @@ impl WorkspaceView {
                         _ => {
                             let sessions = self.sidebar.read(cx).sessions();
                             let container = sessions
-                                .get(&session)
+                                .get(&HostId::local(), &session)
                                 .and_then(|info| info.container.clone())
                                 .and_then(|place| place.host_folder);
                             TakeOverTarget::NewPane { cwd, split, container }
@@ -1423,7 +1433,12 @@ impl WorkspaceView {
             }
             None => {
                 let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
-                let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
+                let place = self
+                    .sidebar
+                    .read(cx)
+                    .sessions()
+                    .get(&HostId::local(), &session)
+                    .and_then(|info| info.container.clone());
                 match place {
                     Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
                     place => {
@@ -1496,7 +1511,7 @@ impl WorkspaceView {
                 let status = leaf
                     .session
                     .as_deref()
-                    .and_then(|session| sessions.get(session))
+                    .and_then(|session| sessions.get(&leaf.host, session))
                     .and_then(|info| info.status.as_ref());
                 Some(OpenPane {
                     cwd: leaf.launch.cwd.clone(),

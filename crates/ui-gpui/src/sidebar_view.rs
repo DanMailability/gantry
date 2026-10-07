@@ -20,6 +20,7 @@ use gpui::{
     KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
     UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, rgb, rgba, uniform_list,
 };
+use protocol::host::HostId;
 use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
@@ -228,15 +229,15 @@ impl SidebarView {
         &self.sessions
     }
 
-    /// Replace the session list.
-    pub fn set_sessions(&mut self, sessions: Vec<SessionInfo>, cx: &mut Context<Self>) {
-        self.sessions.replace(sessions);
+    /// Replace the session list of `host`.
+    pub fn set_sessions(&mut self, host: &HostId, sessions: Vec<SessionInfo>, cx: &mut Context<Self>) {
+        self.sessions.replace(host, sessions);
         self.rebuild(cx);
     }
 
-    /// Apply a session change.
-    pub fn apply(&mut self, upserted: Vec<SessionInfo>, removed: &[String], cx: &mut Context<Self>) {
-        self.sessions.apply(upserted, removed);
+    /// Apply a session change of `host`.
+    pub fn apply(&mut self, host: &HostId, upserted: Vec<SessionInfo>, removed: &[String], cx: &mut Context<Self>) {
+        self.sessions.apply(host, upserted, removed);
         self.rebuild(cx);
     }
 
@@ -334,7 +335,7 @@ impl SidebarView {
             // Until the session list arrives, number nothing: panes and sessions must get their arrival
             // numbers together, so that at startup leaves land above outside sessions.
             let mut unloaded = (Arrivals::default(), ProjectOrder::default());
-            let (arrivals, order) = if self.sessions.loaded() {
+            let (arrivals, order) = if self.sessions.loaded(&HostId::local()) {
                 (&mut self.arrivals, &mut self.order)
             } else {
                 (&mut unloaded.0, &mut unloaded.1)
