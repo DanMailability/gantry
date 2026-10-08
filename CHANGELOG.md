@@ -5,6 +5,8 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 - SSH hosts have a sign-in method: Automatic, Password (only a password, keys are not tried) or SSH key (no password). Pick it in the Add SSH host wizard or from the host's row in Settings > SSH hosts. A server that hangs up after too many failed tries now says so and points at this setting.
 
