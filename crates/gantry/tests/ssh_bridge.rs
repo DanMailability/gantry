@@ -66,9 +66,9 @@ fn setup(profile: &str, fake: Fake) -> Env {
         ));
     }
     if fake.run_remote {
-        // Like sshd: the remote command runs in a child of its own that outlives a killed ssh, with the same stdin pipe.
+        // Like sshd: the remote command runs in a child of its own that outlives a killed ssh, with the same stdin pipe (through fd 3: dash gives a background job /dev/null, not its `<&0`).
         script.push_str(
-            "unset GANTRY_ASKPASS_SOCKET\nfor last; do :; done\nsh -c \"$last\" <&0 &\npid=$!\nwait $pid\nexit $?\n",
+            "unset GANTRY_ASKPASS_SOCKET\nfor last; do :; done\nexec 3<&0\nsh -c \"$last\" <&3 &\npid=$!\nwait $pid\nexit $?\n",
         );
     } else if let Some(body) = fake.body {
         script.push_str(&format!("GANTRY='{GANTRY}'\n{body}\n"));
