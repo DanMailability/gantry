@@ -82,6 +82,8 @@ mod tests {
         );
     }
 
+    // The error texts asserted here are Unix's.
+    #[cfg(unix)]
     #[test]
     fn a_file_missing_or_relative_path_fails() {
         let tmp = tempfile::tempdir().unwrap();

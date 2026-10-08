@@ -372,7 +372,8 @@ impl Leaf {
     }
 
     /// `rerun`, but a Claude leaf with a session is launched through its config dir's current command, arguments and
-    /// environment (a leaf on an SSH host runs plain `claude`): `session_dir` (where the session was recorded), else the dir the leaf ran with.
+    /// environment (a leaf on an SSH host runs plain `claude`): `session_dir` (where the session was recorded), else
+    /// the dir the leaf ran with.
     pub fn rerun_resolved(
         &self,
         resumable: bool,

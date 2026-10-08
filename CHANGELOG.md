@@ -15,7 +15,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Take over works on SSH hosts.
 
 ### Changed
-- Remote sessions no longer offer menu actions that only work on this machine (open folder, VS Code, project pin and color, Claude config dir choice).
+- Remote sessions no longer offer menu actions that only work on this machine (open folder, VS Code, project color, Claude config dir choice; pinning a remote project heading as a favorite works and is saved as `ssh://<host>/<folder>`).
 - Needs a daemon restart (protocol 8, also needed on every SSH host): new panes starting in `~` now open in the home folder.
 
 ## [0.3.0] - 2026-10-07
