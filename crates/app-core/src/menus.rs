@@ -504,7 +504,8 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
 }
 
 /// A project heading's menu; `path` = the project key (see `protocol::host::project_key`), `container` = the dev
-/// container one of its sessions runs in, if any. A remote project has no pin, color or folder entries.
+/// container one of its sessions runs in, if any. A remote project has a pin (saved under its key) but no color or
+/// local folder entries.
 pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &MenuContext) -> Vec<MenuItem> {
     let (host, dir) = split_project_key(path);
     let new_here = |claude| MenuAction::NewHere { dir: dir.clone(), claude, host: host.clone() };
@@ -513,15 +514,13 @@ pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &M
         items.extend(claude_with_on(path, context, &host));
     }
     items.push(entry("New shell here", new_here(false)));
-    if host.is_local() {
-        items.push(if context.favorite {
-            entry("Unpin", MenuAction::UnpinFavorite(path.to_path_buf()))
-        } else {
-            entry("Pin as favorite", MenuAction::PinFavorite(path.to_path_buf()))
-        });
-        if let Some(current) = context.project_color {
-            items.push(color_menu(path, current));
-        }
+    items.push(if context.favorite {
+        entry("Unpin", MenuAction::UnpinFavorite(path.to_path_buf()))
+    } else {
+        entry("Pin as favorite", MenuAction::PinFavorite(path.to_path_buf()))
+    });
+    if let Some(current) = context.project_color.filter(|_| host.is_local()) {
+        items.push(color_menu(path, current));
     }
     items.extend([
         with_shortcut("Recent sessions here", Shortcut::Recents, MenuAction::RecentsFor(path.to_path_buf())),
@@ -1123,17 +1122,37 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_project_heading_has_no_pin_or_color_or_folder_entries() {
+    fn a_remote_project_heading_has_a_pin_but_no_color_or_folder_entries() {
         let context = MenuContext { project_color: Some(None), ..two_dirs(None) };
         let items = project_menu(Path::new("ssh://devbox/r/app"), None, &context);
         assert_eq!(
             labels(&items),
-            ["New Claude here", "New shell here", "Recent sessions here", "│", "Copy folder path (on devbox)"]
+            [
+                "New Claude here",
+                "New shell here",
+                "Pin as favorite",
+                "Recent sessions here",
+                "│",
+                "Copy folder path (on devbox)"
+            ]
         );
         let MenuItem::Entry(new) = &items[0] else { panic!() };
         assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: true, host: devbox() });
+        let MenuItem::Entry(pin) = &items[2] else { panic!() };
+        assert_eq!(pin.action, MenuAction::PinFavorite("ssh://devbox/r/app".into()));
         let MenuItem::Entry(copy) = items.last().unwrap() else { panic!() };
         assert_eq!(copy.action, MenuAction::Copy("/r/app".into()));
+    }
+
+    #[test]
+    fn a_pinned_remote_heading_offers_unpin_by_its_key() {
+        let settings = Settings { favorites: vec!["ssh://devbox/r/app".into()], ..Settings::default() };
+        let key = Path::new("ssh://devbox/r/app");
+        let context = MenuContext::for_folder(&settings, key);
+        assert!(context.favorite);
+        let items = project_menu(key, None, &context);
+        let MenuItem::Entry(unpin) = &items[2] else { panic!() };
+        assert_eq!((unpin.label.as_str(), &unpin.action), ("Unpin", &MenuAction::UnpinFavorite(key.to_path_buf())));
     }
 
     #[test]

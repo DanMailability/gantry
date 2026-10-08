@@ -20,7 +20,7 @@ use gpui::{
     KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
     UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, rgb, rgba, uniform_list,
 };
-use protocol::host::{HostId, split_project_key};
+use protocol::host::HostId;
 use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
@@ -478,9 +478,10 @@ impl SidebarView {
             RowKind::Pane { entry, .. } => Some(entry.cwd.as_path()),
             _ => None,
         };
-        // A remote folder has no favorites, colors or Claude dirs here: its menu is built without a context.
+        // A remote folder has no Claude dirs or colors here, but a project heading can be a favorite (saved under its
+        // project key), so a heading's context comes from the key itself.
         let remote = match &row.kind {
-            RowKind::Project { path, .. } => !split_project_key(path).0.is_local(),
+            RowKind::Project { .. } => false,
             RowKind::Session { session, .. } => !session.host.is_local(),
             RowKind::Pane { entry, .. } => !entry.host.is_local(),
             _ => false,
