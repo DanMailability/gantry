@@ -372,7 +372,7 @@ impl Leaf {
     }
 
     /// `rerun`, but a Claude leaf with a session is launched through its config dir's current command, arguments and
-    /// environment: `session_dir` (where the session was recorded), else the dir the leaf ran with.
+    /// environment (a leaf on an SSH host runs plain `claude`): `session_dir` (where the session was recorded), else the dir the leaf ran with.
     pub fn rerun_resolved(
         &self,
         resumable: bool,
@@ -382,6 +382,15 @@ impl Leaf {
     ) -> PaneLaunch {
         let launch = &self.launch;
         let Some(id) = self.session.as_deref().filter(|_| launch.is_claude()) else { return self.rerun(resumable) };
+        if !self.host.is_local() {
+            // A remote host uses its own config dir and command; nothing configured here applies there.
+            let plain = PaneLaunch::resume(id, launch.cwd.clone(), None);
+            return if resumable {
+                plain
+            } else {
+                PaneLaunch { args: vec!["--session-id".into(), id.into()], ..plain }
+            };
+        }
         let session_dir = session_dir.or(launch.claude_dir.as_deref());
         let (cwd, container) = (launch.cwd.clone(), launch.container.clone());
         if resumable {
@@ -756,9 +765,12 @@ impl Workspace {
         self.leaves.iter().find(|(_, leaf)| leaf.host == key.host && leaf.pane == Some(key.pane)).map(|(id, _)| *id)
     }
 
-    /// Leaf whose Claude session is `session`.
-    pub fn leaf_for_session(&self, session: &str) -> Option<NodeId> {
-        self.leaves.iter().find(|(_, leaf)| leaf.session.as_deref() == Some(session)).map(|(id, _)| *id)
+    /// Leaf on `host` whose Claude session is `session`.
+    pub fn leaf_for_session(&self, host: &HostId, session: &str) -> Option<NodeId> {
+        self.leaves
+            .iter()
+            .find(|(_, leaf)| leaf.host == *host && leaf.session.as_deref() == Some(session))
+            .map(|(id, _)| *id)
     }
 
     /// Whether `leaf` is in the visible tab.
@@ -1255,7 +1267,7 @@ mod tests {
         ws.open_settings();
         let id = ws.tabs[1].focused;
         assert_eq!((ws.tab_of(id), ws.close(id), ws.focus(id)), (None, None, false));
-        assert_eq!((ws.leaf_for_pane(&PaneKey::local(1)), ws.leaf_for_session("x")), (None, None));
+        assert_eq!((ws.leaf_for_pane(&PaneKey::local(1)), ws.leaf_for_session(&HostId::local(), "x")), (None, None));
         assert_eq!((ws.tabs.len(), ws.active), (2, 1));
     }
 
@@ -1575,7 +1587,13 @@ mod tests {
         let mut ws = Workspace::default();
         let a = ws.new_tab(PaneLaunch::resume("x", "/r".into(), None));
         ws.new_tab(shell("/r"));
-        assert_eq!((ws.leaf_for_session("x"), ws.leaf_for_session("y")), (Some(a), None));
+        let local = HostId::local();
+        assert_eq!((ws.leaf_for_session(&local, "x"), ws.leaf_for_session(&local, "y")), (Some(a), None));
+        // The same session id on another host is another leaf.
+        let b = ws.new_tab(PaneLaunch::resume("x", "/r".into(), None));
+        ws.leaves.get_mut(&b).unwrap().host = HostId::named("box");
+        assert_eq!(ws.leaf_for_session(&HostId::named("box"), "x"), Some(b));
+        assert_eq!(ws.leaf_for_session(&local, "x"), Some(a));
     }
 
     #[test]
@@ -1976,6 +1994,21 @@ mod tests {
         let default =
             PaneLaunch::resume_with("s1", "/r".into(), None, Some(Path::new("/home/me/.claude")), &dirs, daemon);
         assert_eq!((default.program.as_str(), default.env.is_empty()), ("claude", true));
+    }
+
+    #[test]
+    fn a_remote_leaf_resumes_with_plain_claude() {
+        let dirs = two_dirs();
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let mut leaf = claude_leaf(Some("s1"));
+        leaf.host = HostId::named("box");
+        leaf.launch.claude_dir = Some("/home/me/.claude-work".into());
+        leaf.launch.container = Some("/r".into());
+        let resume = leaf.rerun_resolved(true, Some(Path::new("/home/me/.claude-work")), &dirs, daemon);
+        assert_eq!(resume, PaneLaunch::resume("s1", "/r".into(), None));
+        let restart = leaf.rerun_resolved(false, None, &dirs, daemon);
+        assert_eq!(restart.args, ["--session-id", "s1"]);
+        assert_eq!((restart.program.as_str(), restart.container, restart.env.is_empty()), ("claude", None, true));
     }
 
     #[test]

@@ -2157,7 +2157,7 @@ impl WorkspaceView {
                 Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
                 Activation::Resume { session, cwd, host } => self.resume_session(host, session, cwd, split, window, cx),
                 Activation::TakeOver { session, cwd, host } => {
-                    let target = match self.workspace.leaf_for_session(&session) {
+                    let target = match self.workspace.leaf_for_session(&host, &session) {
                         Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
                         _ => {
                             let sessions = self.sidebar.read(cx).sessions();
@@ -2204,7 +2204,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         // A session already in the layout is shown there, so one session never runs in two panes.
-        match self.workspace.leaf_for_session(&session).filter(|leaf| self.workspace.leaves[leaf].host == host) {
+        match self.workspace.leaf_for_session(&host, &session) {
             Some(leaf) => {
                 self.focus_leaf(leaf, window, cx);
                 let starting = self.pending.values().any(|waiting| *waiting == leaf);
@@ -2217,7 +2217,7 @@ impl WorkspaceView {
                 let place =
                     self.sidebar.read(cx).sessions().get(&host, &session).and_then(|info| info.container.clone());
                 match place {
-                    Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
+                    Some(place) if host.is_local() && place.host_folder.is_none() => self.container_gone(window, cx),
                     place => {
                         let container = place.and_then(|place| place.host_folder);
                         let launch = self.resume_launch(&host, &session, cwd, container, cx);
