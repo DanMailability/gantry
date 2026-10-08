@@ -195,6 +195,8 @@ pub struct WorkspaceView {
     search_answers: HashMap<HostId, HostSearch>,
     /// The conversation search request the pop-up sent last (0 = none).
     search_request: u64,
+    /// The query the open recent sessions pop-up last searched for (sent again to a host that connects meanwhile).
+    search_query: String,
     hosts: HashMap<HostId, HostConn>,
     /// The SSH hosts of the settings.
     ssh_hosts: Vec<SshHost>,
@@ -415,6 +417,7 @@ impl WorkspaceView {
             next_request: 0,
             search_answers: HashMap::new(),
             search_request: 0,
+            search_query: String::new(),
             hosts,
             ssh_hosts: cx.global::<SettingsStore>().settings().ssh_hosts.clone(),
             host_states,
@@ -1045,6 +1048,7 @@ impl WorkspaceView {
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
+        self.take_overs.retain(|(taking, _), _| taking != host);
         if self.search_answers.remove(host).is_some() {
             self.push_search_hits(cx);
             self.push_search_state(cx);
@@ -1077,6 +1081,7 @@ impl WorkspaceView {
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
+        self.take_overs.retain(|(taking, _), _| taking != host);
         for (id, leaf) in &self.workspace.leaves {
             if &leaf.host == host
                 && let Some(slot) = self.slots.get(id)
@@ -1131,6 +1136,17 @@ impl WorkspaceView {
                 }
                 ClientEvent::Sessions { sessions } => {
                     self.track_sessions(host, sessions, cx);
+                    if self.recents.is_some()
+                        && !self.search_query.is_empty()
+                        && !self.search_answers.contains_key(host)
+                    {
+                        // The host connected while a search is on: ask it the same query.
+                        if let Some(client) = self.client(host) {
+                            client.search(self.search_request, &self.search_query, SEARCH_LIMIT);
+                        }
+                        self.search_answers.insert(host.clone(), Default::default());
+                        self.push_search_hits(cx);
+                    }
                     self.attention.reset(host, sessions);
                     let sessions = sessions.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
@@ -1167,6 +1183,7 @@ impl WorkspaceView {
                 }
                 ClientEvent::SearchUnavailable { .. } => {
                     self.search_answers.entry(host.clone()).or_default().unavailable = true;
+                    self.push_search_hits(cx);
                     self.push_search_state(cx);
                 }
                 ClientEvent::DirListing { request, dirs, .. } => {
@@ -1536,7 +1553,7 @@ impl WorkspaceView {
 
     /// Open a new Claude or shell pane — as a new tab, or splitting the focused pane along `axis` —
     /// in the focused pane's current directory.
-    fn open(&mut self, claude: bool, axis: Option<Axis>) {
+    fn open(&mut self, claude: bool, axis: Option<Axis>, window: &mut Window, cx: &mut Context<Self>) {
         if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
@@ -1545,7 +1562,14 @@ impl WorkspaceView {
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.key());
         let host = source.map(|leaf| leaf.host.clone()).unwrap_or_default();
-        self.open_new(claude, cwd, axis, cwd_from, host, None);
+        if host.is_local() {
+            self.open_new(claude, cwd, axis, cwd_from, host, None);
+        } else {
+            // A split of a remote pane: no container lookup and no local Claude dir or shell settings.
+            let launch =
+                if claude { PaneLaunch::claude(cwd) } else { PaneLaunch::shell(cwd, &ShellSettings::default()) };
+            self.open_launch(launch, axis, cwd_from, host, window, cx);
+        }
     }
 
     /// The Settings tab is the active one (it has no pane to split).
@@ -1846,7 +1870,7 @@ impl WorkspaceView {
                 // The right-clicked tab, which becomes the visible one.
                 if self.workspace.select_tab(tab) {
                     self.focus_current(window, cx);
-                    self.open(true, Some(axis));
+                    self.open(true, Some(axis), window, cx);
                 }
             }
             MenuAction::SplitPane { leaf, axis, claude } => {
@@ -1854,7 +1878,7 @@ impl WorkspaceView {
                 if self.workspace.focus(leaf) {
                     self.focus_current(window, cx);
                     self.save(cx);
-                    self.open(claude, Some(axis));
+                    self.open(claude, Some(axis), window, cx);
                 }
             }
             MenuAction::NewLocal { claude } => self.show_launcher(claude, HostId::local(), window, cx),
@@ -2459,6 +2483,7 @@ impl WorkspaceView {
             this.on_recents_event(event.clone(), window, cx)
         });
         view.focus_handle(cx).focus(window, cx);
+        self.search_query.clear();
         self.recents = Some((view, subscription));
         self.push_search_state(cx);
         cx.notify();
@@ -2514,6 +2539,7 @@ impl WorkspaceView {
             RecentsEvent::Search { request, query } => {
                 let order = self.search_order();
                 self.search_request = request;
+                self.search_query = query.clone();
                 self.search_answers.retain(|host, _| order.contains(host));
                 for answer in self.search_answers.values_mut() {
                     answer.hits.clear();
@@ -2623,23 +2649,23 @@ impl WorkspaceView {
         false
     }
 
-    fn new_claude_tab(&mut self, _: &NewClaudeTab, _: &mut Window, _: &mut Context<Self>) {
-        self.open(true, None)
+    fn new_claude_tab(&mut self, _: &NewClaudeTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(true, None, window, cx)
     }
-    fn new_shell_tab(&mut self, _: &NewShellTab, _: &mut Window, _: &mut Context<Self>) {
-        self.open(false, None)
+    fn new_shell_tab(&mut self, _: &NewShellTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(false, None, window, cx)
     }
-    fn split_right_claude(&mut self, _: &SplitRightClaude, _: &mut Window, _: &mut Context<Self>) {
-        self.open(true, Some(Axis::Horizontal))
+    fn split_right_claude(&mut self, _: &SplitRightClaude, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(true, Some(Axis::Horizontal), window, cx)
     }
-    fn split_right_shell(&mut self, _: &SplitRightShell, _: &mut Window, _: &mut Context<Self>) {
-        self.open(false, Some(Axis::Horizontal))
+    fn split_right_shell(&mut self, _: &SplitRightShell, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(false, Some(Axis::Horizontal), window, cx)
     }
-    fn split_down_claude(&mut self, _: &SplitDownClaude, _: &mut Window, _: &mut Context<Self>) {
-        self.open(true, Some(Axis::Vertical))
+    fn split_down_claude(&mut self, _: &SplitDownClaude, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(true, Some(Axis::Vertical), window, cx)
     }
-    fn split_down_shell(&mut self, _: &SplitDownShell, _: &mut Window, _: &mut Context<Self>) {
-        self.open(false, Some(Axis::Vertical))
+    fn split_down_shell(&mut self, _: &SplitDownShell, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(false, Some(Axis::Vertical), window, cx)
     }
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.active_tab().is_some_and(|tab| tab.settings) {
@@ -2875,7 +2901,12 @@ impl WorkspaceView {
                         })),
                 )
             })
-            .child(round_button("new-claude", "+", &theme, cx.listener(|this, _, _, _| this.open(true, None))))
+            .child(round_button(
+                "new-claude",
+                "+",
+                &theme,
+                cx.listener(|this, _, window, cx| this.open(true, None, window, cx)),
+            ))
             .child(round_button(
                 "open-settings",
                 "⚙",
