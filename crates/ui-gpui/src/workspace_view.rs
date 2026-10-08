@@ -10,6 +10,7 @@ use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, de
 use app_core::host_state::{FailKind, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
+use app_core::search_merge::{self, HostSearch};
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, mix, terminal_palette};
@@ -189,10 +190,10 @@ pub struct WorkspaceView {
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
-    /// Percent of the conversation index built while the daemon builds it.
-    search_indexing: Option<u8>,
-    /// Whether the daemon said conversation search does not work.
-    search_unavailable: bool,
+    /// What each daemon said about conversation search (hits of the current query, index progress, unavailable).
+    search_answers: HashMap<HostId, HostSearch>,
+    /// The conversation search request the pop-up sent last (0 = none).
+    search_request: u64,
     hosts: HashMap<HostId, HostConn>,
     /// The SSH hosts of the settings.
     ssh_hosts: Vec<SshHost>,
@@ -275,8 +276,8 @@ pub struct WorkspaceView {
     update_card: Option<FocusHandle>,
     /// Why Restart and update failed, shown in the card.
     update_error: Option<String>,
-    /// Take-over requests waiting for the daemon, by session.
-    take_overs: HashMap<String, TakeOverTarget>,
+    /// Take-over requests waiting for the host's daemon, by host and session.
+    take_overs: HashMap<(HostId, String), TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
     pending_opens: HashMap<u64, PendingOpen>,
     /// Status changes seen so far, to tell which ones alert.
@@ -411,8 +412,8 @@ impl WorkspaceView {
             slots: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
-            search_indexing: None,
-            search_unavailable: false,
+            search_answers: HashMap::new(),
+            search_request: 0,
             hosts,
             ssh_hosts: cx.global::<SettingsStore>().settings().ssh_hosts.clone(),
             host_states,
@@ -1033,6 +1034,10 @@ impl WorkspaceView {
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
+        if self.search_answers.remove(host).is_some() {
+            self.push_search_hits(cx);
+            self.push_search_state(cx);
+        }
         for (id, leaf) in &self.workspace.leaves {
             if &leaf.host == host
                 && let Some(slot) = self.slots.get(id)
@@ -1131,24 +1136,24 @@ impl WorkspaceView {
                     }
                 }
                 ClientEvent::TakeOverResult { session, outcome } => {
-                    self.on_take_over(session.clone(), outcome.clone(), window, cx)
+                    self.on_take_over(host.clone(), session.clone(), outcome.clone(), window, cx)
                 }
                 ClientEvent::ContainerFound { request, container } => {
                     self.on_container_found(*request, container.clone(), window, cx)
                 }
                 ClientEvent::SearchResults { request, hits } => {
-                    if let Some((view, _)) = &self.recents {
-                        let hits = hits.clone();
-                        view.update(cx, |view, cx| view.set_hits(*request, hits, cx));
+                    if *request == self.search_request {
+                        self.search_answers.entry(host.clone()).or_default().hits = hits.clone();
+                        self.push_search_hits(cx);
                     }
                 }
-                ClientEvent::SearchIndexing { .. } | ClientEvent::SearchUnavailable { .. } if !host.is_local() => {}
                 ClientEvent::SearchIndexing { done, total } => {
-                    self.search_indexing = (done < total).then(|| (done * 100 / (*total).max(1)) as u8);
+                    let progress = (done < total).then(|| (done * 100 / (*total).max(1)) as u8);
+                    self.search_answers.entry(host.clone()).or_default().progress = progress;
                     self.push_search_state(cx);
                 }
                 ClientEvent::SearchUnavailable { .. } => {
-                    self.search_unavailable = true;
+                    self.search_answers.entry(host.clone()).or_default().unavailable = true;
                     self.push_search_state(cx);
                 }
                 ClientEvent::DirListing { .. } | ClientEvent::DirListingFailed { .. } => {}
@@ -1360,26 +1365,41 @@ impl WorkspaceView {
                     matches!(info.state, SessionState::External { pid: Some(_) }) && info.cwd_exists
                 });
                 if let (true, Some(session)) = (takeable, session) {
-                    self.confirm_take_over(session, TakeOverTarget::Leaf(leaf), window, cx);
+                    self.confirm_take_over(host, session, TakeOverTarget::Leaf(leaf), window, cx);
                 }
             }
         }
     }
 
-    /// Ask before stopping the outside process running `session`; on yes, request it and remember where to resume.
+    /// Ask before stopping the outside process running `session` on `host`; on yes, request it and remember where
+    /// to resume.
     fn confirm_take_over(
         &mut self,
+        host: HostId,
         session: String,
         target: TakeOverTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.take_overs.contains_key(&session) {
+        if self.take_overs.contains_key(&(host.clone(), session.clone())) {
             return;
         }
+        if self.client(&host).is_none() {
+            let message = format!("{} is not connected.", host.name());
+            let answer = window.prompt(PromptLevel::Info, "Cannot take over the session", Some(&message), &["OK"], cx);
+            cx.spawn(async move |_, _| {
+                let _ = answer.await;
+            })
+            .detach();
+            return;
+        }
+        let title = match host.remote_name() {
+            Some(name) => format!("Take over this session on {name}?"),
+            None => "Take over this session?".to_string(),
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Take over this session?",
+            &title,
             Some("Unsent input outside Gantry is lost."),
             &["Take over", "Cancel"],
             cx,
@@ -1387,29 +1407,35 @@ impl WorkspaceView {
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
                 let _ = this.update_in(cx, |this, _, _| {
-                    this.local_client().take_over(&session, false);
-                    this.take_overs.insert(session, target);
+                    if let Some(client) = this.client(&host) {
+                        client.take_over(&session, false);
+                        this.take_overs.insert((host, session), target);
+                    }
                 });
             }
         })
         .detach();
     }
 
-    fn on_take_over(&mut self, session: String, outcome: TakeOverOutcome, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_take_over(
+        &mut self,
+        host: HostId,
+        session: String,
+        outcome: TakeOverOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = (host.clone(), session.clone());
         match outcome {
-            TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
+            TakeOverOutcome::Exited => match self.take_overs.remove(&waiting) {
                 Some(TakeOverTarget::NewPane { cwd, split, container }) => {
                     let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
-                    let launch = self.resume_launch(&session, cwd, container, cx);
-                    self.open_launch(launch, axis, None, HostId::local(), window, cx);
+                    let launch = self.resume_launch(&host, &session, cwd, container, cx);
+                    self.open_launch(launch, axis, None, host, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
-                    let session_dir = self
-                        .sidebar
-                        .read(cx)
-                        .sessions()
-                        .get(&HostId::local(), &session)
-                        .and_then(|info| info.claude_dir.clone());
+                    let session_dir =
+                        self.sidebar.read(cx).sessions().get(&host, &session).and_then(|info| info.claude_dir.clone());
                     let launch = self.workspace.leaves.get(&leaf).map(|entry| {
                         entry.rerun_resolved(true, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
                     });
@@ -1421,7 +1447,7 @@ impl WorkspaceView {
                 None => {}
             },
             TakeOverOutcome::StillRunning => {
-                if !self.take_overs.contains_key(&session) {
+                if !self.take_overs.contains_key(&waiting) {
                     return;
                 }
                 let answer = window.prompt(
@@ -1435,16 +1461,18 @@ impl WorkspaceView {
                     let force = answer.await == Ok(0);
                     let _ = this.update_in(cx, |this, _, _| {
                         if force {
-                            this.local_client().take_over(&session, true);
+                            if let Some(client) = this.client(&waiting.0) {
+                                client.take_over(&waiting.1, true);
+                            }
                         } else {
-                            this.take_overs.remove(&session);
+                            this.take_overs.remove(&waiting);
                         }
                     });
                 })
                 .detach();
             }
             TakeOverOutcome::Failed { error } => {
-                self.take_overs.remove(&session);
+                self.take_overs.remove(&waiting);
                 let answer =
                     window.prompt(PromptLevel::Critical, "Could not take over the session", Some(&error), &["OK"], cx);
                 cx.spawn(async move |_, _| {
@@ -1535,9 +1563,19 @@ impl WorkspaceView {
     }
 
     /// Resume `session` where it ran: with the command and config dir recorded for it.
-    fn resume_launch(&self, session: &str, cwd: PathBuf, container: Option<PathBuf>, cx: &App) -> PaneLaunch {
-        let session_dir =
-            self.sidebar.read(cx).sessions().get(&HostId::local(), session).and_then(|info| info.claude_dir.clone());
+    /// A remote session resumes with the plain `claude`: the remote uses its own config dir.
+    fn resume_launch(
+        &self,
+        host: &HostId,
+        session: &str,
+        cwd: PathBuf,
+        container: Option<PathBuf>,
+        cx: &App,
+    ) -> PaneLaunch {
+        if !host.is_local() {
+            return PaneLaunch::resume(session, cwd, None);
+        }
+        let session_dir = self.sidebar.read(cx).sessions().get(host, session).and_then(|info| info.claude_dir.clone());
         PaneLaunch::resume_with(session, cwd, container, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
     }
 
@@ -1630,9 +1668,9 @@ impl WorkspaceView {
         if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
-        let leaf = match axis.and_then(|axis| self.workspace.split_on(axis, launch.clone(), host)) {
+        let leaf = match axis.and_then(|axis| self.workspace.split_on(axis, launch.clone(), host.clone())) {
             Some(leaf) => leaf,
-            None => self.workspace.new_tab(launch),
+            None => self.workspace.new_tab_on(launch, host),
         };
         self.add_slot(leaf, window, cx);
         self.spawn_leaf(leaf, cwd_from, window, cx);
@@ -2095,20 +2133,20 @@ impl WorkspaceView {
                     }
                 }
                 Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
-                Activation::Resume { session, cwd } => self.resume_session(session, cwd, split, window, cx),
-                Activation::TakeOver { session, cwd, .. } => {
+                Activation::Resume { session, cwd, host } => self.resume_session(host, session, cwd, split, window, cx),
+                Activation::TakeOver { session, cwd, host } => {
                     let target = match self.workspace.leaf_for_session(&session) {
                         Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
                         _ => {
                             let sessions = self.sidebar.read(cx).sessions();
                             let container = sessions
-                                .get(&HostId::local(), &session)
+                                .get(&host, &session)
                                 .and_then(|info| info.container.clone())
                                 .and_then(|place| place.host_folder);
                             TakeOverTarget::NewPane { cwd, split, container }
                         }
                     };
-                    self.confirm_take_over(session, target, window, cx);
+                    self.confirm_take_over(host, session, target, window, cx);
                 }
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
@@ -2136,6 +2174,7 @@ impl WorkspaceView {
     /// new tab (or a split) where it ran — its dev container included.
     fn resume_session(
         &mut self,
+        host: HostId,
         session: String,
         cwd: PathBuf,
         split: bool,
@@ -2143,7 +2182,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         // A session already in the layout is shown there, so one session never runs in two panes.
-        match self.workspace.leaf_for_session(&session) {
+        match self.workspace.leaf_for_session(&session).filter(|leaf| self.workspace.leaves[leaf].host == host) {
             Some(leaf) => {
                 self.focus_leaf(leaf, window, cx);
                 let starting = self.pending.values().any(|waiting| *waiting == leaf);
@@ -2153,18 +2192,14 @@ impl WorkspaceView {
             }
             None => {
                 let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
-                let place = self
-                    .sidebar
-                    .read(cx)
-                    .sessions()
-                    .get(&HostId::local(), &session)
-                    .and_then(|info| info.container.clone());
+                let place =
+                    self.sidebar.read(cx).sessions().get(&host, &session).and_then(|info| info.container.clone());
                 match place {
                     Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
                     place => {
                         let container = place.and_then(|place| place.host_folder);
-                        let launch = self.resume_launch(&session, cwd, container, cx);
-                        self.open_launch(launch, axis, None, HostId::local(), window, cx);
+                        let launch = self.resume_launch(&host, &session, cwd, container, cx);
+                        self.open_launch(launch, axis, None, host, window, cx);
                     }
                 }
             }
@@ -2364,9 +2399,20 @@ impl WorkspaceView {
             return;
         }
         self.launcher = None;
-        let sessions: Vec<SessionInfo> =
-            self.sidebar.read(cx).sessions().all().filter(|session| session.host.is_local()).cloned().collect();
-        let open: HashSet<String> = self.workspace.leaves.values().filter_map(|leaf| leaf.session.clone()).collect();
+        let sessions: Vec<SessionInfo> = self
+            .sidebar
+            .read(cx)
+            .sessions()
+            .all()
+            .filter(|session| session.host.is_local() || self.client(&session.host).is_some())
+            .cloned()
+            .collect();
+        let open: HashSet<(HostId, String)> = self
+            .workspace
+            .leaves
+            .values()
+            .filter_map(|leaf| Some((leaf.host.clone(), leaf.session.clone()?)))
+            .collect();
         let view = cx.new(|cx| RecentsView::new(sessions, open, project, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &RecentsEvent, window, cx| {
             this.on_recents_event(event.clone(), window, cx)
@@ -2377,23 +2423,48 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// The hosts conversation search asks: this machine, then the connected SSH hosts in settings order.
+    fn search_order(&self) -> Vec<HostId> {
+        let configured: Vec<String> = self.ssh_hosts.iter().map(|entry| entry.name.clone()).collect();
+        search_merge::query_order(&configured, |host| self.client(host).is_some())
+    }
+
+    /// Show the merged hits of every host in an open recent sessions pop-up.
+    fn push_search_hits(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.recents {
+            let merged = search_merge::merge(&self.search_order(), &self.search_answers);
+            let request = self.search_request;
+            view.update(cx, |view, cx| view.set_hits(request, merged.hits, cx));
+        }
+    }
+
     /// Tell an open recent sessions pop-up where conversation search stands.
     fn push_search_state(&self, cx: &mut Context<Self>) {
         if let Some((view, _)) = &self.recents {
-            let (indexing, unavailable) = (self.search_indexing, self.search_unavailable);
-            view.update(cx, |view, cx| view.set_index_state(indexing, unavailable, cx));
+            let merged = search_merge::merge(&self.search_order(), &self.search_answers);
+            view.update(cx, |view, cx| view.set_index_state(merged.progress, !merged.unavailable.is_empty(), cx));
         }
     }
 
     fn on_recents_event(&mut self, event: RecentsEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             RecentsEvent::Search { request, query } => {
-                self.local_client().search(request, &query, SEARCH_LIMIT);
+                let order = self.search_order();
+                self.search_request = request;
+                self.search_answers.retain(|host, _| order.contains(host));
+                for answer in self.search_answers.values_mut() {
+                    answer.hits.clear();
+                }
+                for host in &order {
+                    if let Some(client) = self.client(host) {
+                        client.search(request, &query, SEARCH_LIMIT);
+                    }
+                }
                 return;
             }
-            RecentsEvent::Resume { session, cwd, split } => {
+            RecentsEvent::Resume { host, session, cwd, split } => {
                 self.recents = None;
-                self.resume_session(session, cwd, split, window, cx);
+                self.resume_session(host, session, cwd, split, window, cx);
             }
             RecentsEvent::Dismiss => {
                 self.recents = None;

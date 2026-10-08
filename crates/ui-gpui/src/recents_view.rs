@@ -37,6 +37,8 @@ static NEXT_SEARCH: AtomicU64 = AtomicU64::new(1);
 pub enum RecentsEvent {
     /// Resume a session.
     Resume {
+        /// The host it ran on.
+        host: HostId,
         /// Session id.
         session: String,
         /// Its directory.
@@ -67,7 +69,7 @@ enum List {
 pub struct RecentsView {
     focus_handle: FocusHandle,
     sessions: Vec<SessionInfo>,
-    open: HashSet<String>,
+    open: HashSet<(HostId, String)>,
     home: Option<PathBuf>,
     roots: ProjectRoots,
     query: TextField,
@@ -101,10 +103,10 @@ impl Focusable for RecentsView {
 }
 
 impl RecentsView {
-    /// An overlay over `sessions`; `open` = sessions a leaf of the layout shows; `project` = the project to start on.
+    /// An overlay over `sessions`; `open` = (host, session) a leaf of the layout shows; `project` = the project to start on.
     pub fn new(
         sessions: Vec<SessionInfo>,
-        open: HashSet<String>,
+        open: HashSet<(HostId, String)>,
         project: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -312,7 +314,12 @@ impl RecentsView {
         match &self.list {
             List::Sessions(items) => match items.get(index) {
                 Some(RecentItem::Session { session, .. }) if session.cwd_exists => {
-                    cx.emit(RecentsEvent::Resume { session: session.id.clone(), cwd: session.cwd.clone(), split });
+                    cx.emit(RecentsEvent::Resume {
+                        host: session.host.clone(),
+                        session: session.id.clone(),
+                        cwd: session.cwd.clone(),
+                        split,
+                    });
                 }
                 Some(RecentItem::More { project, .. }) => {
                     self.expanded.insert(project.clone());
