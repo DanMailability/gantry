@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-version = "0.2.0"
+version = "0.5.0"
 publish = false
 license = "MIT OR Apache-2.0"
 
@@ -24,7 +24,7 @@ app-core = { path = "crates/app-core" }
 protocol = { path = "crates/protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "time"] }
 interprocess = { version = "2.4", features = ["tokio"] }
 directories = "6"
 tracing-appender = "0.2"

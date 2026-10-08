@@ -1,51 +1,65 @@
 //! The window's root view: tabs of split panes, routing daemon events to them, and saving the layout.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, describe, without_claude_glyph};
+use app_core::host_state::{FailKind, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
+use app_core::recents;
+use app_core::search_merge::{self, HostSearch};
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
 use app_core::theme_colors::{Preset, mix, terminal_palette};
-use app_core::workspace::{ClaudeDirs, DirBadge, MAX_PANES_PER_TAB, PaneLaunch, Rerun, Restored, Workspace};
+use app_core::version::{self, Note, Update, Version};
+use app_core::workspace::{
+    ClaudeDirs, DirBadge, HostLive, KilledOffline, MAX_PANES_PER_TAB, PaneLaunch, Rerun, Restored, Workspace,
+    reconcile, without_killed_offline,
+};
+use daemon::askpass::AskPrompt;
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
+use daemon::paths::{Paths, current_profile};
+use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, Share, SshHostSpec, connect as ssh_connect};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
     Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
 };
-use protocol::message::{
-    ContainerChoice, PaletteColors, PaneId, SessionInfo, SessionState, SessionStatus, TakeOverOutcome,
-};
+use notify::RecommendedWatcher;
+use protocol::host::{HostId, PaneKey};
+use protocol::message::{ContainerChoice, PaletteColors, SessionInfo, SessionState, SessionStatus, TakeOverOutcome};
 
 use app_core::menus::{self, MenuAction, MenuContext, MenuEntry, MenuItem, Shortcut};
 use app_core::session_tree::{
-    Activation, PaneEntry, TabEntry, Tone, display_path, session_title, status_tone, tone_word,
+    Activation, PaneEntry, TabEntry, Tone, Unseen, display_path, leaf_tone, session_title, status_tone, tone_word,
 };
-use app_core::settings::Settings;
+use app_core::settings::{Settings, ShellSettings, SshHost, add_ssh_host};
 use app_core::shortcuts::{self, Platform};
 
 use crate::alerts::{self, Notice};
+use crate::askpass_view::{AskpassEvent, AskpassView};
 use crate::assets::{CLOSE_ICON, LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
-use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
+use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherHost, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
+use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
 use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
+use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
-    RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, side_line, sweeping, theme,
-    working_sweep,
+    RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, pin_icon, side_line, ssh_icon,
+    sweeping, theme, working_sweep,
 };
+use crate::update_watch::{self, DaemonBuild};
 use crate::window_frame;
 
 /// Height of the title bar.
@@ -151,7 +165,21 @@ struct PendingOpen {
     pick: Option<String>,
     cwd: PathBuf,
     axis: Option<Axis>,
-    cwd_from: Option<PaneId>,
+    cwd_from: Option<PaneKey>,
+    /// The host a split runs on (the source pane's); `local` otherwise.
+    host: HostId,
+}
+
+/// Tries (one second apart) a connect makes after an update's restart while the old daemon still answers.
+const RESTART_RETRIES: u8 = 3;
+
+/// One connected host's daemon.
+struct HostConn {
+    client: DaemonClient,
+    /// False once the connection ended; it is not re-established.
+    connected: bool,
+    /// Keeps routing this host's events to the view.
+    _events: Task<()>,
 }
 
 /// Root view of the Gantry window.
@@ -163,11 +191,37 @@ pub struct WorkspaceView {
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
-    /// Percent of the conversation index built while the daemon builds it.
-    search_indexing: Option<u8>,
-    /// Whether the daemon said conversation search does not work.
-    search_unavailable: bool,
-    client: DaemonClient,
+    /// What each daemon said about conversation search (hits of the current query, index progress, unavailable).
+    search_answers: HashMap<HostId, HostSearch>,
+    /// The conversation search request the pop-up sent last (0 = none).
+    search_request: u64,
+    /// The query the open recent sessions pop-up last searched for (sent again to a host that connects meanwhile).
+    search_query: String,
+    hosts: HashMap<HostId, HostConn>,
+    /// The SSH hosts of the settings.
+    ssh_hosts: Vec<SshHost>,
+    /// Where each SSH host's connection stands (absent = `NotConnected`).
+    host_states: HashMap<HostId, HostState>,
+    /// New leaves waiting for their host to connect, to be spawned then.
+    queued: HashMap<HostId, Vec<NodeId>>,
+    /// The pending reconnect timer of each host.
+    retries: HashMap<HostId, Task<()>>,
+    /// The attempt running for each host (its number, to ignore a stale result, and its cancel handle).
+    attempts: HashMap<HostId, (u64, AttemptHandle)>,
+    /// Numbers the attempts.
+    next_attempt: u64,
+    /// Panes closed while their host was not connected, to kill when it is (and not to adopt again).
+    killed_offline: Vec<KilledOffline>,
+    /// Hosts that came from the debug seam (`GANTRY_EXTRA_HOSTS`): connected without being in `sshHosts`.
+    seam_hosts: HashSet<HostId>,
+    /// Where ssh's questions go (the dialog is drawn from the receiver, see the sign-in task).
+    askpass_prompts: async_channel::Sender<AskPrompt>,
+    /// The sign-in dialog on screen, while ssh asks something.
+    askpass: Option<(Entity<AskpassView>, Subscription)>,
+    /// Questions waiting for the one on screen.
+    askpass_queue: VecDeque<AskPrompt>,
+    /// Receives ssh's questions.
+    _askpass_task: Task<()>,
     layout_file: PathBuf,
     default_cwd: PathBuf,
     /// The daemon's own Claude config dir (its panes need no `CLAUDE_CONFIG_DIR`).
@@ -194,6 +248,13 @@ pub struct WorkspaceView {
     recents: Option<(Entity<RecentsView>, Subscription)>,
     /// The open setup wizard overlay.
     setup: Option<(Entity<SetupView>, Subscription)>,
+    /// The shared ssh connection a wizard handed to a host's next interactive connect (closed after it).
+    shares: HashMap<HostId, Share>,
+    /// Hosts whose daemon was just stopped for an update: how many more times a connect that meets the old daemon
+    /// (VersionMismatch) is tried again before the card is shown.
+    restart_retries: HashMap<HostId, u8>,
+    /// The open SSH install wizard overlay.
+    ssh_wizard: Option<(Entity<SshWizard>, Subscription)>,
     /// The Settings page, while its tab is open.
     settings: Option<Entity<SettingsView>>,
     /// Listens to the open Settings page.
@@ -204,8 +265,22 @@ pub struct WorkspaceView {
     tab_menu: Option<OpenMenu>,
     /// The open popup of a pane's split button (Claude or Terminal).
     pane_menu: Option<OpenMenu>,
-    /// Take-over requests waiting for the daemon, by session.
-    take_overs: HashMap<String, TakeOverTarget>,
+    /// The open list of `Local` and the SSH hosts, from a New button.
+    host_menu: Option<OpenMenu>,
+    /// The binary this window started from (resolved at start, before an install can replace it).
+    start_path: Option<PathBuf>,
+    /// The version found at `start_path` after a change; `None` until one was probed.
+    installed: Option<Version>,
+    /// The daemon's version, if it sent one.
+    daemon_version: Option<Version>,
+    /// Watches `start_path`'s directory (Linux).
+    update_watch: Option<(RecommendedWatcher, Task<()>)>,
+    /// The open update card; its focus handle takes Esc.
+    update_card: Option<FocusHandle>,
+    /// Why Restart and update failed, shown in the card.
+    update_error: Option<String>,
+    /// Take-over requests waiting for the host's daemon, by host and session.
+    take_overs: HashMap<(HostId, String), TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
     pending_opens: HashMap<u64, PendingOpen>,
     /// Status changes seen so far, to tell which ones alert.
@@ -223,31 +298,80 @@ pub struct WorkspaceView {
     /// Leaves whose notification was clicked.
     clicked: async_channel::Sender<NodeId>,
     _clicks: Task<()>,
-    _events: Task<()>,
+}
+
+/// Which finished leaves resume by themselves on start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resume {
+    /// None: they wait for Continue.
+    Nothing,
+    /// Every finished leaf (`window.resumeSessions`).
+    Finished,
+    /// Only these (`--resume-sessions`: what was running when Restart and update stopped everything).
+    Only(HashSet<NodeId>),
 }
 
 impl WorkspaceView {
-    /// Show `restored`, attaching and spawning what it says, and start routing `connection`'s events.
-    pub fn new(
-        connection: Connection,
-        restored: Restored,
-        layout_file: PathBuf,
-        default_cwd: PathBuf,
+    /// The connection to `host`, if it is connected.
+    fn client(&self, host: &HostId) -> Option<&DaemonClient> {
+        self.hosts.get(host).filter(|conn| conn.connected).map(|conn| &conn.client)
+    }
+
+    /// This machine's daemon (always connected: the window needs it to start).
+    fn local_client(&self) -> &DaemonClient {
+        &self.hosts[&HostId::local()].client
+    }
+
+    /// Route `host`'s events to the view, in batches, until the connection ends.
+    fn listen(
+        host: HostId,
+        events: async_channel::Receiver<ClientEvent>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Self {
-        let Connection { client, events, claude_dir: daemon_dir, .. } = connection;
-        let events_task = cx.spawn_in(window, async move |this, cx| {
+    ) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 let batch = batch_events(first, &events, MAX_BATCH_BYTES);
-                if this.update_in(cx, |view, window, cx| view.on_events(batch, window, cx)).is_err() {
+                if this.update_in(cx, |view, window, cx| view.on_events(&host, batch, window, cx)).is_err() {
                     return;
                 }
                 // Yield so keystrokes (e.g. Ctrl+C) are handled between batches.
                 cx.background_executor().timer(Duration::ZERO).await;
             }
-            let _ = this.update_in(cx, |view, window, cx| view.on_events(vec![ClientEvent::Disconnected], window, cx));
-        });
+            let _ = this
+                .update_in(cx, |view, window, cx| view.on_events(&host, vec![ClientEvent::Disconnected], window, cx));
+        })
+    }
+
+    /// Show `restored`, attaching and spawning what it says, and start routing the events of `connection` and of the
+    /// `extra` hosts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        connection: Connection,
+        extra: Vec<(HostId, Connection)>,
+        restored: Restored,
+        layout_file: PathBuf,
+        default_cwd: PathBuf,
+        resume: Resume,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let Connection { client, events, claude_dir: daemon_dir, daemon_version, daemon_commit, .. } = connection;
+        cx.set_global(DaemonBuild { version: daemon_version.clone(), commit: daemon_commit });
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            HostId::local(),
+            HostConn { client, connected: true, _events: Self::listen(HostId::local(), events, window, cx) },
+        );
+        let seam_hosts: HashSet<HostId> = extra.iter().map(|(host, _)| host.clone()).collect();
+        for (host, connection) in extra {
+            let conn = HostConn {
+                client: connection.client,
+                connected: true,
+                _events: Self::listen(host.clone(), connection.events, window, cx),
+            };
+            hosts.insert(host, conn);
+        }
         let sidebar = cx.new(SidebarView::new);
         let sidebar_events = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
             this.on_sidebar_event(event.clone(), window, cx)
@@ -275,15 +399,38 @@ impl WorkspaceView {
                 });
             }
         });
+        let (askpass_prompts, askpass_receiver) = async_channel::unbounded::<AskPrompt>();
+        let askpass_task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(prompt) = askpass_receiver.recv().await {
+                if this.update_in(cx, |view, window, cx| view.ask(prompt, window, cx)).is_err() {
+                    return;
+                }
+            }
+        });
+        let host_states: HashMap<HostId, HostState> =
+            hosts.keys().filter(|host| !host.is_local()).map(|host| (host.clone(), HostState::Connected)).collect();
         let mut this = WorkspaceView {
             workspace: restored.workspace,
             to_resume: Vec::new(),
             slots: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
-            search_indexing: None,
-            search_unavailable: false,
-            client,
+            search_answers: HashMap::new(),
+            search_request: 0,
+            search_query: String::new(),
+            hosts,
+            ssh_hosts: cx.global::<SettingsStore>().settings().ssh_hosts.clone(),
+            host_states,
+            queued: HashMap::new(),
+            retries: HashMap::new(),
+            attempts: HashMap::new(),
+            next_attempt: 0,
+            killed_offline: Vec::new(),
+            seam_hosts,
+            askpass_prompts,
+            askpass: None,
+            askpass_queue: VecDeque::new(),
+            _askpass_task: askpass_task,
             layout_file,
             default_cwd,
             dirs: ClaudeDirs::from_settings(
@@ -304,11 +451,21 @@ impl WorkspaceView {
             launcher: None,
             recents: None,
             setup: None,
+            shares: HashMap::new(),
+            restart_retries: HashMap::new(),
+            ssh_wizard: None,
             settings: None,
             _settings_events: None,
             before_settings: None,
             tab_menu: None,
             pane_menu: None,
+            host_menu: None,
+            start_path: None,
+            installed: None,
+            daemon_version: None,
+            update_watch: None,
+            update_card: None,
+            update_error: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -320,29 +477,43 @@ impl WorkspaceView {
             _appearance: appearance,
             clicked,
             _clicks: clicks_task,
-            _events: events_task,
         };
+        this.start_path = std::env::current_exe().ok();
+        this.daemon_version = daemon_version.as_deref().and_then(Version::parse);
+        #[cfg(target_os = "linux")]
+        if let Some(path) = this.start_path.clone() {
+            this.update_watch = update_watch::watch(&path, cx);
+        }
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
             this.add_slot(leaf, window, cx);
         }
-        for (leaf, pane) in &restored.attach {
+        for (leaf, key) in &restored.attach {
             let launch = this.workspace.leaves[leaf].launch.clone();
-            this.slots[leaf].view.update(cx, |view, cx| view.attach(*pane, launch, cx));
-            this.client.attach(*pane);
+            this.slots[leaf].view.update(cx, |view, cx| view.attach(key.pane, launch, cx));
+            this.hosts[&key.host].client.attach(key.pane);
         }
         for (leaf, slot) in &this.slots {
             if this.workspace.leaves[leaf].pane.is_none() && !restored.spawn.contains(leaf) {
                 slot.view.update(cx, |view, cx| view.exited(None, cx));
             }
         }
-        if cx.global::<SettingsStore>().settings().window.resume_sessions {
-            // The session list decides how each one resumes, so they wait for it.
-            this.to_resume =
-                this.workspace.finished_leaves().into_iter().filter(|leaf| !restored.spawn.contains(leaf)).collect();
+        // The session list decides how each one resumes, so they wait for it.
+        let finished = this.workspace.finished_leaves().into_iter().filter(|leaf| !restored.spawn.contains(leaf));
+        match resume {
+            Resume::Nothing => {}
+            Resume::Finished => this.to_resume = finished.collect(),
+            Resume::Only(only) => this.to_resume = finished.filter(|leaf| only.contains(leaf)).collect(),
         }
         for leaf in restored.spawn {
-            this.spawn_leaf(leaf, None, cx);
+            this.spawn_leaf(leaf, None, window, cx);
+        }
+        // Restored leaves of SSH hosts wait for the user: their panes say "Not connected".
+        let remote: HashSet<HostId> =
+            this.workspace.leaves.values().filter(|leaf| !leaf.host.is_local()).map(|leaf| leaf.host.clone()).collect();
+        for host in remote {
+            this.host_states.entry(host.clone()).or_insert(HostState::NotConnected);
+            this.refresh_host_cards(&host, cx);
         }
         this.focus_current(window, cx);
         // Every connection starts with the GUI's colors: the daemon outlives the GUI.
@@ -355,6 +526,48 @@ impl WorkspaceView {
         this
     }
 
+    /// A version was found at the start path.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn installed_version(&mut self, version: Version, cx: &mut Context<Self>) {
+        self.installed = Some(version);
+        cx.notify();
+    }
+
+    /// The update notice, if anything is older than the newest version known.
+    fn update_notice(&self) -> Option<Update> {
+        let running = Version::parse(protocol::build::VERSION)?;
+        // Only this machine's sessions end with a restart: remote hosts keep running.
+        let live = self.workspace.leaves.values().filter(|leaf| leaf.host.is_local() && leaf.pane.is_some()).count();
+        version::update(running, self.daemon_version, self.installed, live)
+    }
+
+    /// Restart and update: Stop all when the daemon is older, start the new GUI, quit.
+    fn restart_and_update(&mut self, cx: &mut Context<Self>) {
+        let (Some(update), Some(path)) = (self.update_notice(), self.start_path.clone()) else { return };
+        // Nothing is stopped unless the file there really is the new version (not half written, not older).
+        if !update_watch::probe(&path, update_watch::PROBE_TIMEOUT).is_some_and(|version| version >= update.target) {
+            self.update_error =
+                Some(format!("Could not start {}: it does not report version {}", path.display(), update.target));
+            cx.notify();
+            return;
+        }
+        if update.restart_daemon {
+            self.local_client().stop_all_and_wait(Duration::from_secs(2));
+            // The new GUI must not connect to the dying daemon: wait until it has let go of its lock.
+            let lock = Paths::for_profile(&current_profile()).lock_file;
+            if !update_watch::wait_for_lock_free(&lock, Duration::from_secs(5)) {
+                tracing::warn!("the daemon was still running 5 s after Stop all; starting the new window anyway");
+            }
+        }
+        match update_watch::restart_command(&path, update.restart_daemon).spawn() {
+            Ok(_) => cx.quit(),
+            Err(err) => {
+                self.update_error = Some(format!("Could not start {}: {err}", path.display()));
+                cx.notify();
+            }
+        }
+    }
+
     /// Take over what the settings say that is not drawn by `render`: pane colors, the daemon's palette, and the
     /// alert threshold.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
@@ -363,28 +576,195 @@ impl WorkspaceView {
             slot.view.update(cx, |view, cx| view.apply_theme(cx));
         }
         if self.sent_palette != Some(preset) {
-            self.client.set_palette(PaletteColors::from(terminal_palette(preset)));
+            for conn in self.hosts.values() {
+                conn.client.set_palette(PaletteColors::from(terminal_palette(preset)));
+            }
             self.sent_palette = Some(preset);
         }
-        let settings = cx.global::<SettingsStore>().settings();
-        self.dirs = ClaudeDirs::from_settings(settings, self.daemon_dir.as_deref(), std::env::home_dir().as_deref());
+        let settings = cx.global::<SettingsStore>().settings().clone();
+        self.ssh_hosts = settings.ssh_hosts.clone();
+        // A host that left the settings is forgotten: no connection, no timer, no attempt, and its panes say so.
+        let listed: HashSet<String> = self.ssh_hosts.iter().map(|host| host.name.clone()).collect();
+        let removed: Vec<HostId> = self
+            .host_states
+            .iter()
+            .filter(|(host, state)| {
+                !listed.contains(host.name()) && !self.seam_hosts.contains(*host) && **state != HostState::NotConnected
+            })
+            .map(|(host, _)| host.clone())
+            .collect();
+        for host in removed {
+            self.forget_host(&host, cx);
+        }
+        self.retries.retain(|host, _| listed.contains(host.name()));
+        // Added or removed hosts change what the cards of their restored leaves say, whatever their state.
+        let remote: HashSet<HostId> =
+            self.workspace.leaves.values().filter(|leaf| !leaf.host.is_local()).map(|leaf| leaf.host.clone()).collect();
+        for host in remote {
+            self.refresh_host_cards(&host, cx);
+        }
+        self.dirs = ClaudeDirs::from_settings(&settings, self.daemon_dir.as_deref(), std::env::home_dir().as_deref());
         let configured: Vec<PathBuf> = if settings.claude_dirs.is_empty() {
             Vec::new()
         } else {
             self.dirs.dirs.iter().map(|dir| dir.path.clone()).collect()
         };
         if self.sent_dirs.as_ref() != Some(&configured) {
-            self.client.set_claude_dirs(configured.clone());
+            self.local_client().set_claude_dirs(configured.clone());
             self.sent_dirs = Some(configured);
         }
         let seconds = cx.global::<SettingsStore>().settings().alerts.finished_after_seconds;
         self.attention.set_finished_after_ms(u64::from(seconds) * 1000);
+        self.publish_hosts(cx);
         cx.notify();
+    }
+
+    /// Close the shared ssh connection kept for `host`'s connect, if any: `keep_sessions` after a good connect (the
+    /// daemon connection runs through it and keeps it), else it exits now.
+    fn close_share(&mut self, host: &HostId, keep_sessions: bool) {
+        let Some(share) = self.shares.remove(host) else { return };
+        let Some(entry) = self.ssh_hosts.iter().find(|entry| entry.name == host.name()) else {
+            std::thread::spawn(move || share.close("ssh", "", keep_sessions));
+            return;
+        };
+        let target = entry.target.clone();
+        std::thread::spawn(move || share.close("ssh", &target, keep_sessions));
+    }
+
+    /// Take down `host`'s open sign-in dialog and drop its queued questions (each is answered Cancel).
+    fn withdraw_questions(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        self.askpass_queue.retain(|prompt| prompt.host != host.name());
+        if let Some((view, _)) = &self.askpass
+            && view.read(cx).host() == host.name()
+        {
+            view.update(cx, |view, cx| view.cancel(cx));
+        }
+    }
+
+    /// `host` is no longer in `sshHosts`: drop its connection, retry timer, attempt and questions, and show it as not
+    /// connected.
+    fn forget_host(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        self.retries.remove(host);
+        if let Some((_, handle)) = self.attempts.remove(host) {
+            handle.cancel();
+        }
+        self.close_share(host, false);
+        self.withdraw_questions(host, cx);
+        self.hosts.remove(host);
+        for (id, leaf) in &self.workspace.leaves {
+            if &leaf.host == host
+                && let Some(slot) = self.slots.get(id)
+            {
+                slot.view.update(cx, |view, _| view.set_client(None));
+            }
+        }
+        self.set_host_state(host, HostState::NotConnected, cx);
+    }
+
+    /// Settings renamed SSH host `from` to `to`: its leaves, daemon instance and waiting state move to the new name. A
+    /// connected host was dropped when the old name left `sshHosts`; `reconnect` connects it again under the new one
+    /// (its panes reattach, its sessions are listed again).
+    fn host_renamed(
+        &mut self,
+        from: &HostId,
+        to: &HostId,
+        reconnect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+        // Refused before anything is touched: the old host stays connected.
+        if let Err(error) = self.workspace.rename_host(from, to) {
+            tracing::warn!("host rename refused: {error}");
+            return;
+        }
+        self.forget_host(from, cx);
+        // The leaves already carry the new name: they lose the old connection too.
+        for (id, leaf) in &self.workspace.leaves {
+            if leaf.host == *to
+                && let Some(slot) = self.slots.get(id)
+            {
+                slot.view.update(cx, |view, _| view.set_client(None));
+            }
+        }
+        self.host_states.remove(from);
+        if let Some(waiting) = self.queued.remove(from) {
+            self.queued.entry(to.clone()).or_default().extend(waiting);
+        }
+        for killed in &mut self.killed_offline {
+            if killed.0 == *from {
+                killed.0 = to.clone();
+            }
+        }
+        for open in self.pending_opens.values_mut() {
+            if open.host == *from {
+                open.host = to.clone();
+            }
+        }
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(from, Vec::new(), cx));
+        self.attention.reset(from, &[]);
+        self.set_host_state(to, HostState::NotConnected, cx);
+        self.save(cx);
+        if reconnect {
+            self.connect_host(to, true, window, cx);
+        }
+    }
+
+    /// Settings removed SSH host `host`: it is disconnected and its panes leave the layout. Nothing on the remote is
+    /// touched.
+    fn host_removed(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        self.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+        self.forget_host(host, cx);
+        let leaves: Vec<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| leaf.host == *host).map(|(id, _)| *id).collect();
+        self.workspace.remove_host(host);
+        for leaf in leaves {
+            self.slots.remove(&leaf);
+            self.marked_unread.remove(&leaf);
+            self.unseen.remove(&leaf);
+            self.pending.retain(|_, waiting| *waiting != leaf);
+        }
+        self.queued.remove(host);
+        self.killed_offline.retain(|killed| killed.0 != *host);
+        self.pending_opens.retain(|_, open| open.host != *host);
+        self.host_states.remove(host);
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+        self.attention.reset(host, &[]);
+        self.sync_unseen(cx);
+        self.focus_current(window, cx);
+        self.save(cx);
+        cx.notify();
+    }
+
+    /// Tell the Settings page where each listed host stands.
+    fn publish_hosts(&self, cx: &mut Context<Self>) {
+        let statuses: HashMap<String, HostStatus> = self
+            .ssh_hosts
+            .iter()
+            .map(|entry| {
+                let host = HostId::named(&entry.name);
+                let state = self.host_state(&host);
+                let panes = self.workspace.leaves.values().filter(|leaf| leaf.host == host).count();
+                (entry.name.clone(), HostStatus { label: state.label(), dot: state.dot(), panes })
+            })
+            .collect();
+        let listed: HashSet<&str> = self.ssh_hosts.iter().map(|entry| entry.name.as_str()).collect();
+        let taken: HashSet<String> = self
+            .workspace
+            .host_names()
+            .into_iter()
+            .filter(|host| !host.is_local() && !listed.contains(host.name()))
+            .map(|host| host.name().to_string())
+            .collect();
+        let next = HostStatuses { hosts: statuses, taken };
+        if cx.try_global::<HostStatuses>().is_none_or(|known| *known != next) {
+            cx.set_global(next);
+        }
     }
 
     fn add_slot(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let launch = self.workspace.leaves[&leaf].launch.clone();
-        let client = self.client.clone();
+        let client = self.client(&self.workspace.leaves[&leaf].host).cloned();
         let view = cx.new(|cx| TerminalView::new(client, launch, window, cx));
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &PaneEvent, window, cx| {
             this.on_pane_event(leaf, *event, window, cx)
@@ -392,26 +772,342 @@ impl WorkspaceView {
         self.slots.insert(leaf, Slot { view, _subscription: subscription });
     }
 
-    fn spawn_leaf(&mut self, leaf: NodeId, cwd_from: Option<PaneId>, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&leaf) else { return };
-        let (cols, rows) = slot.view.read(cx).grid_size();
+    fn spawn_leaf(&mut self, leaf: NodeId, cwd_from: Option<PaneKey>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.slots.get(&leaf).map(|slot| slot.view.clone()) else { return };
+        let host = self.workspace.leaves[&leaf].host.clone();
+        let Some(client) = self.client(&host).cloned() else {
+            if self.ssh_hosts.iter().any(|entry| entry.name == host.name()) {
+                // A listed SSH host: the leaf waits for the connection, which starts now if it can.
+                let waiting = self.queued.entry(host.clone()).or_default();
+                if !waiting.contains(&leaf) {
+                    waiting.push(leaf);
+                }
+                self.refresh_host_cards(&host, cx);
+                if self.host_state(&host).can_connect() {
+                    self.connect_host(&host, true, window, cx);
+                }
+                return;
+            }
+            let message = format!("Host {} is not connected", host.name());
+            view.update(cx, |view, cx| view.failed(message, cx));
+            return;
+        };
+        let (cols, rows) = view.read(cx).grid_size();
         let scrollback = cx.global::<SettingsStore>().settings().window.scrollback;
+        // Pane ids belong to one daemon: only a pane of the same host can lend its directory.
+        let cwd_from = cwd_from.filter(|key| key.host == host).map(|key| key.pane);
         self.next_request += 1;
         self.pending.insert(self.next_request, leaf);
-        self.client
-            .spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
+        client.spawn(self.next_request, self.workspace.leaves[&leaf].launch.request(cwd_from, cols, rows, scrollback));
     }
 
-    fn on_events(&mut self, events: Vec<ClientEvent>, window: &mut Window, cx: &mut Context<Self>) {
+    /// The state of `host`: connected for this machine, else what the lifecycle recorded.
+    fn host_state(&self, host: &HostId) -> HostState {
+        if host.is_local() {
+            return HostState::Connected;
+        }
+        self.host_states.get(host).cloned().unwrap_or(HostState::NotConnected)
+    }
+
+    /// Record `host`'s state and show it on the host's panes.
+    fn set_host_state(&mut self, host: &HostId, state: HostState, cx: &mut Context<Self>) {
+        self.host_states.insert(host.clone(), state);
+        self.push_launcher_hosts(cx);
+        self.push_recents(cx);
+        self.refresh_host_cards(host, cx);
+        self.sync_panes(cx);
+        cx.notify();
+    }
+
+    /// Tell an open launcher where the hosts' connections stand.
+    fn push_launcher_hosts(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.launcher {
+            let hosts = self.launcher_hosts();
+            view.update(cx, |view, cx| view.set_hosts(hosts, cx));
+        }
+    }
+
+    /// Put the card of `host`'s state on every pane of the host (or take it off when connected).
+    fn refresh_host_cards(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        let mut card = self.host_state(host).card(host.name());
+        // A host that is not in `sshHosts` cannot be connected: its card has no button (and a host that was never
+        // connected says it is not listed).
+        if !self.ssh_hosts.iter().any(|entry| entry.name == host.name())
+            && let Some(card) = &mut card
+        {
+            if self.host_state(host) == HostState::NotConnected {
+                card.title = "Not listed".into();
+                card.detail = format!("{} is not listed in sshHosts.", host.name());
+            }
+            card.button = None;
+        }
+        for (id, leaf) in &self.workspace.leaves {
+            if &leaf.host == host
+                && let Some(slot) = self.slots.get(id)
+            {
+                slot.view.update(cx, |view, cx| view.set_host_card(card.clone(), cx));
+            }
+        }
+    }
+
+    /// Start an attempt to connect `host`: interactive when the user asked (sign-in dialogs may open), else a
+    /// reconnect retry (never prompts, and only while the host is still `Reconnecting`).
+    fn connect_host(&mut self, host: &HostId, interactive: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned() else {
+            // Not (or no longer) in `sshHosts`: nothing to connect to, and no timer left running.
+            self.retries.remove(host);
+            if self.host_state(host) != HostState::Connected {
+                let reason = format!("{} is not listed in sshHosts", host.name());
+                self.set_host_state(host, HostState::Failed { reason }, cx);
+            }
+            return;
+        };
+        let state = self.host_state(host);
+        let attempt = if interactive {
+            if !state.can_connect() {
+                return;
+            }
+            // The user got here first: a pending retry timer must not fire.
+            self.retries.remove(host);
+            self.set_host_state(host, state.next(HostEvent::Connect), cx);
+            Attempt::Interactive {
+                prompts: self.askpass_prompts.clone(),
+                runtime_dir: Paths::for_profile(&current_profile()).runtime_dir,
+            }
+        } else {
+            if !matches!(state, HostState::Reconnecting { .. }) {
+                return;
+            }
+            Attempt::Background
+        };
+        // Only a user's connect rides on a wizard's shared connection.
+        let share = if matches!(attempt, Attempt::Interactive { .. }) { self.shares.get(host).cloned() } else { None };
+        let handle = AttemptHandle::default();
+        self.next_attempt += 1;
+        let number = self.next_attempt;
+        self.attempts.insert(host.clone(), (number, handle.clone()));
+        let (host, spec) = (
+            host.clone(),
+            SshHostSpec { name: entry.name, target: entry.target, command: entry.command, auth: entry.auth, share },
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ssh_connect("ssh", &spec, attempt, &handle, HANDSHAKE_TIMEOUT) })
+                .await;
+            let _ = this.update_in(cx, |view, window, cx| view.on_attempt(&host, number, result, window, cx));
+        })
+        .detach();
+    }
+
+    /// The user cancelled the attempt that is connecting `host`: ssh is killed, its questions are withdrawn and the
+    /// host is back to not connected (leaves waiting for it stay queued, with the Not connected card).
+    fn cancel_connecting(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        let state = self.host_state(host);
+        if state != HostState::Connecting {
+            return;
+        }
+        if let Some((_, handle)) = self.attempts.remove(host) {
+            handle.cancel();
+        }
+        self.retries.remove(host);
+        self.restart_retries.remove(host);
+        self.close_share(host, false);
+        self.withdraw_questions(host, cx);
+        self.set_host_state(host, state.next(HostEvent::Cancel), cx);
+    }
+
+    /// An attempt ended: connected, or a state that says why not (and a retry while reconnecting).
+    fn on_attempt(
+        &mut self,
+        host: &HostId,
+        number: u64,
+        result: Result<Connection, FailKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The attempt was cancelled, or replaced by a newer one: its result means nothing now.
+        if self.attempts.get(host).map(|(current, _)| *current) != Some(number) {
+            return;
+        }
+        self.attempts.remove(host);
+        match result {
+            Ok(connection) => {
+                self.close_share(host, true);
+                self.host_connected(host, connection, window, cx)
+            }
+            Err(kind) => {
+                // Whatever ended it, a question of this attempt still on screen is stale.
+                self.withdraw_questions(host, cx);
+                // Right after an update's restart the old daemon may still answer: try again shortly.
+                if matches!(kind, FailKind::UpdateNeeded { .. })
+                    && let Some(left) = self.restart_retries.get_mut(host)
+                    && *left > 0
+                {
+                    *left -= 1;
+                    let state = self.host_state(host);
+                    self.set_host_state(host, state.next(HostEvent::Cancel), cx);
+                    let host_for_task = host.clone();
+                    let task = cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_secs(1)).await;
+                        let _ =
+                            this.update_in(cx, |view, window, cx| view.connect_host(&host_for_task, true, window, cx));
+                    });
+                    self.retries.insert(host.clone(), task);
+                    return;
+                }
+                self.restart_retries.remove(host);
+                self.close_share(host, false);
+                let next = self.host_state(host).next(HostEvent::AttemptFailed(kind));
+                self.set_host_state(host, next.clone(), cx);
+                if let HostState::Reconnecting { attempt } = next {
+                    self.schedule_retry(host, attempt, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Run retry `attempt` of `host` after its delay; replaces (cancels) a timer still pending.
+    fn schedule_retry(&mut self, host: &HostId, attempt: u8, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(delay) = reconnect_delay(attempt) else { return };
+        let host_for_task = host.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update_in(cx, |view, window, cx| view.connect_host(&host_for_task, false, window, cx));
+        });
+        self.retries.insert(host.clone(), task);
+    }
+
+    /// `host` is connected (first time, or again after a drop): reattach its panes, adopt what runs there, and spawn
+    /// the leaves that were waiting for it.
+    fn host_connected(&mut self, host: &HostId, connection: Connection, window: &mut Window, cx: &mut Context<Self>) {
+        let Connection { client, events, instance, panes, .. } = connection;
+        self.retries.remove(host);
+        self.restart_retries.remove(host);
+        // Panes closed while the host was away are killed now, and not adopted as tabs again.
+        let (panes, to_kill) = without_killed_offline(&mut self.killed_offline, host, &instance, &panes);
+        for pane in to_kill {
+            client.kill(pane);
+        }
+        self.hosts.insert(
+            host.clone(),
+            HostConn {
+                client: client.clone(),
+                connected: true,
+                _events: Self::listen(host.clone(), events, window, cx),
+            },
+        );
+        let state = self.host_state(host).next(HostEvent::Established);
+        self.set_host_state(host, state, cx); // takes the cards off
+        let before: HashSet<NodeId> = self.workspace.leaves.keys().copied().collect();
+        let live = HostLive { host: host.clone(), instance: &instance, panes: &panes };
+        let attach = reconcile(&mut self.workspace, &live);
+        // Tabs adopted from the host's live panes need slots.
+        let adopted: Vec<NodeId> = self.workspace.leaves.keys().copied().filter(|id| !before.contains(id)).collect();
+        for leaf in adopted {
+            self.add_slot(leaf, window, cx);
+        }
+        // Every pane of the host uses the new connection (also the dead ones, for when they run again).
+        let leaves: Vec<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| &leaf.host == host).map(|(id, _)| *id).collect();
+        for leaf in &leaves {
+            if let Some(slot) = self.slots.get(leaf) {
+                let client = client.clone();
+                slot.view.update(cx, |view, _| view.set_client(Some(client)));
+            }
+        }
+        let waiting = self.queued.remove(host).unwrap_or_default();
+        for (leaf, key) in &attach {
+            let launch = self.workspace.leaves[leaf].launch.clone();
+            self.slots[leaf].view.update(cx, |view, cx| view.attach(key.pane, launch, cx));
+            client.attach(key.pane);
+        }
+        // Leaves of this host that lost their pane show Continue / Restart (except the ones about to be spawned).
+        for leaf in &leaves {
+            if self.workspace.leaves[leaf].pane.is_none()
+                && !waiting.contains(leaf)
+                && let Some(slot) = self.slots.get(leaf)
+            {
+                slot.view.update(cx, |view, cx| view.exited(None, cx));
+            }
+        }
+        for leaf in waiting {
+            self.spawn_leaf(leaf, None, window, cx);
+        }
+        if let Some(preset) = self.sent_palette {
+            client.set_palette(PaletteColors::from(terminal_palette(preset)));
+        }
+        self.sync_panes(cx);
+        self.focus_current(window, cx);
+        self.save(cx);
+    }
+
+    /// An established connection of SSH host `host` ended: its panes show the state, and retries begin.
+    fn host_dropped(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host_state(host) != HostState::Connected {
+            return; // a stale event of an older connection
+        }
+        if let Some(conn) = self.hosts.get_mut(host) {
+            conn.connected = false;
+        }
+        self.take_overs.retain(|(taking, _), _| taking != host);
+        if self.search_answers.remove(host).is_some() {
+            self.push_search_hits(cx);
+            self.push_search_state(cx);
+        }
+        for (id, leaf) in &self.workspace.leaves {
+            if &leaf.host == host
+                && let Some(slot) = self.slots.get(id)
+            {
+                slot.view.update(cx, |view, cx| view.disconnected(cx));
+            }
+        }
+        if !self.ssh_hosts.iter().any(|entry| entry.name == host.name()) {
+            // Not in `sshHosts` (the debug seam): there is no ssh command to retry with.
+            self.set_host_state(host, HostState::Disconnected, cx);
+            return;
+        }
+        let next = HostState::Connected.next(HostEvent::Dropped);
+        self.set_host_state(host, next.clone(), cx);
+        if let HostState::Reconnecting { attempt } = next {
+            self.schedule_retry(host, attempt, window, cx);
+        }
+    }
+
+    /// Another Gantry took over the daemon of SSH host `host`: no retry (two windows would fight over it); its panes
+    /// say so and wait for the user's Reconnect.
+    fn host_taken_over(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        if self.host_state(host) != HostState::Connected {
+            return;
+        }
+        if let Some(conn) = self.hosts.get_mut(host) {
+            conn.connected = false;
+        }
+        self.take_overs.retain(|(taking, _), _| taking != host);
+        for (id, leaf) in &self.workspace.leaves {
+            if &leaf.host == host
+                && let Some(slot) = self.slots.get(id)
+            {
+                slot.view.update(cx, |view, cx| view.disconnected(cx));
+            }
+        }
+        self.set_host_state(host, HostState::Connected.next(HostEvent::TakenOver), cx);
+    }
+
+    fn on_events(&mut self, host: &HostId, events: Vec<ClientEvent>, window: &mut Window, cx: &mut Context<Self>) {
         for event in events {
             match &event {
                 ClientEvent::Output { pane, .. } | ClientEvent::Resync { pane, .. } => {
-                    if let Some(slot) = self.workspace.leaf_for_pane(*pane).and_then(|leaf| self.slots.get(&leaf)) {
+                    if let Some(slot) = self
+                        .workspace
+                        .leaf_for_pane(&PaneKey::new(host.clone(), *pane))
+                        .and_then(|leaf| self.slots.get(&leaf))
+                    {
                         slot.view.update(cx, |view, cx| view.on_event(&event, cx));
                     }
                 }
                 ClientEvent::Exited { pane, code } => {
-                    if let Some(leaf) = self.workspace.pane_exited(*pane) {
+                    if let Some(leaf) = self.workspace.pane_exited(&PaneKey::new(host.clone(), *pane)) {
                         self.slots[&leaf].view.update(cx, |view, cx| view.exited(Some(*code), cx));
                         self.save(cx);
                     }
@@ -421,13 +1117,19 @@ impl WorkspaceView {
                         self.workspace.pane_started(leaf, *pane, cwd.clone());
                         let launch = self.workspace.leaves[&leaf].launch.clone();
                         self.slots[&leaf].view.update(cx, |view, cx| view.attach(*pane, launch, cx));
-                        if self.workspace.focused() == Some(leaf) {
-                            self.client.focus(*pane);
+                        if self.workspace.focused() == Some(leaf)
+                            && let Some(client) = self.client(host)
+                        {
+                            client.focus(*pane);
                         }
                         self.save(cx);
                     }
                     // The leaf was closed while its process was starting.
-                    None => self.client.kill(*pane),
+                    None => {
+                        if let Some(client) = self.client(host) {
+                            client.kill(*pane);
+                        }
+                    }
                 },
                 ClientEvent::SpawnFailed { request, error } => {
                     if let Some(leaf) = self.pending.remove(request) {
@@ -435,46 +1137,90 @@ impl WorkspaceView {
                     }
                 }
                 ClientEvent::Sessions { sessions } => {
-                    self.track_sessions(sessions, cx);
-                    self.attention.reset(sessions);
+                    self.track_sessions(host, sessions, cx);
+                    if self.recents.is_some()
+                        && !self.search_query.is_empty()
+                        && !self.search_answers.contains_key(host)
+                    {
+                        // The host connected while a search is on: ask it the same query.
+                        if let Some(client) = self.client(host) {
+                            client.search(self.search_request, &self.search_query, SEARCH_LIMIT);
+                        }
+                        self.search_answers.insert(host.clone(), Default::default());
+                        self.push_search_hits(cx);
+                    }
+                    self.attention.reset(host, sessions);
                     let sessions = sessions.clone();
-                    self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(sessions, cx));
-                    self.resume_finished(cx);
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
+                    self.push_recents(cx);
+                    self.resume_finished(window, cx);
                 }
                 ClientEvent::SessionsChanged { upserted, removed } => {
-                    self.track_sessions(upserted, cx);
-                    self.drop_marks_of_changed(upserted, cx);
-                    let alerts = self.attention.update(upserted, removed);
+                    self.track_sessions(host, upserted, cx);
+                    self.drop_marks_of_changed(host, upserted, cx);
+                    let alerts = self.attention.update(host, upserted, removed);
                     let upserted = upserted.clone();
-                    self.sidebar.update(cx, |sidebar, cx| sidebar.apply(upserted, removed, cx));
+                    self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
                     for alert in alerts {
                         self.raise(alert, window, cx);
                     }
                 }
                 ClientEvent::TakeOverResult { session, outcome } => {
-                    self.on_take_over(session.clone(), outcome.clone(), window, cx)
+                    self.on_take_over(host.clone(), session.clone(), outcome.clone(), window, cx)
                 }
                 ClientEvent::ContainerFound { request, container } => {
                     self.on_container_found(*request, container.clone(), window, cx)
                 }
                 ClientEvent::SearchResults { request, hits } => {
-                    if let Some((view, _)) = &self.recents {
-                        let hits = hits.clone();
-                        view.update(cx, |view, cx| view.set_hits(*request, hits, cx));
+                    if *request == self.search_request {
+                        let answer = self.search_answers.entry(host.clone()).or_default();
+                        (answer.hits, answer.answered) = (hits.clone(), true);
+                        self.push_search_hits(cx);
                     }
                 }
                 ClientEvent::SearchIndexing { done, total } => {
-                    self.search_indexing = (done < total).then(|| (done * 100 / (*total).max(1)) as u8);
+                    let progress = (done < total).then(|| (done * 100 / (*total).max(1)) as u8);
+                    self.search_answers.entry(host.clone()).or_default().progress = progress;
                     self.push_search_state(cx);
                 }
                 ClientEvent::SearchUnavailable { .. } => {
-                    self.search_unavailable = true;
+                    self.search_answers.entry(host.clone()).or_default().unavailable = true;
+                    self.push_search_hits(cx);
                     self.push_search_state(cx);
                 }
-                ClientEvent::TakenOver => cx.quit(),
-                ClientEvent::Disconnected => {
-                    for slot in self.slots.values() {
-                        slot.view.update(cx, |view, cx| view.disconnected(cx));
+                ClientEvent::DirListing { request, dirs, .. } => {
+                    if let Some((view, _)) = &self.launcher {
+                        let dirs = dirs.clone();
+                        view.update(cx, |view, cx| view.set_listing(*request, dirs, cx));
+                    }
+                }
+                ClientEvent::DirListingFailed { request, reason } => {
+                    if let Some((view, _)) = &self.launcher {
+                        let reason = reason.clone();
+                        view.update(cx, |view, cx| view.set_listing_failed(*request, reason, cx));
+                    }
+                }
+                ClientEvent::TakenOver if !host.is_local() => self.host_taken_over(host, cx),
+                ClientEvent::Disconnected if !host.is_local() => self.host_dropped(host, window, cx),
+                ClientEvent::TakenOver | ClientEvent::Disconnected => {
+                    if matches!(event, ClientEvent::TakenOver) {
+                        cx.quit();
+                        continue;
+                    }
+                    if let Some(conn) = self.hosts.get_mut(host) {
+                        conn.connected = false;
+                    }
+                    let leaves: Vec<NodeId> = self
+                        .workspace
+                        .leaves
+                        .iter()
+                        .filter(|(_, leaf)| &leaf.host == host)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for leaf in leaves {
+                        if let Some(slot) = self.slots.get(&leaf) {
+                            slot.view.update(cx, |view, cx| view.disconnected(cx));
+                        }
                     }
                 }
             }
@@ -483,11 +1229,11 @@ impl WorkspaceView {
     }
 
     /// Leaves follow the session their pane runs (it changes on `/clear`).
-    fn track_sessions(&mut self, sessions: &[SessionInfo], cx: &mut Context<Self>) {
+    fn track_sessions(&mut self, host: &HostId, sessions: &[SessionInfo], cx: &mut Context<Self>) {
         let mut changed = false;
         for session in sessions {
             if let SessionState::Managed { pane } = session.state {
-                changed |= self.workspace.session_seen(pane, &session.id);
+                changed |= self.workspace.session_seen(&PaneKey::new(host.clone(), pane), &session.id);
             }
         }
         if changed {
@@ -496,14 +1242,14 @@ impl WorkspaceView {
     }
 
     /// Drop the hand-made unread mark of every session whose status is no longer Idle.
-    fn drop_marks_of_changed(&mut self, sessions: &[SessionInfo], cx: &mut Context<Self>) {
+    fn drop_marks_of_changed(&mut self, host: &HostId, sessions: &[SessionInfo], cx: &mut Context<Self>) {
         if self.marked_unread.is_empty() {
             return;
         }
         for session in sessions {
             let SessionState::Managed { pane } = session.state else { continue };
-            let Some(leaf) = self.workspace.leaf_for_pane(pane) else { continue };
-            if status_tone(session.status.as_ref(), false) != Tone::Idle && self.marked_unread.remove(&leaf) {
+            let Some(leaf) = self.workspace.leaf_for_pane(&PaneKey::new(host.clone(), pane)) else { continue };
+            if status_tone(session.status.as_ref(), Unseen::No) != Tone::Idle && self.marked_unread.remove(&leaf) {
                 self.unseen.remove(&leaf);
                 self.sync_unseen(cx);
             }
@@ -512,7 +1258,7 @@ impl WorkspaceView {
 
     /// Raise `alert` on the channels the settings allow for its pane (badge, notification, sound).
     fn raise(&mut self, alert: Alert, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(leaf) = self.workspace.leaf_for_pane(alert.pane) else { return };
+        let Some(leaf) = self.workspace.leaf_for_pane(&alert.pane) else { return };
         let settings = cx.global::<SettingsStore>().settings().clone();
         let visible = self.workspace.is_visible(leaf);
         let channels = alert_channels(&settings.alerts, &alert.kind, visible, window.is_window_active());
@@ -525,7 +1271,7 @@ impl WorkspaceView {
             return;
         }
         let sidebar = self.sidebar.read(cx);
-        let session = sidebar.sessions().get(&alert.session);
+        let session = sidebar.sessions().get(&alert.pane.host, &alert.session);
         let title = session.map(|session| session_title(session).to_string()).unwrap_or_default();
         let last_prompt = session.and_then(|session| session.last_prompt.as_deref());
         let (summary, body) = describe(&alert.kind, &title, last_prompt);
@@ -548,9 +1294,21 @@ impl WorkspaceView {
 
     /// Tell the sidebar which sessions carry the unseen badge.
     fn sync_unseen(&self, cx: &mut Context<Self>) {
-        let sessions: HashSet<String> =
-            self.unseen.keys().filter_map(|leaf| self.workspace.leaves.get(leaf)?.session.clone()).collect();
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, cx));
+        let session_of = |leaf: &NodeId| self.workspace.leaves.get(leaf)?.session.clone();
+        let sessions: HashSet<String> = self.unseen.keys().filter_map(session_of).collect();
+        let marked: HashSet<String> = self.marked_unread.iter().filter_map(session_of).collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_unseen(sessions, marked, cx));
+    }
+
+    /// Why `leaf`'s result is unseen, if it is.
+    fn unseen_of(&self, leaf: NodeId) -> Unseen {
+        if self.marked_unread.contains(&leaf) {
+            Unseen::Marked
+        } else if self.unseen.contains_key(&leaf) {
+            Unseen::Alert
+        } else {
+            Unseen::No
+        }
     }
 
     /// The badge of the Claude config dir `leaf` runs in, when two or more are configured.
@@ -562,16 +1320,25 @@ impl WorkspaceView {
         let recorded = entry
             .session
             .as_deref()
-            .and_then(|id| self.sidebar.read(cx).sessions().get(id))
+            .and_then(|id| self.sidebar.read(cx).sessions().get(&entry.host, id))
             .and_then(|info| info.claude_dir.clone());
         let path = recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone());
         dir_badge_for(cx.global::<SettingsStore>().settings(), path.as_deref())
     }
 
+    /// Whether `leaf` runs on an SSH host that is not connected (it gets the Closed look).
+    fn leaf_offline(&self, leaf: NodeId) -> bool {
+        self.workspace
+            .leaves
+            .get(&leaf)
+            .is_some_and(|leaf| !leaf.host.is_local() && self.host_state(&leaf.host) != HostState::Connected)
+    }
+
     /// The color of the project `leaf` belongs to (its session's directory, else the pane's), if project colors are on.
     fn leaf_project_color(&self, leaf: NodeId, cx: &App) -> Option<u32> {
         let cwd = self.leaf_cwd(leaf, cx)?;
-        theme(cx).project(&self.sidebar.read(cx).project_of(&cwd))
+        let host = self.workspace.leaves.get(&leaf)?.host.clone();
+        theme(cx).project(&self.sidebar.read(cx).project_of(&host, &cwd))
     }
 
     /// The directory `leaf` works in: its session's, else the pane's.
@@ -582,33 +1349,44 @@ impl WorkspaceView {
             entry
                 .session
                 .as_deref()
-                .and_then(|id| sessions.get(id))
+                .and_then(|id| sessions.get(&entry.host, id))
                 .map_or(&entry.launch.cwd, |info| &info.cwd)
                 .clone(),
         )
     }
 
     /// Start `launch` in the finished `leaf`.
-    fn start_leaf(&mut self, leaf: NodeId, launch: PaneLaunch, cx: &mut Context<Self>) {
+    fn start_leaf(&mut self, leaf: NodeId, launch: PaneLaunch, window: &mut Window, cx: &mut Context<Self>) {
         let Some(slot) = self.slots.get(&leaf) else { return };
         if let Some(entry) = self.workspace.leaves.get_mut(&leaf) {
             entry.launch = launch.clone();
         }
         slot.view.update(cx, |view, cx| view.restarting(launch, cx));
-        self.spawn_leaf(leaf, None, cx);
+        self.spawn_leaf(leaf, None, window, cx);
         self.save(cx);
     }
 
     /// Start what the last run left finished, once the session list is in. A session that runs elsewhere stays a card.
-    fn resume_finished(&mut self, cx: &mut Context<Self>) {
+    fn resume_finished(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut waiting = Vec::new();
         for leaf in std::mem::take(&mut self.to_resume) {
             let Some(entry) = self.workspace.leaves.get(&leaf).filter(|entry| entry.pane.is_none()) else { continue };
+            // Leaves of SSH hosts wait for Continue.
+            if !entry.host.is_local() {
+                continue;
+            }
+            // Each leaf waits for the session list of its own host.
+            if !self.sidebar.read(cx).sessions().loaded(&entry.host) {
+                waiting.push(leaf);
+                continue;
+            }
             if let Rerun::Start(launch) =
                 entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref())
             {
-                self.start_leaf(leaf, launch, cx);
+                self.start_leaf(leaf, launch, window, cx);
             }
         }
+        self.to_resume = waiting;
     }
 
     /// Continue / Restart a finished leaf. If its session already runs in another pane, show that one. If it runs
@@ -616,39 +1394,55 @@ impl WorkspaceView {
     fn rerun_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
         let session = entry.session.clone();
+        let host = entry.host.clone();
         match entry.rerun_with(self.sidebar.read(cx).sessions(), &self.dirs, self.daemon_dir.as_deref()) {
-            Rerun::Start(launch) => self.start_leaf(leaf, launch, cx),
-            Rerun::Focus(pane) => {
-                if let Some(running) = self.workspace.leaf_for_pane(pane) {
+            Rerun::Start(launch) => self.start_leaf(leaf, launch, window, cx),
+            Rerun::Focus(key) => {
+                if let Some(running) = self.workspace.leaf_for_pane(&key) {
                     self.focus_leaf(running, window, cx);
                 }
             }
             Rerun::Busy => {
                 let sessions = self.sidebar.read(cx).sessions();
-                let takeable = session.as_deref().and_then(|id| sessions.get(id)).is_some_and(|info| {
+                let takeable = session.as_deref().and_then(|id| sessions.get(&host, id)).is_some_and(|info| {
                     matches!(info.state, SessionState::External { pid: Some(_) }) && info.cwd_exists
                 });
                 if let (true, Some(session)) = (takeable, session) {
-                    self.confirm_take_over(session, TakeOverTarget::Leaf(leaf), window, cx);
+                    self.confirm_take_over(host, session, TakeOverTarget::Leaf(leaf), window, cx);
                 }
             }
         }
     }
 
-    /// Ask before stopping the outside process running `session`; on yes, request it and remember where to resume.
+    /// Ask before stopping the outside process running `session` on `host`; on yes, request it and remember where
+    /// to resume.
     fn confirm_take_over(
         &mut self,
+        host: HostId,
         session: String,
         target: TakeOverTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.take_overs.contains_key(&session) {
+        if self.take_overs.contains_key(&(host.clone(), session.clone())) {
             return;
         }
+        if self.client(&host).is_none() {
+            let message = format!("{} is not connected.", host.name());
+            let answer = window.prompt(PromptLevel::Info, "Cannot take over the session", Some(&message), &["OK"], cx);
+            cx.spawn(async move |_, _| {
+                let _ = answer.await;
+            })
+            .detach();
+            return;
+        }
+        let title = match host.remote_name() {
+            Some(name) => format!("Take over this session on {name}?"),
+            None => "Take over this session?".to_string(),
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Take over this session?",
+            &title,
             Some("Unsent input outside Gantry is lost."),
             &["Take over", "Cancel"],
             cx,
@@ -656,37 +1450,47 @@ impl WorkspaceView {
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
                 let _ = this.update_in(cx, |this, _, _| {
-                    this.client.take_over(&session, false);
-                    this.take_overs.insert(session, target);
+                    if let Some(client) = this.client(&host) {
+                        client.take_over(&session, false);
+                        this.take_overs.insert((host, session), target);
+                    }
                 });
             }
         })
         .detach();
     }
 
-    fn on_take_over(&mut self, session: String, outcome: TakeOverOutcome, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_take_over(
+        &mut self,
+        host: HostId,
+        session: String,
+        outcome: TakeOverOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = (host.clone(), session.clone());
         match outcome {
-            TakeOverOutcome::Exited => match self.take_overs.remove(&session) {
+            TakeOverOutcome::Exited => match self.take_overs.remove(&waiting) {
                 Some(TakeOverTarget::NewPane { cwd, split, container }) => {
                     let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
-                    let launch = self.resume_launch(&session, cwd, container, cx);
-                    self.open_launch(launch, axis, None, window, cx);
+                    let launch = self.resume_launch(&host, &session, cwd, container, cx);
+                    self.open_launch(launch, axis, None, host, window, cx);
                 }
                 Some(TakeOverTarget::Leaf(leaf)) => {
                     let session_dir =
-                        self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.claude_dir.clone());
+                        self.sidebar.read(cx).sessions().get(&host, &session).and_then(|info| info.claude_dir.clone());
                     let launch = self.workspace.leaves.get(&leaf).map(|entry| {
                         entry.rerun_resolved(true, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
                     });
                     if let Some(launch) = launch {
-                        self.start_leaf(leaf, launch, cx);
+                        self.start_leaf(leaf, launch, window, cx);
                         self.focus_leaf(leaf, window, cx);
                     }
                 }
                 None => {}
             },
             TakeOverOutcome::StillRunning => {
-                if !self.take_overs.contains_key(&session) {
+                if !self.take_overs.contains_key(&waiting) {
                     return;
                 }
                 let answer = window.prompt(
@@ -700,16 +1504,18 @@ impl WorkspaceView {
                     let force = answer.await == Ok(0);
                     let _ = this.update_in(cx, |this, _, _| {
                         if force {
-                            this.client.take_over(&session, true);
+                            if let Some(client) = this.client(&waiting.0) {
+                                client.take_over(&waiting.1, true);
+                            }
                         } else {
-                            this.take_overs.remove(&session);
+                            this.take_overs.remove(&waiting);
                         }
                     });
                 })
                 .detach();
             }
             TakeOverOutcome::Failed { error } => {
-                self.take_overs.remove(&session);
+                self.take_overs.remove(&waiting);
                 let answer =
                     window.prompt(PromptLevel::Critical, "Could not take over the session", Some(&error), &["OK"], cx);
                 cx.spawn(async move |_, _| {
@@ -725,6 +1531,21 @@ impl WorkspaceView {
             PaneEvent::Focused => self.focus_leaf(leaf, window, cx),
             PaneEvent::Rerun => self.rerun_leaf(leaf, window, cx),
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
+            PaneEvent::HostAction => {
+                if let Some(host) = self.workspace.leaves.get(&leaf).map(|leaf| leaf.host.clone()) {
+                    let entry = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned();
+                    match (self.host_state(&host), entry) {
+                        (HostState::Connecting, _) => self.cancel_connecting(&host, cx),
+                        (HostState::NotInstalled, Some(entry)) => {
+                            self.open_ssh_wizard(WizardStart::Install(entry), window, cx)
+                        }
+                        (HostState::UpdateNeeded { .. }, Some(entry)) => {
+                            self.open_ssh_wizard(WizardStart::Update(entry), window, cx)
+                        }
+                        _ => self.connect_host(&host, true, window, cx),
+                    }
+                }
+            }
             PaneEvent::TitleChanged => {
                 self.sync_panes(cx);
                 cx.notify()
@@ -734,14 +1555,23 @@ impl WorkspaceView {
 
     /// Open a new Claude or shell pane — as a new tab, or splitting the focused pane along `axis` —
     /// in the focused pane's current directory.
-    fn open(&mut self, claude: bool, axis: Option<Axis>) {
+    fn open(&mut self, claude: bool, axis: Option<Axis>, window: &mut Window, cx: &mut Context<Self>) {
         if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
+        let source = source.filter(|leaf| axis.is_some() || leaf.host.is_local());
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
-        let cwd_from = source.and_then(|leaf| leaf.pane);
-        self.open_new(claude, cwd, axis, cwd_from, None);
+        let cwd_from = source.and_then(|leaf| leaf.key());
+        let host = source.map(|leaf| leaf.host.clone()).unwrap_or_default();
+        if host.is_local() {
+            self.open_new(claude, cwd, axis, cwd_from, host, None);
+        } else {
+            // A split of a remote pane: no container lookup and no local Claude dir or shell settings.
+            let launch =
+                if claude { PaneLaunch::claude(cwd) } else { PaneLaunch::shell(cwd, &ShellSettings::default()) };
+            self.open_launch(launch, axis, cwd_from, host, window, cx);
+        }
     }
 
     /// The Settings tab is the active one (it has no pane to split).
@@ -755,12 +1585,13 @@ impl WorkspaceView {
         claude: bool,
         cwd: PathBuf,
         axis: Option<Axis>,
-        cwd_from: Option<PaneId>,
+        cwd_from: Option<PaneKey>,
+        host: HostId,
         pick: Option<String>,
     ) {
         self.next_request += 1;
-        self.client.find_container(self.next_request, &cwd);
-        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from });
+        self.local_client().find_container(self.next_request, &cwd);
+        self.pending_opens.insert(self.next_request, PendingOpen { claude, pick, cwd, axis, cwd_from, host });
     }
 
     /// Start a new Claude session (or shell) in `cwd`: Claude with the config dir `pick` names, else the one remembered
@@ -782,8 +1613,19 @@ impl WorkspaceView {
     }
 
     /// Resume `session` where it ran: with the command and config dir recorded for it.
-    fn resume_launch(&self, session: &str, cwd: PathBuf, container: Option<PathBuf>, cx: &App) -> PaneLaunch {
-        let session_dir = self.sidebar.read(cx).sessions().get(session).and_then(|info| info.claude_dir.clone());
+    /// A remote session resumes with the plain `claude`: the remote uses its own config dir.
+    fn resume_launch(
+        &self,
+        host: &HostId,
+        session: &str,
+        cwd: PathBuf,
+        container: Option<PathBuf>,
+        cx: &App,
+    ) -> PaneLaunch {
+        if !host.is_local() {
+            return PaneLaunch::resume(session, cwd, None);
+        }
+        let session_dir = self.sidebar.read(cx).sessions().get(host, session).and_then(|info| info.claude_dir.clone());
         PaneLaunch::resume_with(session, cwd, container, session_dir.as_deref(), &self.dirs, self.daemon_dir.as_deref())
     }
 
@@ -792,7 +1634,7 @@ impl WorkspaceView {
         if let Some(name) = &dir_pick {
             self.remember_pick(&dir, name, cx);
         }
-        self.open_new(claude, dir, None, None, dir_pick);
+        self.open_new(claude, dir, None, None, HostId::local(), dir_pick);
     }
 
     /// An explicit pick of a config dir for `folder` is remembered for it; picking the default forgets it.
@@ -816,12 +1658,12 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from }) = self.pending_opens.remove(&request) else {
+        let Some(PendingOpen { claude, pick, cwd, axis, cwd_from, host }) = self.pending_opens.remove(&request) else {
             return;
         };
         let Some(container) = container else {
             let launch = self.new_launch(claude, cwd, pick.as_deref(), None, cx);
-            self.open_launch(launch, axis, cwd_from, window, cx);
+            self.open_launch(launch, axis, cwd_from, host, window, cx);
             return;
         };
         let folder = &container.host_folder;
@@ -842,11 +1684,11 @@ impl WorkspaceView {
                 Ok(0) => {
                     // Splits of a container pane start in the session's directory, not the docker client's.
                     let launch = this.new_launch(claude, cwd, pick.as_deref(), Some(container.host_folder), cx);
-                    this.open_launch(launch, axis, None, window, cx)
+                    this.open_launch(launch, axis, None, HostId::local(), window, cx)
                 }
                 Ok(1) => {
                     let launch = this.new_launch(claude, cwd, pick.as_deref(), None, cx);
-                    this.open_launch(launch, axis, cwd_from, window, cx)
+                    this.open_launch(launch, axis, cwd_from, host, window, cx)
                 }
                 _ => this.focus_current(window, cx),
             });
@@ -863,31 +1705,37 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// Start `launch` in a new tab, or splitting the focused pane along `axis`.
+    /// Start `launch` in a new tab, or splitting the focused pane along `axis` (a split runs on `host`).
     pub(crate) fn open_launch(
         &mut self,
         launch: PaneLaunch,
         axis: Option<Axis>,
-        cwd_from: Option<PaneId>,
+        cwd_from: Option<PaneKey>,
+        host: HostId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
-        let leaf = match axis.and_then(|axis| self.workspace.split(axis, launch.clone())) {
+        let leaf = match axis.and_then(|axis| self.workspace.split_on(axis, launch.clone(), host.clone())) {
             Some(leaf) => leaf,
-            None => self.workspace.new_tab(launch),
+            None => self.workspace.new_tab_on(launch, host),
         };
         self.add_slot(leaf, window, cx);
-        self.spawn_leaf(leaf, cwd_from, cx);
+        self.spawn_leaf(leaf, cwd_from, window, cx);
         self.focus_current(window, cx);
         self.save(cx);
     }
 
     fn close_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.workspace.close(leaf).and_then(|removed| removed.pane) {
-            self.client.kill(pane);
+        if let Some(key) = self.workspace.close(leaf).and_then(|removed| removed.key()) {
+            if let Some(client) = self.client(&key.host) {
+                client.kill(key.pane);
+            } else if let Some(instance) = self.workspace.instances.get(&key.host) {
+                // The host is away: kill the pane when it is back, and do not adopt it as a tab then.
+                self.killed_offline.push((key.host.clone(), instance.clone(), key.pane));
+            }
         }
         self.slots.remove(&leaf);
         self.marked_unread.remove(&leaf);
@@ -895,6 +1743,9 @@ impl WorkspaceView {
             self.sync_unseen(cx);
         }
         self.pending.retain(|_, waiting| *waiting != leaf);
+        for waiting in self.queued.values_mut() {
+            waiting.retain(|queued| *queued != leaf);
+        }
         self.focus_current(window, cx);
         self.save(cx);
     }
@@ -912,6 +1763,14 @@ impl WorkspaceView {
             setup.focus_handle(cx).focus(window, cx);
             return;
         }
+        if let Some((askpass, _)) = &self.askpass {
+            askpass.focus_handle(cx).focus(window, cx);
+            return;
+        }
+        if let Some((wizard, _)) = &self.ssh_wizard {
+            wizard.focus_handle(cx).focus(window, cx);
+            return;
+        }
         let (open, active) = (self.workspace.settings_tab().is_some(), self.settings_active());
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_settings(open, active, cx));
         let settings =
@@ -925,8 +1784,10 @@ impl WorkspaceView {
         match self.workspace.focused().and_then(|leaf| self.slots.get(&leaf).map(|slot| (leaf, slot))) {
             Some((leaf, slot)) => {
                 slot.view.focus_handle(cx).focus(window, cx);
-                if let Some(pane) = self.workspace.leaves[&leaf].pane {
-                    self.client.focus(pane);
+                if let Some(key) = self.workspace.leaves[&leaf].key()
+                    && let Some(client) = self.client(&key.host)
+                {
+                    client.focus(key.pane);
                 }
             }
             None => self.focus_handle.focus(window, cx),
@@ -961,6 +1822,7 @@ impl WorkspaceView {
     }
 
     fn sync_panes(&self, cx: &mut Context<Self>) {
+        self.publish_hosts(cx);
         let panes: Vec<PaneEntry> = self
             .workspace
             .leaves
@@ -969,6 +1831,7 @@ impl WorkspaceView {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
                 PaneEntry {
                     leaf: *id,
+                    host: leaf.host.clone(),
                     cwd: leaf.launch.cwd.clone(),
                     title: leaf
                         .name
@@ -977,6 +1840,7 @@ impl WorkspaceView {
                     session: leaf.session.clone(),
                     claude: leaf.launch.is_claude(),
                     ended: view.is_some_and(|view| view.has_ended()),
+                    offline: self.leaf_offline(*id),
                     alone: self
                         .workspace
                         .tab_of(*id)
@@ -1008,7 +1872,7 @@ impl WorkspaceView {
                 // The right-clicked tab, which becomes the visible one.
                 if self.workspace.select_tab(tab) {
                     self.focus_current(window, cx);
-                    self.open(true, Some(axis));
+                    self.open(true, Some(axis), window, cx);
                 }
             }
             MenuAction::SplitPane { leaf, axis, claude } => {
@@ -1016,9 +1880,14 @@ impl WorkspaceView {
                 if self.workspace.focus(leaf) {
                     self.focus_current(window, cx);
                     self.save(cx);
-                    self.open(claude, Some(axis));
+                    self.open(claude, Some(axis), window, cx);
                 }
             }
+            MenuAction::NewLocal { claude } => self.show_launcher(claude, HostId::local(), window, cx),
+            MenuAction::NewOnHost { host, claude } => {
+                self.new_session_on_host(&HostId::named(&host), claude, window, cx)
+            }
+            MenuAction::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
@@ -1044,10 +1913,13 @@ impl WorkspaceView {
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
-            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, None),
+            MenuAction::NewHere { dir, claude, host } if host.is_local() => {
+                self.open_new(claude, dir, None, None, host, None)
+            }
+            MenuAction::NewHere { dir, claude, host } => self.open_on_host(&host, claude, dir, window, cx),
             MenuAction::NewClaudeWith { dir, dir_name } => {
                 self.remember_pick(&dir, &dir_name, cx);
-                self.open_new(true, dir, None, None, Some(dir_name));
+                self.open_new(true, dir, None, None, HostId::local(), Some(dir_name));
             }
             MenuAction::PinFavorite(dir) => SettingsStore::update(cx, |settings| {
                 if !settings.favorites.contains(&dir) {
@@ -1070,8 +1942,8 @@ impl WorkspaceView {
                 self.focus_leaf(leaf, window, cx);
                 self.rerun_leaf(leaf, window, cx);
             }
-            MenuAction::TakeOver { session, cwd } => self.on_sidebar_event(
-                SidebarEvent::Activate { activation: Activation::TakeOver { session, cwd }, split: false },
+            MenuAction::TakeOver { session, cwd, host } => self.on_sidebar_event(
+                SidebarEvent::Activate { activation: Activation::TakeOver { session, cwd, host }, split: false },
                 window,
                 cx,
             ),
@@ -1115,24 +1987,29 @@ impl WorkspaceView {
                 action: MenuAction::CloseTab(index),
                 swatch: None,
                 checked: false,
+                dot: None,
             })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
             let sessions = self.sidebar.read(cx).sessions();
-            let place = leaf.session.as_deref().and_then(|id| sessions.get(id)).and_then(|info| info.container.clone());
+            let place = leaf
+                .session
+                .as_deref()
+                .and_then(|id| sessions.get(&leaf.host, id))
+                .and_then(|info| info.container.clone());
             let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
-            let context = if leaf.launch.container.is_some() {
+            let context = if leaf.launch.container.is_some() || !leaf.host.is_local() {
                 MenuContext::default()
             } else {
                 MenuContext::for_folder(cx.global::<SettingsStore>().settings(), &leaf.launch.cwd)
             };
-            let idle = leaf.session.as_deref().and_then(|id| sessions.get(id)).is_some_and(|info| {
+            let idle = leaf.session.as_deref().and_then(|id| sessions.get(&leaf.host, id)).is_some_and(|info| {
                 matches!(info.state, SessionState::Managed { .. })
-                    && status_tone(info.status.as_ref(), false) == Tone::Idle
+                    && status_tone(info.status.as_ref(), Unseen::No) == Tone::Idle
             });
             let unread = self.unseen.contains_key(&tab.focused);
             let mark = (idle || unread).then_some((tab.focused, unread));
-            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context, mark, tab.root.leaves().len())
+            menus::tab_menu(index, &leaf.host, &leaf.launch.cwd, vscode, &context, mark, tab.root.leaves().len())
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -1166,7 +2043,7 @@ impl WorkspaceView {
                 None => label.to_string(),
             };
             let title = if can_split { title } else { format!("{title} ({MAX_PANES_PER_TAB} panes max)") };
-            let card = HoverCard { title, status: None, dir: None, container: false, folder: None };
+            let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None };
             div()
                 .id((label, index))
                 .flex_none()
@@ -1201,7 +2078,8 @@ impl WorkspaceView {
                 None => "Close pane".to_string(),
             }
         };
-        let close_card = HoverCard { title: close_title, status: None, dir: None, container: false, folder: None };
+        let close_card =
+            HoverCard { title: close_title, status: None, dir: None, container: false, host: None, folder: None };
         let danger = theme.tokens.danger;
         div()
             .absolute()
@@ -1242,6 +2120,45 @@ impl WorkspaceView {
             )
     }
 
+    /// A New button was pressed: the launcher, or first a list of `Local` and the SSH hosts.
+    fn new_pressed(&mut self, claude: bool, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ssh_hosts.is_empty() {
+            self.show_launcher(claude, HostId::local(), window, cx);
+            return;
+        }
+        let hosts: Vec<(String, String, HostDot)> = self
+            .ssh_hosts
+            .iter()
+            .map(|host| {
+                let state = self.host_state(&HostId::named(&host.name));
+                (host.name.clone(), state.label(), state.dot())
+            })
+            .collect();
+        let items = menus::host_menu(claude, &hosts);
+        // The buttons are at the bottom of the window: open the list upward from the click.
+        let height = px(30. * items.len() as f32 + 8.);
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        self.host_menu = Some(OpenMenu::new(items, position - gpui::point(px(0.), height), focus));
+        cx.notify();
+    }
+
+    /// A new Claude session (else a shell) on SSH host `host`, in its home folder; connects first when needed.
+    fn new_session_on_host(&mut self, host: &HostId, claude: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_on_host(host, claude, "~".into(), window, cx);
+    }
+
+    /// Start a new Claude session (or shell) in the folder `dir` of a remote host in a new tab; connects the host when
+    /// it is not connected. No container lookup and no Claude config dir: the remote uses its own.
+    fn open_on_host(&mut self, host: &HostId, claude: bool, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let launch = if claude { PaneLaunch::claude(dir) } else { PaneLaunch::shell(dir, &ShellSettings::default()) };
+        let leaf = self.workspace.new_tab_on(launch, host.clone());
+        self.add_slot(leaf, window, cx);
+        self.spawn_leaf(leaf, None, window, cx); // queues the leaf and connects when the host is not connected
+        self.focus_current(window, cx);
+        self.save(cx);
+    }
+
     /// Open the Claude / Terminal popup of pane `leaf`'s split button at `position`.
     fn open_pane_menu(
         &mut self,
@@ -1260,26 +2177,26 @@ impl WorkspaceView {
     fn on_sidebar_event(&mut self, event: SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             SidebarEvent::Activate { activation, split } => match activation {
-                Activation::FocusPane(pane) => {
-                    if let Some(leaf) = self.workspace.leaf_for_pane(pane) {
+                Activation::FocusPane(key) => {
+                    if let Some(leaf) = self.workspace.leaf_for_pane(&key) {
                         self.focus_leaf(leaf, window, cx);
                     }
                 }
                 Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
-                Activation::Resume { session, cwd } => self.resume_session(session, cwd, split, window, cx),
-                Activation::TakeOver { session, cwd } => {
-                    let target = match self.workspace.leaf_for_session(&session) {
+                Activation::Resume { session, cwd, host } => self.resume_session(host, session, cwd, split, window, cx),
+                Activation::TakeOver { session, cwd, host } => {
+                    let target = match self.workspace.leaf_for_session(&host, &session) {
                         Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
                         _ => {
                             let sessions = self.sidebar.read(cx).sessions();
                             let container = sessions
-                                .get(&session)
+                                .get(&host, &session)
                                 .and_then(|info| info.container.clone())
                                 .and_then(|place| place.host_folder);
                             TakeOverTarget::NewPane { cwd, split, container }
                         }
                     };
-                    self.confirm_take_over(session, target, window, cx);
+                    self.confirm_take_over(host, session, target, window, cx);
                 }
                 Activation::ToggleDetails(_) | Activation::ToggleProject(_) | Activation::Nothing => {}
             },
@@ -1295,7 +2212,7 @@ impl WorkspaceView {
                 }
             }
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
-            SidebarEvent::New { claude } => self.show_launcher(claude, window, cx),
+            SidebarEvent::New { claude, position } => self.new_pressed(claude, position, window, cx),
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
             SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
@@ -1307,6 +2224,7 @@ impl WorkspaceView {
     /// new tab (or a split) where it ran — its dev container included.
     fn resume_session(
         &mut self,
+        host: HostId,
         session: String,
         cwd: PathBuf,
         split: bool,
@@ -1314,7 +2232,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         // A session already in the layout is shown there, so one session never runs in two panes.
-        match self.workspace.leaf_for_session(&session) {
+        match self.workspace.leaf_for_session(&host, &session) {
             Some(leaf) => {
                 self.focus_leaf(leaf, window, cx);
                 let starting = self.pending.values().any(|waiting| *waiting == leaf);
@@ -1324,13 +2242,14 @@ impl WorkspaceView {
             }
             None => {
                 let axis = (split && self.workspace.can_split()).then_some(Axis::Horizontal);
-                let place = self.sidebar.read(cx).sessions().get(&session).and_then(|info| info.container.clone());
+                let place =
+                    self.sidebar.read(cx).sessions().get(&host, &session).and_then(|info| info.container.clone());
                 match place {
-                    Some(place) if place.host_folder.is_none() => self.container_gone(window, cx),
+                    Some(place) if host.is_local() && place.host_folder.is_none() => self.container_gone(window, cx),
                     place => {
                         let container = place.and_then(|place| place.host_folder);
-                        let launch = self.resume_launch(&session, cwd, container, cx);
-                        self.open_launch(launch, axis, None, window, cx);
+                        let launch = self.resume_launch(&host, &session, cwd, container, cx);
+                        self.open_launch(launch, axis, None, host, window, cx);
                     }
                 }
             }
@@ -1380,7 +2299,7 @@ impl WorkspaceView {
     }
 
     fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_launcher(true, window, cx);
+        self.show_launcher(true, HostId::local(), window, cx);
     }
 
     /// The folders with live panes, in sidebar order, for the launcher's "Open now".
@@ -1397,32 +2316,79 @@ impl WorkspaceView {
                 let status = leaf
                     .session
                     .as_deref()
-                    .and_then(|session| sessions.get(session))
+                    .and_then(|session| sessions.get(&leaf.host, session))
                     .and_then(|info| info.status.as_ref());
                 Some(OpenPane {
+                    host: leaf.host.clone(),
                     cwd: leaf.launch.cwd.clone(),
                     claude: leaf.launch.is_claude(),
-                    tone: status_tone(status, self.unseen.contains_key(&id)),
+                    tone: status_tone(status, self.unseen_of(id)),
                 })
             })
             .collect();
         launcher::open_folders(&panes)
     }
 
-    /// Open the launcher; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
-    fn show_launcher(&mut self, claude_first: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.setup.is_some() {
+    /// This machine and the SSH hosts as the launcher's host chip lists them.
+    fn launcher_hosts(&self) -> Vec<LauncherHost> {
+        let local = LauncherHost {
+            id: HostId::local(),
+            label: "Local".into(),
+            dot: HostDot::Ok,
+            connected: true,
+            state: "connected".into(),
+        };
+        let hosts = self.ssh_hosts.iter().map(|entry| {
+            let (id, state) = (HostId::named(&entry.name), self.host_state(&HostId::named(&entry.name)));
+            LauncherHost {
+                label: format!("{} · {}", entry.name, state.label()),
+                dot: state.dot(),
+                connected: self.client(&id).is_some(),
+                state: state.label(),
+                id,
+            }
+        });
+        if self.ssh_hosts.is_empty() { vec![local] } else { std::iter::once(local).chain(hosts).collect() }
+    }
+
+    /// Open the launcher on `host`; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
+    fn show_launcher(&mut self, claude_first: bool, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.setup.is_some() || self.ssh_wizard.is_some() {
             return;
         }
         self.recents = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
         let open = self.open_folders(cx);
-        let view = cx.new(|cx| LauncherView::new(open, sessions, claude_first, cx));
+        let hosts = self.launcher_hosts();
+        let view = cx.new(|cx| LauncherView::new(open, sessions, claude_first, hosts, host, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &LauncherEvent, window, cx| {
             this.on_launcher_event(event.clone(), window, cx)
         });
         view.focus_handle(cx).focus(window, cx);
         self.launcher = Some((view, subscription));
+        cx.notify();
+    }
+
+    /// A question from ssh: show it now, or after the ones before it.
+    fn ask(&mut self, prompt: AskPrompt, window: &mut Window, cx: &mut Context<Self>) {
+        self.askpass_queue.push_back(prompt);
+        if self.askpass.is_none() {
+            self.show_next_question(window, cx);
+        }
+    }
+
+    fn show_next_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.askpass_queue.pop_front() else {
+            self.askpass = None;
+            self.focus_current(window, cx);
+            cx.notify();
+            return;
+        };
+        let view = cx.new(|cx| AskpassView::new(prompt, cx));
+        let subscription =
+            cx.subscribe_in(&view, window, |this, _, _: &AskpassEvent, window, cx| this.show_next_question(window, cx));
+        view.focus_handle(cx).focus(window, cx);
+        self.askpass = Some((view, subscription));
         cx.notify();
     }
 
@@ -1443,45 +2409,158 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Open the SSH install wizard for `start`; one at a time, a second request focuses the open one.
+    fn open_ssh_wizard(&mut self, start: WizardStart, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((wizard, _)) = &self.ssh_wizard {
+            wizard.focus_handle(cx).focus(window, cx);
+            return;
+        }
+        self.launcher = None;
+        self.recents = None;
+        let existing: Vec<String> = self.ssh_hosts.iter().map(|host| host.name.clone()).collect();
+        let prompts = self.askpass_prompts.clone();
+        let runtime_dir = Paths::for_profile(&current_profile()).runtime_dir;
+        let view = cx.new(|cx| SshWizard::new(start, existing, prompts, runtime_dir, cx));
+        let subscription = cx.subscribe_in(&view, window, |this, _, event: &WizardEvent, window, cx| match event {
+            WizardEvent::Closed { draft } => {
+                this.ssh_wizard = None;
+                this.withdraw_questions(&HostId::named(draft), cx);
+                this.focus_current(window, cx);
+                cx.notify();
+            }
+            WizardEvent::Finished { host, add, restarted } => {
+                if *add {
+                    let entry = host.clone();
+                    let mut saved = Ok(());
+                    SettingsStore::update(cx, |settings| saved = add_ssh_host(&mut settings.ssh_hosts, entry));
+                    if let Err(error) = saved {
+                        // Not saved: stay in the wizard and never connect to a different entry.
+                        if let Some((wizard, _)) = &this.ssh_wizard {
+                            wizard.update(cx, |wizard, cx| wizard.refuse(error, cx));
+                        }
+                        return;
+                    }
+                    this.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+                }
+                let share =
+                    this.ssh_wizard.as_ref().and_then(|(wizard, _)| wizard.update(cx, |wizard, _| wizard.take_share()));
+                if let Some(share) = share {
+                    this.shares.insert(HostId::named(&host.name), share);
+                }
+                this.ssh_wizard = None;
+                if *restarted {
+                    // The old daemon may still answer for a moment after its stop.
+                    this.restart_retries.insert(HostId::named(&host.name), RESTART_RETRIES);
+                }
+                this.focus_current(window, cx);
+                this.connect_host(&HostId::named(&host.name), true, window, cx);
+                cx.notify();
+            }
+        });
+        view.focus_handle(cx).focus(window, cx);
+        self.ssh_wizard = Some((view, subscription));
+        cx.notify();
+    }
+
     fn open_recents(&mut self, _: &OpenRecents, window: &mut Window, cx: &mut Context<Self>) {
         self.show_recents(None, window, cx);
     }
 
     /// Open the recent sessions pop-up, on `project`'s sessions when given.
     fn show_recents(&mut self, project: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.setup.is_some() {
+        if self.setup.is_some() || self.ssh_wizard.is_some() {
             return;
         }
         self.launcher = None;
-        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
-        let open: HashSet<String> = self.workspace.leaves.values().filter_map(|leaf| leaf.session.clone()).collect();
-        let view = cx.new(|cx| RecentsView::new(sessions, open, project, cx));
+        let sessions = self.recents_sessions(cx);
+        let offline = self.offline_hosts();
+        let open: HashSet<(HostId, String)> = self
+            .workspace
+            .leaves
+            .values()
+            .filter_map(|leaf| Some((leaf.host.clone(), leaf.session.clone()?)))
+            .collect();
+        let view = cx.new(|cx| RecentsView::new(sessions, open, project, offline, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &RecentsEvent, window, cx| {
             this.on_recents_event(event.clone(), window, cx)
         });
         view.focus_handle(cx).focus(window, cx);
+        self.search_query.clear();
         self.recents = Some((view, subscription));
         self.push_search_state(cx);
         cx.notify();
     }
 
+    /// The sessions of this machine and of the connected hosts.
+    fn recents_sessions(&self, cx: &Context<Self>) -> Vec<SessionInfo> {
+        recents::listed_sessions(self.sidebar.read(cx).sessions().all(), |host| self.client(host).is_some())
+    }
+
+    /// Names of the SSH hosts that are not connected.
+    fn offline_hosts(&self) -> Vec<String> {
+        let configured: Vec<String> = self.ssh_hosts.iter().map(|entry| entry.name.clone()).collect();
+        recents::offline_hosts(&configured, |host| self.client(host).is_some())
+    }
+
+    /// Give an open recent sessions pop-up the sessions of the hosts that are connected now.
+    fn push_recents(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.recents {
+            let (sessions, offline) = (self.recents_sessions(cx), self.offline_hosts());
+            view.update(cx, |view, cx| view.set_sessions(sessions, offline, cx));
+        }
+    }
+
+    /// The hosts conversation search asks: this machine, then the connected SSH hosts in settings order.
+    fn search_order(&self) -> Vec<HostId> {
+        let configured: Vec<String> = self.ssh_hosts.iter().map(|entry| entry.name.clone()).collect();
+        search_merge::query_order(&configured, |host| self.client(host).is_some())
+    }
+
+    /// Show the merged hits of every host in an open recent sessions pop-up.
+    fn push_search_hits(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.recents {
+            let merged = search_merge::merge(&self.search_order(), &self.search_answers);
+            let request = self.search_request;
+            view.update(cx, |view, cx| view.set_hits(request, merged.hits, merged.pending, cx));
+        }
+    }
+
     /// Tell an open recent sessions pop-up where conversation search stands.
     fn push_search_state(&self, cx: &mut Context<Self>) {
         if let Some((view, _)) = &self.recents {
-            let (indexing, unavailable) = (self.search_indexing, self.search_unavailable);
-            view.update(cx, |view, cx| view.set_index_state(indexing, unavailable, cx));
+            let merged = search_merge::merge(&self.search_order(), &self.search_answers);
+            view.update(cx, |view, cx| {
+                view.set_index_state(merged.progress, cx);
+                view.set_search_unavailable(merged.unavailable, cx);
+            });
         }
     }
 
     fn on_recents_event(&mut self, event: RecentsEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             RecentsEvent::Search { request, query } => {
-                self.client.search(request, &query, SEARCH_LIMIT);
+                let order = self.search_order();
+                self.search_request = request;
+                self.search_query = query.clone();
+                self.search_answers.retain(|host, _| order.contains(host));
+                for answer in self.search_answers.values_mut() {
+                    answer.hits.clear();
+                    answer.answered = false;
+                }
+                for host in &order {
+                    if let Some(client) = self.client(host) {
+                        client.search(request, &query, SEARCH_LIMIT);
+                    }
+                }
                 return;
             }
-            RecentsEvent::Resume { session, cwd, split } => {
+            RecentsEvent::Connect(host) => {
+                self.connect_host(&host, true, window, cx);
+                return;
+            }
+            RecentsEvent::Resume { host, session, cwd, split } => {
                 self.recents = None;
-                self.resume_session(session, cwd, split, window, cx);
+                self.resume_session(host, session, cwd, split, window, cx);
             }
             RecentsEvent::Dismiss => {
                 self.recents = None;
@@ -1492,9 +2571,19 @@ impl WorkspaceView {
     }
 
     fn on_launcher_event(&mut self, event: LauncherEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let LauncherEvent::ListDir { host, request, path } = &event {
+            if let Some(client) = self.client(host) {
+                client.list_dir(*request, path);
+            }
+            return;
+        }
         self.launcher = None;
         match event {
-            LauncherEvent::Open { dir, claude, dir_pick } => self.open_launcher_pick(claude, dir, dir_pick, cx),
+            LauncherEvent::Open { host, dir, claude, .. } if !host.is_local() => {
+                self.open_on_host(&host, claude, dir, window, cx)
+            }
+            LauncherEvent::Open { dir, claude, dir_pick, .. } => self.open_launcher_pick(claude, dir, dir_pick, cx),
+            LauncherEvent::ListDir { .. } => {}
             LauncherEvent::Browse { claude, dir_pick } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions {
                     files: false,
@@ -1525,21 +2614,31 @@ impl WorkspaceView {
 
     /// Window close requested: true to close now; otherwise asks Detach / Stop all / Cancel.
     pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let all: Vec<NodeId> = self.workspace.leaves.keys().copied().collect();
-        if self.running_panes(&all, cx) == 0 {
+        // Stop all only reaches this machine's daemon: SSH hosts are just disconnected and keep running.
+        let local: Vec<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| leaf.host.is_local()).map(|(id, _)| *id).collect();
+        if self.running_panes(&local, cx) == 0 {
             return true;
         }
+        let remote_running = self.workspace.leaves.iter().any(|(id, leaf)| {
+            !leaf.host.is_local() && self.slots.get(id).is_some_and(|slot| slot.view.read(cx).is_running())
+        });
+        let detail = if remote_running {
+            "Sessions keep running after Detach. Stop all sessions ends this machine's sessions only; sessions on SSH hosts keep running."
+        } else {
+            "Sessions keep running after Detach."
+        };
         if self.prompting.replace(true) {
             return false;
         }
         let answer = window.prompt(
             PromptLevel::Info,
             "Quit Gantry?",
-            Some("Sessions keep running after Detach."),
+            Some(detail),
             &["Detach", "Stop all sessions", "Cancel"],
             cx,
         );
-        let (client, prompting) = (self.client.clone(), self.prompting.clone());
+        let (client, prompting) = (self.local_client().clone(), self.prompting.clone());
         cx.spawn(async move |_, cx| match answer.await {
             Ok(0) => cx.update(|cx| cx.quit()),
             Ok(1) => {
@@ -1552,23 +2651,23 @@ impl WorkspaceView {
         false
     }
 
-    fn new_claude_tab(&mut self, _: &NewClaudeTab, _: &mut Window, _: &mut Context<Self>) {
-        self.open(true, None)
+    fn new_claude_tab(&mut self, _: &NewClaudeTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(true, None, window, cx)
     }
-    fn new_shell_tab(&mut self, _: &NewShellTab, _: &mut Window, _: &mut Context<Self>) {
-        self.open(false, None)
+    fn new_shell_tab(&mut self, _: &NewShellTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(false, None, window, cx)
     }
-    fn split_right_claude(&mut self, _: &SplitRightClaude, _: &mut Window, _: &mut Context<Self>) {
-        self.open(true, Some(Axis::Horizontal))
+    fn split_right_claude(&mut self, _: &SplitRightClaude, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(true, Some(Axis::Horizontal), window, cx)
     }
-    fn split_right_shell(&mut self, _: &SplitRightShell, _: &mut Window, _: &mut Context<Self>) {
-        self.open(false, Some(Axis::Horizontal))
+    fn split_right_shell(&mut self, _: &SplitRightShell, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(false, Some(Axis::Horizontal), window, cx)
     }
-    fn split_down_claude(&mut self, _: &SplitDownClaude, _: &mut Window, _: &mut Context<Self>) {
-        self.open(true, Some(Axis::Vertical))
+    fn split_down_claude(&mut self, _: &SplitDownClaude, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(true, Some(Axis::Vertical), window, cx)
     }
-    fn split_down_shell(&mut self, _: &SplitDownShell, _: &mut Window, _: &mut Context<Self>) {
-        self.open(false, Some(Axis::Vertical))
+    fn split_down_shell(&mut self, _: &SplitDownShell, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(false, Some(Axis::Vertical), window, cx)
     }
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.active_tab().is_some_and(|tab| tab.settings) {
@@ -1618,6 +2717,16 @@ impl WorkspaceView {
             self._settings_events =
                 Some(cx.subscribe_in(&view, window, |this, _, event: &SettingsEvent, window, cx| match event {
                     SettingsEvent::DetectClaudeDirs => this.show_setup(SetupMode::Rerun, window, cx),
+                    SettingsEvent::AddSshHost => this.open_ssh_wizard(WizardStart::Add, window, cx),
+                    SettingsEvent::HostRenamed { from, to, reconnect } => {
+                        this.host_renamed(&HostId::named(from), &HostId::named(to), *reconnect, window, cx)
+                    }
+                    SettingsEvent::HostRemoved(name) => this.host_removed(&HostId::named(name), window, cx),
+                    SettingsEvent::ReconnectHost(name) => {
+                        let host = HostId::named(name);
+                        this.forget_host(&host, cx);
+                        this.connect_host(&host, true, window, cx);
+                    }
                 }));
             self.settings = Some(view);
         }
@@ -1744,6 +2853,32 @@ impl WorkspaceView {
             })
             .child(self.render_title_session(window, cx))
             .child(if client_decorations { moves_window(spacer) } else { spacer })
+            .when_some(self.update_notice(), |bar, update| {
+                bar.child(
+                    div()
+                        .id("update-pill")
+                        .flex_none()
+                        .h(theme.ui(24.))
+                        .px(theme.ui(10.))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme.tokens.accent))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.tokens.accent))
+                        .cursor_pointer()
+                        .child(update.pill())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let focus = cx.focus_handle();
+                            window.focus(&focus, cx);
+                            this.update_card = Some(focus);
+                            this.update_error = None;
+                            cx.notify();
+                        })),
+                )
+            })
             .when(waiting > 0, |bar| {
                 bar.child(
                     div()
@@ -1768,7 +2903,12 @@ impl WorkspaceView {
                         })),
                 )
             })
-            .child(round_button("new-claude", "+", &theme, cx.listener(|this, _, _, _| this.open(true, None))))
+            .child(round_button(
+                "new-claude",
+                "+",
+                &theme,
+                cx.listener(|this, _, window, cx| this.open(true, None, window, cx)),
+            ))
             .child(round_button(
                 "open-settings",
                 "⚙",
@@ -1824,23 +2964,30 @@ impl WorkspaceView {
         let title =
             tab_name.or_else(|| self.sidebar.read(cx).leaf_title(leaf)).unwrap_or_else(|| self.tab_title(index, cx));
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
-        let unseen = self.unseen.contains_key(&leaf);
+        let unseen = self.unseen_of(leaf);
         let container = self.workspace.leaves.get(&leaf).is_some_and(|leaf| leaf.launch.container.is_some());
+        let remote = self.workspace.leaves.get(&leaf).and_then(|leaf| leaf.host.remote_name().map(String::from));
         let dir = self.leaf_dir_badge(leaf, cx);
         let cwd = self.leaf_cwd(leaf, cx);
-        let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
+        let offline = self.leaf_offline(leaf);
+        let tone = leaf_tone(status.as_ref(), unseen, offline);
+        let colors = tone.map(|tone| theme.tone(tone));
+        let pin = (!offline && status_tone(status.as_ref(), unseen) == Tone::Unread)
+            .then(|| pin_icon(colors.map_or(theme.tokens.text, |colors| colors.dot), &theme));
         let ink = colors.map_or(theme.tokens.text, |colors| colors.ink);
-        let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
+        let sweep = tone.is_some_and(|tone| sweeping(tone, animate, true));
         let card = HoverCard {
             title: title.clone(),
-            status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
+            status: tone.map(|tone| tone_word(tone).to_string()),
             dir: dir.clone(),
             container,
+            host: remote.clone(),
             folder: cwd.as_deref().map(|cwd| display_path(cwd, std::env::home_dir().as_deref())),
         };
         let sidebar = self.sidebar.read(cx);
+        let host = self.workspace.leaves.get(&leaf).map(|leaf| leaf.host.clone()).unwrap_or_default();
         let project = cwd.as_deref().map(|cwd| {
-            let root = sidebar.project_of(cwd);
+            let root = sidebar.project_of(&host, cwd);
             let label = sidebar.project_label(&root).unwrap_or_else(|| {
                 root.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned())
             });
@@ -1881,8 +3028,10 @@ impl WorkspaceView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .when_some(colors.and_then(|colors| colors.fill), |chip, fill| chip.bg(rgb(fill)))
                     .when(sweep, |chip| chip.child(working_sweep("sweep-title", px(RADIUS_SMALL), &theme)))
+                    .children(pin)
                     .child(div().min_w_0().truncate().child(title))
                     .when(container, |chip| chip.child(container_icon(ink, &theme)))
+                    .when(remote.is_some(), |chip| chip.child(ssh_icon(ink, &theme)))
                     .children(dir.map(|badge| dir_badge(&badge, &theme)))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -1922,7 +3071,9 @@ impl WorkspaceView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .child("New Claude session")
-                        .on_click(cx.listener(|this, _, window, cx| this.show_launcher(true, window, cx))),
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                            this.new_pressed(true, event.position(), window, cx)
+                        })),
                 )
                 .child(
                     div()
@@ -1939,7 +3090,9 @@ impl WorkspaceView {
                         .cursor_pointer()
                         .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                         .child("New shell")
-                        .on_click(cx.listener(|this, _, window, cx| this.show_launcher(false, window, cx))),
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                            this.new_pressed(false, event.position(), window, cx)
+                        })),
                 )
                 .into_any_element();
         };
@@ -1968,8 +3121,10 @@ impl WorkspaceView {
                 let title = self.workspace.leaf_name(leaf).map_or_else(|| view.read(cx).title(), String::from);
                 let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
                 let title = if status.is_some() { without_claude_glyph(&title).to_string() } else { title };
-                let unseen = self.unseen.contains_key(&leaf);
+                let unseen = self.unseen_of(leaf);
+                let offline = self.leaf_offline(leaf);
                 let container = self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.container.is_some());
+                let host = self.workspace.leaves.get(&leaf).and_then(|leaf| leaf.host.remote_name().map(String::from));
                 let dir = self.leaf_dir_badge(leaf, cx);
                 let project = self.leaf_project_color(leaf, cx);
                 let folder = self
@@ -2009,7 +3164,8 @@ impl WorkspaceView {
                                 }))
                                 .when(multiple, |pane| {
                                     pane.child(pane_header(
-                                        index, title, status, unseen, animate, container, dir, folder, project, &theme,
+                                        index, title, status, unseen, offline, animate, container, host, dir, folder,
+                                        project, &theme,
                                     ))
                                 })
                                 .when_some(last_prompt, |pane, text| {
@@ -2114,21 +3270,27 @@ fn pane_header(
     index: usize,
     title: String,
     status: Option<SessionStatus>,
-    unseen: bool,
+    unseen: Unseen,
+    offline: bool,
     animate: bool,
     container: bool,
+    host: Option<String>,
     dir: Option<DirBadge>,
     folder: Option<String>,
     project: Option<u32>,
     theme: &Theme,
 ) -> impl IntoElement {
-    let colors = status.as_ref().map(|status| theme.tone(status_tone(Some(status), unseen)));
-    let sweep = status.as_ref().is_some_and(|status| sweeping(status_tone(Some(status), unseen), animate, true));
+    let tone = leaf_tone(status.as_ref(), unseen, offline);
+    let colors = tone.map(|tone| theme.tone(tone));
+    let pin = (!offline && status_tone(status.as_ref(), unseen) == Tone::Unread)
+        .then(|| pin_icon(colors.map_or(theme.tokens.text, |colors| colors.dot), theme));
+    let sweep = tone.is_some_and(|tone| sweeping(tone, animate, true));
     let card = HoverCard {
         title: title.clone(),
-        status: status.as_ref().map(|status| tone_word(status_tone(Some(status), unseen)).to_string()),
+        status: tone.map(|tone| tone_word(tone).to_string()),
         dir: dir.clone(),
         container,
+        host: host.clone(),
         folder,
     };
     div()
@@ -2151,9 +3313,13 @@ fn pane_header(
         .text_color(rgb(colors.map_or(theme.tokens.text, |colors| colors.ink)))
         .when(sweep, |header| header.child(working_sweep(("sweep-pane", index), px(RADIUS_SMALL), theme)))
         .when_some(project, |header, color| header.child(side_line(color, theme)))
+        .children(pin)
         .child(div().flex_1().min_w_0().truncate().child(title))
         .when(container, |header| {
             header.child(container_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
+        })
+        .when(host.is_some(), |header| {
+            header.child(ssh_icon(colors.map_or(theme.tokens.text, |colors| colors.ink), theme))
         })
         .children(dir.map(|badge| dir_badge(&badge, theme)))
 }
@@ -2350,6 +3516,117 @@ impl Render for WorkspaceView {
                         .child(view),
                 )
             })
+            .when_some(self.ssh_wizard.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div()
+                        .id("ssh-wizard-overlay")
+                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(theme.ui(16.))
+                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
+                        .child(view),
+                )
+            })
+            .when_some(self.askpass.as_ref().map(|(view, _)| view.clone()), |root, view| {
+                root.child(
+                    div()
+                        .id("askpass-overlay")
+                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(theme.ui(16.))
+                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
+                        .child(view),
+                )
+            })
+            .when_some(self.update_card.as_ref().zip(self.update_notice()), |root, (focus, update)| {
+                let note = match update.note {
+                    Note::ClosesSessions(_) => {
+                        let colors = theme.tone(Tone::NeedsInput);
+                        div()
+                            .p(theme.ui(10.))
+                            .rounded(px(RADIUS_SMALL))
+                            .text_xs()
+                            .text_color(rgb(colors.ink))
+                            .when_some(colors.fill, |note, fill| note.bg(rgb(fill)))
+                    }
+                    Note::KeepsSessions => div().text_xs().text_color(rgb(theme.tokens.muted)),
+                }
+                .child(update.note_text());
+                let close = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                    this.update_card = None;
+                    this.focus_current(window, cx);
+                    cx.notify();
+                };
+                let (close_on_key, close_outside) =
+                    (cx.listener(move |this, _: &(), window, cx| close(this, window, cx)), {
+                        cx.listener(move |this, _: &(), window, cx| close(this, window, cx))
+                    });
+                root.child(
+                    div()
+                        .id("update-card")
+                        .occlude()
+                        .absolute()
+                        .top(theme.ui(46.))
+                        .right(theme.ui(74.))
+                        .w(theme.ui(320.))
+                        .p(theme.ui(16.))
+                        .flex()
+                        .flex_col()
+                        .gap(theme.ui(12.))
+                        .bg(rgb(theme.tokens.raised))
+                        .border_1()
+                        .border_color(rgb(theme.tokens.line))
+                        .rounded(px(RADIUS))
+                        .track_focus(focus)
+                        .on_key_down(move |event, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                close_on_key(&(), window, cx);
+                            }
+                            cx.stop_propagation();
+                        })
+                        .on_mouse_down_out(move |_, window, cx| close_outside(&(), window, cx))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(theme.tokens.text))
+                                .child(update.title()),
+                        )
+                        .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(update.detail_text()))
+                        .child(note)
+                        .when_some(self.update_error.clone(), |card, error| {
+                            card.child(div().text_xs().text_color(rgb(theme.tokens.danger)).child(error))
+                        })
+                        .child(
+                            div()
+                                .id("restart-and-update")
+                                .h(theme.ui(32.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(RADIUS_SMALL))
+                                .bg(rgb(theme.tokens.accent))
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme.tokens.on_accent))
+                                .cursor_pointer()
+                                .child("Restart and update")
+                                .on_click(cx.listener(|this, _, _, cx| this.restart_and_update(cx))),
+                        ),
+                )
+            })
             .when_some(self.pane_menu.as_ref(), |root, menu| {
                 let pick = cx.listener(|this, action: &MenuAction, window, cx| {
                     this.pane_menu = None;
@@ -2364,6 +3641,27 @@ impl Render for WorkspaceView {
                 });
                 root.child(context_menu::render(
                     "pane-menu",
+                    menu,
+                    &theme,
+                    cx.global::<SettingsStore>().settings(),
+                    move |action, window, cx| pick(action, window, cx),
+                    move |window, cx| dismiss(&(), window, cx),
+                ))
+            })
+            .when_some(self.host_menu.as_ref(), |root, menu| {
+                let pick = cx.listener(|this, action: &MenuAction, window, cx| {
+                    this.host_menu = None;
+                    this.focus_current(window, cx);
+                    this.run_menu_action(action.clone(), window, cx);
+                    cx.notify();
+                });
+                let dismiss = cx.listener(|this, _: &(), window, cx| {
+                    this.host_menu = None;
+                    this.focus_current(window, cx);
+                    cx.notify();
+                });
+                root.child(context_menu::render(
+                    "host-menu",
                     menu,
                     &theme,
                     cx.global::<SettingsStore>().settings(),

@@ -15,11 +15,12 @@ use gpui::{
     App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, IntoElement,
     KeyDownEvent, ListAlignment, ListState, Render, Stateful, StyledText, Window, div, list, prelude::*, px, rgb,
 };
+use protocol::host::HostId;
 use protocol::message::{SearchHit, SessionInfo, Speaker};
 
 use crate::field;
 use crate::settings_store::{SettingsStore, dir_badge_for};
-use crate::theme::{RADIUS, RADIUS_LARGE, Theme, container_icon, dir_badge, side_line, theme};
+use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, container_icon, dir_badge, side_line, ssh_icon, theme};
 
 const ROW_HEIGHT: f32 = 36.0;
 /// Height of a conversation hit's row (two lines).
@@ -36,6 +37,8 @@ static NEXT_SEARCH: AtomicU64 = AtomicU64::new(1);
 pub enum RecentsEvent {
     /// Resume a session.
     Resume {
+        /// The host it ran on.
+        host: HostId,
         /// Session id.
         session: String,
         /// Its directory.
@@ -43,6 +46,8 @@ pub enum RecentsEvent {
         /// As a split of the focused pane.
         split: bool,
     },
+    /// Connect an SSH host that is not connected.
+    Connect(HostId),
     /// Close without opening anything.
     Dismiss,
     /// Search the conversations for `query`; the reply goes to `set_hits` with the same `request`.
@@ -66,7 +71,7 @@ enum List {
 pub struct RecentsView {
     focus_handle: FocusHandle,
     sessions: Vec<SessionInfo>,
-    open: HashSet<String>,
+    open: HashSet<(HostId, String)>,
     home: Option<PathBuf>,
     roots: ProjectRoots,
     query: TextField,
@@ -87,7 +92,10 @@ pub struct RecentsView {
     hits: Vec<SearchHit>,
     /// Percent of the index built while a large pass runs.
     indexing: Option<u8>,
-    unavailable: bool,
+    /// The hosts whose conversation search does not work.
+    unavailable: Vec<HostId>,
+    /// SSH hosts that are not connected: each adds a "not connected" line with a Connect button.
+    offline: Vec<String>,
     search_task: Option<gpui::Task<()>>,
 }
 
@@ -100,11 +108,13 @@ impl Focusable for RecentsView {
 }
 
 impl RecentsView {
-    /// An overlay over `sessions`; `open` = sessions a leaf of the layout shows; `project` = the project to start on.
+    /// An overlay over `sessions`; `open` = (host, session) a leaf of the layout shows; `project` = the project to
+    /// start on; `offline` = names of the SSH hosts that are not connected.
     pub fn new(
         sessions: Vec<SessionInfo>,
-        open: HashSet<String>,
+        open: HashSet<(HostId, String)>,
         project: Option<PathBuf>,
+        offline: Vec<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let home = std::env::home_dir();
@@ -130,7 +140,8 @@ impl RecentsView {
             answered: false,
             hits: Vec::new(),
             indexing: None,
-            unavailable: false,
+            unavailable: Vec::new(),
+            offline,
             search_task: None,
         };
         view.refresh();
@@ -148,7 +159,7 @@ impl RecentsView {
         let sessions: Vec<&SessionInfo> = self.sessions.iter().collect();
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let roots = &self.roots;
-        let project_of = |cwd: &Path| roots.of(cwd);
+        let project_of = |host: &HostId, cwd: &Path| roots.of(host, cwd);
         let input = RecentsInput {
             sessions: &sessions,
             open: &self.open,
@@ -173,7 +184,7 @@ impl RecentsView {
     }
 
     fn content_state(&self) -> ContentState {
-        if self.unavailable {
+        if self.unavailable.iter().any(HostId::is_local) {
             ContentState::Unavailable
         } else if let Some(percent) = self.indexing {
             ContentState::Indexing(percent)
@@ -206,24 +217,41 @@ impl RecentsView {
         cx.emit(RecentsEvent::Search { request: self.request, query });
     }
 
-    /// Hits for `request`; replies to older requests are ignored.
-    pub fn set_hits(&mut self, request: u64, hits: Vec<SearchHit>, cx: &mut Context<Self>) {
+    /// Hits for `request`; replies to older requests are ignored. `pending`: a queried host has not answered yet, so
+    /// an empty list does not mean "no conversations" yet.
+    pub fn set_hits(&mut self, request: u64, hits: Vec<SearchHit>, pending: bool, cx: &mut Context<Self>) {
         if request == 0 || request != self.request {
             return;
         }
         self.hits = hits;
-        self.answered = true;
+        self.answered = !pending;
         self.refresh_keeping_selection();
         cx.notify();
     }
 
     /// The index's state: `indexing` = percent while a large pass runs. When indexing ends, the query is sent again.
-    pub fn set_index_state(&mut self, indexing: Option<u8>, unavailable: bool, cx: &mut Context<Self>) {
+    pub fn set_index_state(&mut self, indexing: Option<u8>, cx: &mut Context<Self>) {
         let finished = self.indexing.is_some() && indexing.is_none();
-        (self.indexing, self.unavailable) = (indexing, unavailable);
+        self.indexing = indexing;
         if finished && !self.choosing && searches_content(self.query.text()) {
             self.send_search(self.query.text().to_string(), cx);
         }
+        self.refresh_keeping_selection();
+        cx.notify();
+    }
+
+    /// The hosts whose conversation search does not work: this machine's shows in the list, the others as a line
+    /// under it.
+    pub fn set_search_unavailable(&mut self, hosts: Vec<HostId>, cx: &mut Context<Self>) {
+        self.unavailable = hosts;
+        self.refresh_keeping_selection();
+        cx.notify();
+    }
+
+    /// New sessions (a host connected) and the hosts still not connected.
+    pub fn set_sessions(&mut self, sessions: Vec<SessionInfo>, offline: Vec<String>, cx: &mut Context<Self>) {
+        self.sessions = sessions;
+        self.offline = offline;
         self.refresh_keeping_selection();
         cx.notify();
     }
@@ -311,7 +339,12 @@ impl RecentsView {
         match &self.list {
             List::Sessions(items) => match items.get(index) {
                 Some(RecentItem::Session { session, .. }) if session.cwd_exists => {
-                    cx.emit(RecentsEvent::Resume { session: session.id.clone(), cwd: session.cwd.clone(), split });
+                    cx.emit(RecentsEvent::Resume {
+                        host: session.host.clone(),
+                        session: session.id.clone(),
+                        cwd: session.cwd.clone(),
+                        split,
+                    });
                 }
                 Some(RecentItem::More { project, .. }) => {
                     self.expanded.insert(project.clone());
@@ -426,14 +459,19 @@ impl RecentsView {
                         )
                         .child(div().flex_1().min_w_0().truncate().child(title_text(session, marks)))
                         .when(session.container.is_some(), |pill| pill.child(container_icon(theme.tokens.text, &theme)))
+                        .when(!session.host.is_local(), |pill| pill.child(ssh_icon(theme.tokens.text, &theme)))
                         .children(
                             dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
                                 .map(|badge| dir_badge(&badge, &theme)),
                         )
                         .when(!self.query.text().trim().is_empty(), |pill| {
-                            pill.child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(
-                                project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
-                            ))
+                            let name =
+                                project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                            let name = match session.host.remote_name() {
+                                Some(host) => format!("{host} - {name}"),
+                                None => name,
+                            };
+                            pill.child(div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(name))
                         })
                         .child(
                             div()
@@ -446,6 +484,10 @@ impl RecentsView {
                 RecentItem::Session { session, age, project, marks, snippet: Some(snippet), open } => {
                     let project_name =
                         project.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    let project_name = match session.host.remote_name() {
+                        Some(host) => format!("{host} - {project_name}"),
+                        None => project_name,
+                    };
                     row.h(theme.ui(HIT_ROW_HEIGHT)).child(
                         pill()
                             .flex_col()
@@ -473,6 +515,9 @@ impl RecentsView {
                                     })
                                     .when(session.container.is_some(), |line| {
                                         line.child(container_icon(theme.tokens.text, &theme))
+                                    })
+                                    .when(!session.host.is_local(), |line| {
+                                        line.child(ssh_icon(theme.tokens.text, &theme))
                                     })
                                     .children(
                                         dir_badge_for(
@@ -550,6 +595,55 @@ impl RecentsView {
             this.choose(index, event.modifiers().secondary(), cx);
             cx.notify();
         }))
+    }
+
+    /// Under the list: a muted line per host whose conversation search is unavailable, and one with a Connect button
+    /// per SSH host that is not connected.
+    fn render_host_lines(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let theme = theme(cx).clone();
+        let line = || {
+            div()
+                .h(theme.ui(30.))
+                .px_4()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(rgb(theme.tokens.muted))
+                .border_t_1()
+                .border_color(rgb(theme.tokens.line))
+        };
+        let searching = !self.choosing && searches_content(self.query.text());
+        let unavailable = self
+            .unavailable
+            .iter()
+            .filter(|host| !host.is_local() && searching)
+            .map(|host| line().child(format!("{}: search unavailable", host.name())).into_any_element());
+        let offline = self.offline.iter().enumerate().map(|(index, name)| {
+            let host = HostId::named(name);
+            line()
+                .child(div().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(theme.tokens.muted)))
+                .child(div().flex_1().child(format!("{name} is not connected")))
+                .child(
+                    div()
+                        .id(("connect", index))
+                        .h(theme.ui(22.))
+                        .px(theme.ui(10.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(RADIUS_SMALL))
+                        .border_1()
+                        .border_color(rgb(theme.tokens.line))
+                        .bg(rgb(theme.tokens.raised))
+                        .text_color(rgb(theme.tokens.text))
+                        .hover(|style| style.border_color(rgb(theme.tokens.accent)))
+                        .cursor_pointer()
+                        .child("Connect")
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(RecentsEvent::Connect(host.clone())))),
+                )
+                .into_any_element()
+        });
+        unavailable.chain(offline).collect()
     }
 
     fn render_chip(&self, index: usize, chip: &Chip, cx: &mut Context<Self>) -> impl IntoElement {
@@ -687,6 +781,7 @@ impl Render for RecentsView {
                 })
                 .h(theme.ui(380.))
             })
+            .children(self.render_host_lines(cx))
             .child(
                 div()
                     .h(theme.ui(34.))

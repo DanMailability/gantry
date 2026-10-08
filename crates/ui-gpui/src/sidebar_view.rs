@@ -20,6 +20,7 @@ use gpui::{
     KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
     UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, rgb, rgba, uniform_list,
 };
+use protocol::host::HostId;
 use protocol::message::SessionInfo;
 
 use crate::context_menu::{self, OpenMenu};
@@ -27,7 +28,8 @@ use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
 use crate::theme::{
-    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, side_line, sweeping, theme, working_sweep,
+    RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pin_icon, side_line, ssh_icon, sweeping, theme,
+    working_sweep,
 };
 
 /// Every row is this tall (the list is uniform); session rows draw a pill inside it.
@@ -76,10 +78,12 @@ pub enum SidebarEvent {
         /// The new name, as typed.
         name: String,
     },
-    /// Open the launcher (Claude first, or shell first).
+    /// A New button was pressed: the launcher (Claude first, or shell first), or a list of hosts.
     New {
         /// Claude (true) or a shell.
         claude: bool,
+        /// Where the button was clicked.
+        position: Point<Pixels>,
     },
     /// Open the recent sessions pop-up.
     OpenRecents,
@@ -106,6 +110,7 @@ pub struct SidebarView {
     details: Option<String>,
     /// Sessions with an alert the user has not seen.
     unseen: HashSet<String>,
+    marked: HashSet<String>,
     /// The Working glow runs: the setting is on and the window is active.
     animate: bool,
     /// Every row with no filter, every project expanded and no details: the order Ctrl+Tab and the title bar use.
@@ -164,6 +169,7 @@ impl SidebarView {
             toggled: HashSet::new(),
             details: None,
             unseen: HashSet::new(),
+            marked: HashSet::new(),
             animate: false,
             all_rows: Vec::new(),
             rows: Vec::new(),
@@ -183,8 +189,8 @@ impl SidebarView {
     }
 
     /// The project a directory belongs to (its git repository, else the directory).
-    pub(crate) fn project_of(&self, cwd: &Path) -> PathBuf {
-        self.roots.of(cwd)
+    pub(crate) fn project_of(&self, host: &HostId, cwd: &Path) -> PathBuf {
+        self.roots.of(host, cwd)
     }
 
     /// Every Gantry leaf in sidebar order, whatever the filter or collapsed projects hide.
@@ -226,22 +232,23 @@ impl SidebarView {
         &self.sessions
     }
 
-    /// Replace the session list.
-    pub fn set_sessions(&mut self, sessions: Vec<SessionInfo>, cx: &mut Context<Self>) {
-        self.sessions.replace(sessions);
+    /// Replace the session list of `host`.
+    pub fn set_sessions(&mut self, host: &HostId, sessions: Vec<SessionInfo>, cx: &mut Context<Self>) {
+        self.sessions.replace(host, sessions);
         self.rebuild(cx);
     }
 
-    /// Apply a session change.
-    pub fn apply(&mut self, upserted: Vec<SessionInfo>, removed: &[String], cx: &mut Context<Self>) {
-        self.sessions.apply(upserted, removed);
+    /// Apply a session change of `host`.
+    pub fn apply(&mut self, host: &HostId, upserted: Vec<SessionInfo>, removed: &[String], cx: &mut Context<Self>) {
+        self.sessions.apply(host, upserted, removed);
         self.rebuild(cx);
     }
 
-    /// Sessions to mark with the unseen badge.
-    pub fn set_unseen(&mut self, unseen: HashSet<String>, cx: &mut Context<Self>) {
-        if unseen != self.unseen {
+    /// Sessions to mark with the unseen badge, and those of them marked unread by hand.
+    pub fn set_unseen(&mut self, unseen: HashSet<String>, marked: HashSet<String>, cx: &mut Context<Self>) {
+        if unseen != self.unseen || marked != self.marked {
             self.unseen = unseen;
+            self.marked = marked;
             self.rebuild(cx);
         }
     }
@@ -307,7 +314,7 @@ impl SidebarView {
             let sessions: Vec<&SessionInfo> = self.sessions.all().collect();
             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
             let roots = &self.roots;
-            let project_of = |cwd: &Path| roots.of(cwd);
+            let project_of = |host: &HostId, cwd: &Path| roots.of(host, cwd);
             let build = |filter: &str,
                          toggled: &HashSet<PathBuf>,
                          details: Option<&str>,
@@ -321,6 +328,7 @@ impl SidebarView {
                     toggled,
                     details,
                     unseen: &self.unseen,
+                    marked: &self.marked,
                     tabs: &self.tabs,
                     project_of: &project_of,
                     now_ms,
@@ -330,7 +338,7 @@ impl SidebarView {
             // Until the session list arrives, number nothing: panes and sessions must get their arrival
             // numbers together, so that at startup leaves land above outside sessions.
             let mut unloaded = (Arrivals::default(), ProjectOrder::default());
-            let (arrivals, order) = if self.sessions.loaded() {
+            let (arrivals, order) = if self.sessions.loaded(&HostId::local()) {
                 (&mut self.arrivals, &mut self.order)
             } else {
                 (&mut unloaded.0, &mut unloaded.1)
@@ -470,7 +478,16 @@ impl SidebarView {
             RowKind::Pane { entry, .. } => Some(entry.cwd.as_path()),
             _ => None,
         };
-        let context = folder.map(|folder| MenuContext::for_folder(settings, folder)).unwrap_or_default();
+        // A remote folder has no Claude dirs or colors here, but a project heading can be a favorite (saved under its
+        // project key), so a heading's context comes from the key itself.
+        let remote = match &row.kind {
+            RowKind::Project { .. } => false,
+            RowKind::Session { session, .. } => !session.host.is_local(),
+            RowKind::Pane { entry, .. } => !entry.host.is_local(),
+            _ => false,
+        };
+        let context =
+            folder.filter(|_| !remote).map(|folder| MenuContext::for_folder(settings, folder)).unwrap_or_default();
         let alone = |leaf: NodeId| self.panes.iter().find(|pane| pane.leaf == leaf).is_none_or(|pane| pane.alone);
         let items = match &row.kind {
             RowKind::Project { path, .. } => {
@@ -686,6 +703,7 @@ impl SidebarView {
                     status: Some(note.clone()),
                     dir: dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()),
                     container: session.container.is_some(),
+                    host: session.host.remote_name().map(String::from),
                     folder: Some(display_path(&session.cwd, std::env::home_dir().as_deref())),
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
@@ -700,6 +718,7 @@ impl SidebarView {
                                 .when(*tone == Tone::NeedsInput, |title| title.font_weight(FontWeight::SEMIBOLD)),
                         )
                         .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
+                        .when(!session.host.is_local(), |pill| pill.child(ssh_icon(colors.ink, &theme)))
                         .children(
                             dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
                                 .map(|badge| dir_badge(&badge, &theme)),
@@ -713,6 +732,7 @@ impl SidebarView {
                     status: Some(note.clone()),
                     dir: None,
                     container: false,
+                    host: entry.host.remote_name().map(String::from),
                     folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
                 }))
                 .child(
@@ -723,6 +743,7 @@ impl SidebarView {
                             self.rename_field(RenameTarget::Pane(entry.leaf), &theme, cx)
                                 .unwrap_or_else(|| title(entry.title.clone())),
                         )
+                        .when(!entry.host.is_local(), |pill| pill.child(ssh_icon(theme.tokens.muted, &theme)))
                         .children(project()),
                 ),
             RowKind::Pane { entry, tone, note } => {
@@ -732,6 +753,7 @@ impl SidebarView {
                     status: Some(note.clone()),
                     dir: None,
                     container: false,
+                    host: entry.host.remote_name().map(String::from),
                     folder: Some(display_path(&entry.cwd, std::env::home_dir().as_deref())),
                 };
                 base.tooltip(hover_card::tooltip(card)).child(
@@ -742,6 +764,7 @@ impl SidebarView {
                         .text_color(rgb(colors.ink))
                         .children(lead_mark(*tone, &colors, &theme))
                         .child(title("New session".into()))
+                        .when(!entry.host.is_local(), |pill| pill.child(ssh_icon(colors.ink, &theme)))
                         .children(project()),
                 )
             }
@@ -852,10 +875,12 @@ impl Render for DraggedProject {
 }
 
 /// Small rounded counters in the tones of a project's live sessions.
-/// The mark before a row's title: a ring for Closed, `↗` for Elsewhere, none for the filled tones.
+/// The mark before a row's title: a ring for Closed, `↗` for Elsewhere, a pin for Unread, none for the other filled
+/// tones.
 fn lead_mark(tone: Tone, colors: &ToneColors, theme: &Theme) -> Option<gpui::Div> {
     match lead(tone) {
         Lead::None => None,
+        Lead::Pin => Some(div().flex_none().child(pin_icon(colors.dot, theme))),
         Lead::Ring => {
             Some(div().flex_none().size(theme.ui(8.)).rounded_full().border_1().border_color(rgb(colors.dot)))
         }
@@ -1064,7 +1089,9 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(|style| style.opacity(0.9))
                             .child("New Claude session")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: true }))),
+                            .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
+                                cx.emit(SidebarEvent::New { claude: true, position: event.position() })
+                            })),
                     )
                     .child(
                         div()
@@ -1082,7 +1109,9 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                             .child(">_")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::New { claude: false }))),
+                            .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
+                                cx.emit(SidebarEvent::New { claude: false, position: event.position() })
+                            })),
                     ),
             )
             .when_some(self.menu.as_ref(), |el, menu| {

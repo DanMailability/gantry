@@ -11,8 +11,18 @@ use daemon::paths::{Paths, current_profile};
 
 fn main() -> ExitCode {
     let mut argv = std::env::args().skip(1).peekable();
+    // ssh runs `$SSH_ASKPASS "<prompt>"`: only an attempt started by Gantry sets the socket, and then this is the helper.
+    if std::env::var_os("GANTRY_ASKPASS_SOCKET").is_some() && argv.peek().map(String::as_str) != Some("askpass") {
+        return askpass_main(std::iter::once(String::new()).chain(argv));
+    }
     match argv.peek().map(String::as_str) {
+        Some("--version") => {
+            println!("{}", protocol::build::version_line());
+            return ExitCode::SUCCESS;
+        }
         Some("daemon") => return daemon_main(),
+        Some("bridge") => return bridge_main(),
+        Some("askpass") => return askpass_main(argv),
         Some("internal-print-env") => {
             println!("{}", daemon::shell_env::print_env_json());
             return ExitCode::SUCCESS;
@@ -20,18 +30,67 @@ fn main() -> ExitCode {
         _ => {}
     }
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
-    let launch = match LaunchArgs::parse(argv)
-        .map_err(|m| m.to_string())
-        .and_then(|a| a.into_launch().map_err(|e| e.to_string()))
-    {
+    let parsed = LaunchArgs::parse(argv);
+    let resume_sessions = parsed.as_ref().is_ok_and(|args| args.resume_sessions);
+    let launch = match parsed.and_then(|a| a.into_launch().map_err(|e| e.to_string())) {
         Ok(launch) => launch,
         Err(message) => {
             eprintln!("gantry: {message}");
             return ExitCode::from(2);
         }
     };
-    ui_gpui::run(launch);
+    ui_gpui::run(launch, resume_sessions);
     ExitCode::SUCCESS
+}
+
+/// `gantry bridge`: what ssh runs on a remote machine. Joins stdin/stdout to this machine's daemon socket.
+/// Stdout carries only protocol bytes, so nothing here logs.
+fn bridge_main() -> ExitCode {
+    let paths = Paths::for_profile(&current_profile());
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("gantry bridge: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(daemon::bridge::run_bridge(
+        &paths,
+        daemon::launch::spawn_detached_daemon,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    ));
+    // Leave now: dropping the runtime would wait for the blocked read of stdin, which keeps the bridge (and its ssh
+    // session) alive after the daemon closed the socket.
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(err) => {
+            eprintln!("gantry bridge: {err}");
+            std::process::exit(1)
+        }
+    }
+}
+
+/// `gantry <prompt>` with `GANTRY_ASKPASS_SOCKET` set (or `gantry askpass <prompt>`): ssh's `SSH_ASKPASS` helper. Asks the GUI that started this attempt and prints the
+/// answer; the answer is never logged.
+fn askpass_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
+    let _ = argv.next();
+    let prompt = argv.next().unwrap_or_default();
+    let Some(socket) = std::env::var_os("GANTRY_ASKPASS_SOCKET") else {
+        eprintln!("gantry askpass: only ssh attempts started by Gantry can ask");
+        return ExitCode::FAILURE;
+    };
+    match daemon::askpass::run_helper(std::path::Path::new(&socket), &prompt) {
+        Ok(Some(answer)) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::FAILURE,
+        Err(err) => {
+            eprintln!("gantry askpass: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Set on a daemon re-launched by `daemon_main`, so it never re-launches again.

@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use protocol::host::{HostId, split_project_key};
 use protocol::message::{ContainerPlace, SessionState};
 
+use crate::host_state::HostDot;
 use crate::session_tree::{Row, RowKind, Tone};
 use crate::settings::Settings;
 use crate::split_tree::{Axis, NodeId};
@@ -46,6 +48,20 @@ pub enum MenuAction {
         /// Claude (else a shell).
         claude: bool,
     },
+    /// Open the launcher, with Claude (else a shell) first.
+    NewLocal {
+        /// Claude (else a shell).
+        claude: bool,
+    },
+    /// Start a new Claude session (else a shell) on an SSH host.
+    NewOnHost {
+        /// The host's name.
+        host: String,
+        /// Claude (else a shell).
+        claude: bool,
+    },
+    /// Open the SSH host wizard.
+    AddSshHost,
     /// Copy text to the clipboard.
     Copy(String),
     /// Show a folder in the system file manager.
@@ -77,10 +93,12 @@ pub enum MenuAction {
     UnpinFavorite(PathBuf),
     /// Start a new Claude session or shell in a folder.
     NewHere {
-        /// The folder.
+        /// The folder (on `host`).
         dir: PathBuf,
         /// Claude (else a shell).
         claude: bool,
+        /// The host the folder is on.
+        host: HostId,
     },
     /// Open the recent sessions pop-up on a project.
     RecentsFor(PathBuf),
@@ -99,6 +117,8 @@ pub enum MenuAction {
         session: String,
         /// Its directory.
         cwd: PathBuf,
+        /// The host it runs on.
+        host: HostId,
     },
 }
 
@@ -117,6 +137,8 @@ pub struct MenuEntry {
     pub swatch: Option<ProjectColor>,
     /// Marked as the current choice.
     pub checked: bool,
+    /// A state dot drawn before the label (SSH hosts in the New menu).
+    pub dot: Option<HostDot>,
 }
 
 /// A menu line.
@@ -180,6 +202,7 @@ fn entry(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
+        dot: None,
     })
 }
 
@@ -191,6 +214,7 @@ fn with_shortcut(label: &str, shortcut: Shortcut, action: MenuAction) -> MenuIte
         action,
         swatch: None,
         checked: false,
+        dot: None,
     })
 }
 
@@ -202,6 +226,7 @@ fn accented(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
+        dot: None,
     })
 }
 
@@ -220,6 +245,7 @@ fn color_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
                 action,
                 swatch: Some(color),
                 checked: current == Some(color),
+                dot: None,
             })
         })
         .collect();
@@ -230,6 +256,7 @@ fn color_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
         action: MenuAction::SetProjectColor { root: root.to_path_buf(), color: None },
         swatch: None,
         checked: current.is_none(),
+        dot: None,
     }));
     MenuItem::Submenu { label: "Color".into(), items }
 }
@@ -256,13 +283,36 @@ fn claude_with(dir: &Path, context: &MenuContext) -> Option<MenuItem> {
     Some(MenuItem::Submenu { label: "New Claude here with".into(), items })
 }
 
-/// Copy folder path · Open folder · Open in VS Code.
-fn folder_items(dir: &Path, vscode: Vec<String>) -> [MenuItem; 3] {
-    [
+/// Copy folder path · Open folder · Open in VS Code; on a remote host only "Copy folder path (on <host>)".
+fn folder_items(dir: &Path, vscode: Vec<String>, host: &HostId) -> Vec<MenuItem> {
+    if let Some(name) = host.remote_name() {
+        return vec![entry(&format!("Copy folder path (on {name})"), MenuAction::Copy(dir.display().to_string()))];
+    }
+    vec![
         entry("Copy folder path", MenuAction::Copy(dir.display().to_string())),
         entry("Open folder", MenuAction::OpenFolder(dir.to_path_buf())),
         entry("Open in VS Code", MenuAction::OpenInVsCode(vscode)),
     ]
+}
+
+/// "New Claude here with ▸" for a folder on this machine; remote hosts use their own Claude config.
+fn claude_with_on(dir: &Path, context: &MenuContext, host: &HostId) -> Option<MenuItem> {
+    host.is_local().then(|| claude_with(dir, context)).flatten()
+}
+
+/// Drop separators that lead, trail or follow another separator.
+fn tidy(items: Vec<MenuItem>) -> Vec<MenuItem> {
+    let mut tidy: Vec<MenuItem> = Vec::with_capacity(items.len());
+    for item in items {
+        if matches!(item, MenuItem::Separator) && tidy.last().is_none_or(|last| matches!(last, MenuItem::Separator)) {
+            continue;
+        }
+        tidy.push(item);
+    }
+    if matches!(tidy.last(), Some(MenuItem::Separator)) {
+        tidy.pop();
+    }
+    tidy
 }
 
 /// The arguments for `code`: inside the dev container when there is one (the session's own path there, else VS Code's
@@ -289,9 +339,10 @@ pub fn vscode_args(folder: &Path, container: Option<&ContainerPlace>, pane_conta
 /// A tab's menu; `dir` is its focused pane's directory. `mark` = the focused pane and whether it is unread (offers
 /// "Mark as read"), `None` when it is neither unread nor idle.
 /// `panes` = how many panes the tab has; only a split tab (its heading) can be renamed.
-/// `context.dirs` is empty for a dev container tab.
+/// `context.dirs` is empty for a dev container tab. `host` = the host the focused pane runs on.
 pub fn tab_menu(
     tab: usize,
+    host: &HostId,
     dir: &Path,
     vscode: Vec<String>,
     context: &MenuContext,
@@ -302,18 +353,18 @@ pub fn tab_menu(
         with_shortcut("Split right", Shortcut::SplitRight, MenuAction::Split { tab, axis: Axis::Horizontal }),
         with_shortcut("Split down", Shortcut::SplitDown, MenuAction::Split { tab, axis: Axis::Vertical }),
     ];
-    items.extend(claude_with(dir, context));
+    items.extend(claude_with_on(dir, context, host));
     if let Some((leaf, unread)) = mark {
         items.push(read_mark_item(leaf, unread));
     }
     items.push(MenuItem::Separator);
-    items.extend(folder_items(dir, vscode));
+    items.extend(folder_items(dir, vscode, host));
     items.push(MenuItem::Separator);
     if panes > 1 {
         items.push(entry("Rename…", MenuAction::RenameTab(tab)));
     }
     items.push(with_shortcut("Close tab", Shortcut::Close, MenuAction::CloseTab(tab)));
-    items
+    tidy(items)
 }
 
 /// The popup of a pane's split button: what the new pane runs, Claude or a terminal.
@@ -326,6 +377,26 @@ pub fn split_menu(leaf: NodeId, axis: Axis) -> Vec<MenuItem> {
         with_shortcut("Claude", claude, MenuAction::SplitPane { leaf, axis, claude: true }),
         with_shortcut("Terminal", shell, MenuAction::SplitPane { leaf, axis, claude: false }),
     ]
+}
+
+/// The list the New buttons open when SSH hosts are defined: `Local` first, then each host as (name, state label,
+/// state dot).
+pub fn host_menu(claude: bool, hosts: &[(String, String, HostDot)]) -> Vec<MenuItem> {
+    let mut items = vec![entry("Local", MenuAction::NewLocal { claude }), MenuItem::Separator];
+    items.extend(hosts.iter().map(|(name, state, dot)| {
+        MenuItem::Entry(MenuEntry {
+            label: format!("{name} · {state}"),
+            shortcut: None,
+            accent: false,
+            action: MenuAction::NewOnHost { host: name.clone(), claude },
+            swatch: None,
+            checked: false,
+            dot: Some(*dot),
+        })
+    }));
+    items.push(MenuItem::Separator);
+    items.push(entry("Add SSH host…", MenuAction::AddSshHost));
+    items
 }
 
 /// What a middle click on a sidebar row does: a split tab's heading closes the tab, a pane's row closes the pane
@@ -365,7 +436,11 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     if pid.is_some() && session.cwd_exists {
                         items.push(accented(
                             "Take over…",
-                            MenuAction::TakeOver { session: session.id.clone(), cwd: session.cwd.clone() },
+                            MenuAction::TakeOver {
+                                session: session.id.clone(),
+                                cwd: session.cwd.clone(),
+                                host: session.host.clone(),
+                            },
                         ));
                         items.push(MenuItem::Separator);
                     }
@@ -375,19 +450,21 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     items.push(MenuItem::Separator);
                 }
                 _ => {
-                    items
-                        .push(entry("New Claude here", MenuAction::NewHere { dir: session.cwd.clone(), claude: true }));
+                    items.push(entry(
+                        "New Claude here",
+                        MenuAction::NewHere { dir: session.cwd.clone(), claude: true, host: session.host.clone() },
+                    ));
                     if session.container.is_none() {
-                        items.extend(claude_with(&session.cwd, context));
+                        items.extend(claude_with_on(&session.cwd, context, &session.host));
                     }
                     items.push(MenuItem::Separator);
                 }
             }
-            if let (Tone::Idle | Tone::Done, Some(leaf)) = (tone, leaf) {
-                items.push(read_mark_item(*leaf, *tone == Tone::Done));
+            if let (Tone::Idle | Tone::Done | Tone::Unread, Some(leaf)) = (tone, leaf) {
+                items.push(read_mark_item(*leaf, *tone != Tone::Idle));
             }
             items.push(entry("Copy session id", MenuAction::Copy(session.id.clone())));
-            items.extend(folder_items(&session.cwd, vscode));
+            items.extend(folder_items(&session.cwd, vscode, &session.host));
             if let Some(leaf) = leaf {
                 items.push(MenuItem::Separator);
                 items.push(close_item(*leaf, alone));
@@ -399,9 +476,12 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                 (true, true) => items.push(accented("Continue", MenuAction::Continue(pane.leaf))),
                 (claude, _) => {
                     let label = if claude { "New Claude here" } else { "New shell here" };
-                    items.push(entry(label, MenuAction::NewHere { dir: pane.cwd.clone(), claude }));
+                    items.push(entry(
+                        label,
+                        MenuAction::NewHere { dir: pane.cwd.clone(), claude, host: pane.host.clone() },
+                    ));
                     if claude && pane.container.is_none() {
-                        items.extend(claude_with(&pane.cwd, context));
+                        items.extend(claude_with_on(&pane.cwd, context, &pane.host));
                     }
                     if !claude {
                         items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf)));
@@ -412,7 +492,7 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             if let Some(id) = &pane.session {
                 items.push(entry("Copy session id", MenuAction::Copy(id.clone())));
             }
-            items.extend(folder_items(&pane.cwd, vscode));
+            items.extend(folder_items(&pane.cwd, vscode, &pane.host));
             items.push(MenuItem::Separator);
             items.push(close_item(pane.leaf, alone));
         }
@@ -420,30 +500,34 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             return None;
         }
     }
-    Some(items)
+    Some(tidy(items))
 }
 
-/// A project heading's menu; `container` = the dev container one of its sessions runs in, if any.
+/// A project heading's menu; `path` = the project key (see `protocol::host::project_key`), `container` = the dev
+/// container one of its sessions runs in, if any. A remote project has a pin (saved under its key) but no color or
+/// local folder entries.
 pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &MenuContext) -> Vec<MenuItem> {
-    let mut items = vec![entry("New Claude here", MenuAction::NewHere { dir: path.to_path_buf(), claude: true })];
+    let (host, dir) = split_project_key(path);
+    let new_here = |claude| MenuAction::NewHere { dir: dir.clone(), claude, host: host.clone() };
+    let mut items = vec![entry("New Claude here", new_here(true))];
     if container.is_none() {
-        items.extend(claude_with(path, context));
+        items.extend(claude_with_on(path, context, &host));
     }
-    items.push(entry("New shell here", MenuAction::NewHere { dir: path.to_path_buf(), claude: false }));
+    items.push(entry("New shell here", new_here(false)));
     items.push(if context.favorite {
         entry("Unpin", MenuAction::UnpinFavorite(path.to_path_buf()))
     } else {
         entry("Pin as favorite", MenuAction::PinFavorite(path.to_path_buf()))
     });
-    if let Some(current) = context.project_color {
+    if let Some(current) = context.project_color.filter(|_| host.is_local()) {
         items.push(color_menu(path, current));
     }
     items.extend([
         with_shortcut("Recent sessions here", Shortcut::Recents, MenuAction::RecentsFor(path.to_path_buf())),
         MenuItem::Separator,
     ]);
-    items.extend(folder_items(path, vscode_args(path, container, None)));
-    items
+    items.extend(folder_items(&dir, vscode_args(&dir, container, None), &host));
+    tidy(items)
 }
 
 #[cfg(test)]
@@ -493,6 +577,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
+            host: protocol::host::HostId::local(),
         }
     }
 
@@ -503,11 +588,13 @@ mod tests {
     fn pane_row(claude: bool, ended: bool) -> Row {
         let entry = PaneEntry {
             leaf: 7,
+            host: protocol::host::HostId::local(),
             cwd: "/r/app".into(),
             title: "p".into(),
             session: claude.then(|| "new".to_string()),
             claude,
             ended,
+            offline: false,
             alone: true,
             container: None,
         };
@@ -563,8 +650,42 @@ mod tests {
     }
 
     #[test]
+    fn the_host_menu_lists_local_first_then_each_host_with_its_state() {
+        let hosts = vec![
+            ("devbox".to_string(), "connected".to_string(), HostDot::Ok),
+            ("lab".to_string(), "needs sign-in".to_string(), HostDot::Warn),
+        ];
+        let items = host_menu(true, &hosts);
+        let entry = |item: &MenuItem| match item {
+            MenuItem::Entry(entry) => Some((entry.label.clone(), entry.action.clone())),
+            _ => None,
+        };
+        assert_eq!(entry(&items[0]), Some(("Local".into(), MenuAction::NewLocal { claude: true })));
+        assert!(matches!(items[1], MenuItem::Separator));
+        assert_eq!(
+            entry(&items[2]),
+            Some(("devbox · connected".into(), MenuAction::NewOnHost { host: "devbox".into(), claude: true }))
+        );
+        assert_eq!(
+            entry(&items[3]),
+            Some(("lab · needs sign-in".into(), MenuAction::NewOnHost { host: "lab".into(), claude: true }))
+        );
+        assert!(matches!(items[4], MenuItem::Separator));
+        assert_eq!(entry(&items[5]), Some(("Add SSH host…".into(), MenuAction::AddSshHost)));
+        assert_eq!(items.len(), 6);
+        let dot = |item: &MenuItem| match item {
+            MenuItem::Entry(entry) => entry.dot,
+            _ => None,
+        };
+        assert_eq!((dot(&items[0]), dot(&items[2]), dot(&items[3])), (None, Some(HostDot::Ok), Some(HostDot::Warn)));
+        let shell = host_menu(false, &hosts);
+        assert!(matches!(&shell[0], MenuItem::Entry(MenuEntry { action: MenuAction::NewLocal { claude: false }, .. })));
+    }
+
+    #[test]
     fn a_tab_offers_splits_folder_items_and_close() {
-        let items = tab_menu(2, Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default(), None, 2);
+        let items =
+            tab_menu(2, &HostId::local(), Path::new("/r/app"), vec!["/r/app".into()], &MenuContext::default(), None, 2);
         assert_eq!(
             labels(&items),
             [
@@ -603,15 +724,16 @@ mod tests {
         assert_eq!(rename(&menus_row_menu(&pane_row(true, true))), None);
         let running = SessionState::Managed { pane: 1 };
         assert_eq!(rename(&menus_row_menu(&session_row(running, Tone::Idle, Some(4)))), None);
-        let items = tab_menu(3, Path::new("/r/app"), vec![], &MenuContext::default(), None, 2);
+        let items = tab_menu(3, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), None, 2);
         assert_eq!(rename(&items), Some(MenuAction::RenameTab(3)));
-        let single = tab_menu(3, Path::new("/r/app"), vec![], &MenuContext::default(), None, 1);
+        let single = tab_menu(3, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), None, 1);
         assert_eq!(rename(&single), None, "a one-pane tab has no heading to rename");
     }
 
     #[test]
     fn a_tab_with_an_idle_claude_offers_mark_as_unread() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, false)), 2);
+        let items =
+            tab_menu(0, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, false)), 2);
         assert_eq!(
             labels(&items),
             [
@@ -633,7 +755,8 @@ mod tests {
 
     #[test]
     fn an_unread_tab_offers_mark_as_read() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, true)), 1);
+        let items =
+            tab_menu(0, &HostId::local(), Path::new("/r/app"), vec![], &MenuContext::default(), Some((7, true)), 1);
         let MenuItem::Entry(read) = &items[2] else { panic!() };
         assert_eq!((read.label.as_str(), &read.action), ("Mark as read", &MenuAction::MarkRead(7)));
     }
@@ -643,6 +766,7 @@ mod tests {
         for (tone, label) in [
             (Tone::Idle, Some("Mark as unread")),
             (Tone::Done, Some("Mark as read")),
+            (Tone::Unread, Some("Mark as read")),
             (Tone::Working, None),
             (Tone::NeedsInput, None),
         ] {
@@ -695,7 +819,10 @@ mod tests {
         );
         let MenuItem::Entry(take) = &items[0] else { panic!() };
         assert!(take.accent);
-        assert_eq!(take.action, MenuAction::TakeOver { session: "s1".into(), cwd: "/r/app".into() });
+        assert_eq!(
+            take.action,
+            MenuAction::TakeOver { session: "s1".into(), cwd: "/r/app".into(), host: HostId::local() }
+        );
         let boxed = session_row(SessionState::External { pid: None }, Tone::Elsewhere, None);
         assert_eq!(labels(&row_menu(&boxed, ALONE, &MenuContext::default()).unwrap())[0], "Copy session id");
     }
@@ -744,7 +871,7 @@ mod tests {
             ["New shell here", "Rename…", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
         );
         let MenuItem::Entry(new) = &shell[0] else { panic!() };
-        assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false });
+        assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false, host: HostId::local() });
     }
 
     #[test]
@@ -888,7 +1015,7 @@ mod tests {
 
     #[test]
     fn a_tab_menu_offers_the_choice_after_the_splits() {
-        let items = tab_menu(0, Path::new("/r/app"), vec![], &two_dirs(None), None, 1);
+        let items = tab_menu(0, &HostId::local(), Path::new("/r/app"), vec![], &two_dirs(None), None, 1);
         assert_eq!(labels(&items)[..4], ["Split right", "Split down", "New Claude here with ▸", "│"]);
     }
 
@@ -946,5 +1073,117 @@ mod tests {
             panic!()
         };
         assert_eq!(pin.action, MenuAction::PinFavorite("/r/app".into()));
+    }
+
+    fn devbox() -> HostId {
+        HostId::named("devbox")
+    }
+
+    fn remote_session_row(state: SessionState, tone: Tone, leaf: Option<NodeId>) -> Row {
+        let mut row = session_row(state, tone, leaf);
+        let RowKind::Session { session, .. } = &mut row.kind else { panic!() };
+        session.host = devbox();
+        row
+    }
+
+    #[test]
+    fn a_remote_session_row_hides_local_only_entries() {
+        let row = remote_session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
+        let items = row_menu(&row, &|_| false, &two_dirs(None)).unwrap();
+        let shown = labels(&items);
+        for hidden in ["Open folder", "Open in VS Code", "New Claude here with ▸"] {
+            assert!(!shown.contains(&hidden.to_string()), "{hidden} in {shown:?}");
+        }
+        for kept in ["Copy folder path (on devbox)", "Copy session id", "Close pane"] {
+            assert!(shown.contains(&kept.to_string()), "{kept} missing in {shown:?}");
+        }
+    }
+
+    #[test]
+    fn a_remote_external_session_still_offers_take_over_with_its_host() {
+        let row = remote_session_row(SessionState::External { pid: Some(42) }, Tone::Elsewhere, None);
+        let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
+        let MenuItem::Entry(take) = &items[0] else { panic!() };
+        assert_eq!(take.action, MenuAction::TakeOver { session: "s1".into(), cwd: "/r/app".into(), host: devbox() });
+    }
+
+    #[test]
+    fn new_here_on_a_remote_row_carries_the_host() {
+        let row = remote_session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
+        let items = row_menu(&row, ALONE, &MenuContext::default()).unwrap();
+        let MenuItem::Entry(new) = &items[0] else { panic!() };
+        assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: true, host: devbox() });
+        let mut pane = pane_row(false, false);
+        let RowKind::Pane { entry, .. } = &mut pane.kind else { panic!() };
+        entry.host = devbox();
+        let shell = row_menu(&pane, ALONE, &MenuContext::default()).unwrap();
+        let MenuItem::Entry(new) = &shell[0] else { panic!() };
+        assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false, host: devbox() });
+    }
+
+    #[test]
+    fn a_remote_project_heading_has_a_pin_but_no_color_or_folder_entries() {
+        let context = MenuContext { project_color: Some(None), ..two_dirs(None) };
+        let items = project_menu(Path::new("ssh://devbox/r/app"), None, &context);
+        assert_eq!(
+            labels(&items),
+            [
+                "New Claude here",
+                "New shell here",
+                "Pin as favorite",
+                "Recent sessions here",
+                "│",
+                "Copy folder path (on devbox)"
+            ]
+        );
+        let MenuItem::Entry(new) = &items[0] else { panic!() };
+        assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: true, host: devbox() });
+        let MenuItem::Entry(pin) = &items[2] else { panic!() };
+        assert_eq!(pin.action, MenuAction::PinFavorite("ssh://devbox/r/app".into()));
+        let MenuItem::Entry(copy) = items.last().unwrap() else { panic!() };
+        assert_eq!(copy.action, MenuAction::Copy("/r/app".into()));
+    }
+
+    #[test]
+    fn a_pinned_remote_heading_offers_unpin_by_its_key() {
+        let settings = Settings { favorites: vec!["ssh://devbox/r/app".into()], ..Settings::default() };
+        let key = Path::new("ssh://devbox/r/app");
+        let context = MenuContext::for_folder(&settings, key);
+        assert!(context.favorite);
+        let items = project_menu(key, None, &context);
+        let MenuItem::Entry(unpin) = &items[2] else { panic!() };
+        assert_eq!((unpin.label.as_str(), &unpin.action), ("Unpin", &MenuAction::UnpinFavorite(key.to_path_buf())));
+    }
+
+    #[test]
+    fn no_menu_starts_ends_or_doubles_with_a_separator() {
+        let clean = |items: &[MenuItem]| {
+            assert!(!matches!(items.first(), Some(MenuItem::Separator)), "{:?}", labels(items));
+            assert!(!matches!(items.last(), Some(MenuItem::Separator)), "{:?}", labels(items));
+            assert!(
+                !items.windows(2).any(|pair| pair.iter().all(|item| matches!(item, MenuItem::Separator))),
+                "{:?}",
+                labels(items)
+            );
+        };
+        for host in [HostId::local(), devbox()] {
+            clean(&tab_menu(0, &host, Path::new("/r/app"), vec![], &MenuContext::default(), None, 1));
+            clean(&tab_menu(0, &host, Path::new("/r/app"), vec![], &two_dirs(None), Some((7, true)), 2));
+        }
+        for row in [
+            session_row(SessionState::Closed, Tone::Closed, None),
+            session_row(SessionState::External { pid: None }, Tone::Elsewhere, None),
+            remote_session_row(SessionState::External { pid: None }, Tone::Elsewhere, None),
+            remote_session_row(SessionState::Closed, Tone::Closed, Some(4)),
+            remote_session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4)),
+            pane_row(true, true),
+        ] {
+            if let Some(items) = row_menu(&row, ALONE, &two_dirs(None)) {
+                clean(&items);
+            }
+        }
+        for key in ["/r/app", "ssh://devbox/r/app"] {
+            clean(&project_menu(Path::new(key), None, &MenuContext::default()));
+        }
     }
 }

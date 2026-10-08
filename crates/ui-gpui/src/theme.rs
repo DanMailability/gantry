@@ -15,7 +15,7 @@ use gpui::{
     div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
 };
 
-use crate::assets::CONTAINER_ICON;
+use crate::assets::{CONTAINER_ICON, PIN_ICON, SSH_ICON};
 
 /// The colors and sizes views draw with, a GPUI global replaced whenever the settings change.
 #[derive(Clone)]
@@ -95,6 +95,16 @@ const FONTS: [&[u8]; 5] = [
 /// The dev container icon, in `ink` (slightly softened).
 pub(crate) fn container_icon(ink: u32, theme: &Theme) -> Svg {
     svg().path(CONTAINER_ICON).flex_none().size(theme.ui(14.)).text_color(rgba((ink << 8) | 0xd9))
+}
+
+/// The SSH host icon, in `ink` (slightly softened). Marks a session that runs on another machine.
+pub(crate) fn ssh_icon(ink: u32, theme: &Theme) -> Svg {
+    svg().path(SSH_ICON).flex_none().size(theme.ui(14.)).text_color(rgba((ink << 8) | 0xd9))
+}
+
+/// The pin of a row marked unread, in `dot`.
+pub(crate) fn pin_icon(dot: u32, theme: &Theme) -> Svg {
+    svg().path(PIN_ICON).flex_none().size(theme.ui(12.)).text_color(rgb(dot))
 }
 
 /// A config dir's badge: its letter on its color. Shown only with two or more config dirs.
@@ -188,14 +198,15 @@ mod tests {
     use app_core::theme_colors::{contrast, terminal_palette, tokens};
 
     const PRESETS: [Preset; 2] = [Preset::Mist, Preset::MistLight];
-    const TONES: [Tone; 6] = [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle, Tone::Elsewhere, Tone::Closed];
+    const TONES: [Tone; 7] =
+        [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Unread, Tone::Idle, Tone::Elsewhere, Tone::Closed];
 
     #[test]
     fn only_a_working_tone_in_an_active_window_with_the_setting_on_sweeps() {
         assert!(sweeping(Tone::Working, true, true));
         assert!(!sweeping(Tone::Working, false, true), "setting off");
         assert!(!sweeping(Tone::Working, true, false), "window inactive");
-        for tone in [Tone::NeedsInput, Tone::Done, Tone::Idle, Tone::Closed, Tone::Elsewhere] {
+        for tone in [Tone::NeedsInput, Tone::Done, Tone::Unread, Tone::Idle, Tone::Closed, Tone::Elsewhere] {
             assert!(!sweeping(tone, true, true), "{tone:?}");
         }
     }

@@ -13,8 +13,11 @@ ui-gpui.workspace = true
 daemon.workspace = true
 tracing-subscriber.workspace = true
 app-core.workspace = true
+tokio.workspace = true
+protocol.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+async-channel.workspace = true

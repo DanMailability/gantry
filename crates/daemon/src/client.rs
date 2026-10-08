@@ -9,8 +9,8 @@ use std::time::Duration;
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaletteColors, PaneId, PaneInfo, SearchHit,
-    SessionInfo, SpawnRequest, TakeOverOutcome,
+    ClientMessage, ContainerChoice, DaemonMessage, DirEntry, PROTOCOL_VERSION, PaletteColors, PaneId, PaneInfo,
+    SearchHit, SessionInfo, SpawnRequest, TakeOverOutcome,
 };
 use tokio::sync::mpsc;
 
@@ -107,6 +107,22 @@ pub enum ClientEvent {
         /// Why.
         reason: String,
     },
+    /// The answer to `list_dir`.
+    DirListing {
+        /// Echoed request id.
+        request: u64,
+        /// The expanded absolute path.
+        path: PathBuf,
+        /// Its folders.
+        dirs: Vec<DirEntry>,
+    },
+    /// `list_dir` failed.
+    DirListingFailed {
+        /// Echoed request id.
+        request: u64,
+        /// Why.
+        reason: String,
+    },
     /// Another GUI took over the daemon.
     TakenOver,
     /// The connection to the daemon was lost.
@@ -138,7 +154,7 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-enum Outgoing {
+pub(crate) enum Outgoing {
     Frame(Frame),
     Flush(std::sync::mpsc::Sender<()>),
 }
@@ -150,10 +166,12 @@ pub struct DaemonClient {
 }
 
 /// What the handshake returned.
-struct Hello {
-    instance: String,
-    claude_dir: Option<PathBuf>,
-    panes: Vec<PaneInfo>,
+pub(crate) struct Hello {
+    pub(crate) instance: String,
+    pub(crate) claude_dir: Option<PathBuf>,
+    pub(crate) daemon_version: Option<String>,
+    pub(crate) daemon_commit: Option<String>,
+    pub(crate) panes: Vec<PaneInfo>,
 }
 
 /// A fresh daemon connection.
@@ -164,6 +182,10 @@ pub struct Connection {
     pub instance: String,
     /// The daemon's default Claude config dir.
     pub claude_dir: Option<PathBuf>,
+    /// The daemon's app version, if it sent one.
+    pub daemon_version: Option<String>,
+    /// The daemon's git commit, if it sent one.
+    pub daemon_commit: Option<String>,
     /// Live panes at connect time, most recently focused first.
     pub panes: Vec<PaneInfo>,
     /// Daemon events, in order.
@@ -178,8 +200,7 @@ impl DaemonClient {
     ) -> Result<Connection, StartError> {
         let paths = paths.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
-        let (events_tx, events) = async_channel::bounded(EVENT_QUEUE);
+        let Link { client, outgoing: outgoing_rx, events_tx, events } = Link::new();
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(runtime) => runtime,
@@ -190,9 +211,8 @@ impl DaemonClient {
             };
             runtime.block_on(run_connection(paths, spawn, ready_tx, outgoing_rx, events_tx));
         });
-        let Hello { instance, claude_dir, panes } =
-            ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
-        Ok(Connection { client: DaemonClient { outgoing }, instance, claude_dir, panes, events })
+        let hello = ready_rx.recv().map_err(|_| StartError::Io(anyhow::anyhow!("client thread ended")))??;
+        Ok(connection(client, hello, events))
     }
 
     /// Start a pane; answered by `Spawned`/`SpawnFailed` with the same `request`.
@@ -223,6 +243,11 @@ impl DaemonClient {
     /// Search the conversations' text; answered by `SearchResults` with the same `request`.
     pub fn search(&self, request: u64, query: &str, limit: u32) {
         self.send(&ClientMessage::SearchConversations { request, query: query.into(), limit });
+    }
+
+    /// List the folders in `path` (absolute or starting with `~`); answered by `DirListing` or `DirListingFailed`.
+    pub fn list_dir(&self, request: u64, path: &str) {
+        self.send(&ClientMessage::ListDir { request, path: path.into() });
     }
 
     /// Send keyboard/paste input to a pane.
@@ -264,30 +289,46 @@ impl DaemonClient {
     }
 }
 
-async fn run_connection(
-    paths: Paths,
-    spawn: impl FnOnce() -> io::Result<()>,
-    ready: std::sync::mpsc::Sender<Result<Hello, StartError>>,
+/// The channels between a [`DaemonClient`] handle and the thread that runs its connection.
+pub(crate) struct Link {
+    pub(crate) client: DaemonClient,
+    pub(crate) outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    pub(crate) events_tx: async_channel::Sender<ClientEvent>,
+    pub(crate) events: async_channel::Receiver<ClientEvent>,
+}
+
+impl Link {
+    pub(crate) fn new() -> Link {
+        let (outgoing_tx, outgoing) = mpsc::unbounded_channel();
+        let (events_tx, events) = async_channel::bounded(EVENT_QUEUE);
+        Link { client: DaemonClient { outgoing: outgoing_tx }, outgoing, events_tx, events }
+    }
+}
+
+/// A connection from its handshake and its handle.
+pub(crate) fn connection(
+    client: DaemonClient,
+    hello: Hello,
+    events: async_channel::Receiver<ClientEvent>,
+) -> Connection {
+    let Hello { instance, claude_dir, daemon_version, daemon_commit, panes } = hello;
+    Connection { client, instance, claude_dir, daemon_version, daemon_commit, panes, events }
+}
+
+/// Run one connection over `recv`/`send`: the handshake (its result goes to `on_hello`), then the writer and the
+/// event loop until the stream ends. `Err` only when the handshake failed.
+pub(crate) async fn run_stream<R, W>(
+    mut recv: R,
+    mut send: W,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
     events: async_channel::Sender<ClientEvent>,
-) {
-    let stream = match connect_or_spawn(&paths, spawn).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            let _ = ready.send(Err(StartError::Io(err.into())));
-            return;
-        }
-    };
-    let (mut recv, mut send) = stream.split();
-    match hello(&mut recv, &mut send).await {
-        Ok(hello) => {
-            let _ = ready.send(Ok(hello));
-        }
-        Err(err) => {
-            let _ = ready.send(Err(err));
-            return;
-        }
-    }
+    on_hello: impl FnOnce(Hello),
+) -> Result<(), StartError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    on_hello(hello(&mut recv, &mut send).await?);
     let writer = tokio::spawn(async move {
         while let Some(item) = outgoing.recv().await {
             match item {
@@ -325,6 +366,12 @@ async fn run_connection(
                 }
                 Some(Ok(DaemonMessage::SearchIndexing { done, total })) => ClientEvent::SearchIndexing { done, total },
                 Some(Ok(DaemonMessage::SearchUnavailable { reason })) => ClientEvent::SearchUnavailable { reason },
+                Some(Ok(DaemonMessage::DirListing { request, path, dirs })) => {
+                    ClientEvent::DirListing { request, path: PathBuf::from(path), dirs }
+                }
+                Some(Ok(DaemonMessage::DirListingFailed { request, reason })) => {
+                    ClientEvent::DirListingFailed { request, reason }
+                }
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");
@@ -340,6 +387,32 @@ async fn run_connection(
         }
     }
     writer.abort();
+    Ok(())
+}
+
+async fn run_connection(
+    paths: Paths,
+    spawn: impl FnOnce() -> io::Result<()>,
+    ready: std::sync::mpsc::Sender<Result<Hello, StartError>>,
+    outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    events: async_channel::Sender<ClientEvent>,
+) {
+    let stream = match connect_or_spawn(&paths, spawn).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            let _ = ready.send(Err(StartError::Io(err.into())));
+            return;
+        }
+    };
+    let (recv, send) = stream.split();
+    let hello_ready = ready.clone();
+    let result = run_stream(recv, send, outgoing, events, move |hello| {
+        let _ = hello_ready.send(Ok(hello));
+    })
+    .await;
+    if let Err(err) = result {
+        let _ = ready.send(Err(err));
+    }
 }
 
 /// `Hello` → `Welcome`, then `ListPanes` → `Panes`. Returns the daemon instance and its live panes.
@@ -350,8 +423,10 @@ where
 {
     let io = |err: io::Error| StartError::Io(err.into());
     write_frame(send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.map_err(io)?;
-    let (instance, claude_dir) = match next_message(recv).await? {
-        DaemonMessage::Welcome { instance, claude_dir, .. } => (instance, claude_dir),
+    let (instance, claude_dir, daemon_version, daemon_commit) = match next_message(recv).await? {
+        DaemonMessage::Welcome { instance, claude_dir, app_version, app_commit, .. } => {
+            (instance, claude_dir, app_version, app_commit)
+        }
         DaemonMessage::VersionMismatch { daemon_protocol } => {
             return Err(StartError::VersionMismatch { daemon_protocol });
         }
@@ -360,7 +435,7 @@ where
     write_frame(send, &Frame::control(&ClientMessage::ListPanes)).await.map_err(io)?;
     loop {
         if let DaemonMessage::Panes { panes } = next_message(recv).await? {
-            return Ok(Hello { instance, claude_dir, panes });
+            return Ok(Hello { instance, claude_dir, daemon_version, daemon_commit, panes });
         }
     }
 }

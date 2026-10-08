@@ -246,6 +246,8 @@ impl SettingsView {
             }
             (SHELL_PROGRAM, _) => Some(settings.shell.program.clone()),
             (SHELL_ARGS, _) => Some(join_args(&settings.shell.args)),
+            (ssh_hosts::HOST_NAME, index) => settings.ssh_hosts.get(index).map(|host| host.name.clone()),
+            (ssh_hosts::HOST_TARGET, index) => settings.ssh_hosts.get(index).map(|host| host.target.clone()),
             _ => None,
         }
         .unwrap_or_default()
@@ -283,7 +285,18 @@ impl SettingsView {
         }
         let (daemon_dir, home) = (self.daemon_dir.clone(), std::env::home_dir());
         let mut refused = None;
+        let mut ssh_edit = None;
+        let taken =
+            cx.try_global::<ssh_hosts::HostStatuses>().map(|statuses| statuses.taken.clone()).unwrap_or_default();
         SettingsStore::update(cx, |settings| match key {
+            (ssh_hosts::HOST_NAME | ssh_hosts::HOST_TARGET, index) => {
+                let field = if key.0 == ssh_hosts::HOST_NAME {
+                    ssh_hosts::HostField::Name
+                } else {
+                    ssh_hosts::HostField::Target
+                };
+                ssh_edit = Some(ssh_hosts::edit_ssh_host(&mut settings.ssh_hosts, index, field, &text, &taken));
+            }
             (DIR_NAME, index) => {
                 materialize(settings, daemon_dir.as_deref(), home.as_deref());
                 if !rename_dir(settings, index, &text) {
@@ -307,7 +320,25 @@ impl SettingsView {
             (SHELL_ARGS, _) => settings.shell.args = split_args(&text),
             _ => {}
         });
-        self.sessions_message = refused.map(String::from);
+        if let Some(edit) = ssh_edit {
+            self.ssh_message = edit.as_ref().err().cloned();
+            match edit {
+                Ok(ssh_hosts::HostEdit::Retargeted(name)) => {
+                    self.edited_targets.insert(name);
+                }
+                Ok(ssh_hosts::HostEdit::Renamed { from, to }) => {
+                    let connected = cx
+                        .try_global::<ssh_hosts::HostStatuses>()
+                        .and_then(|statuses| statuses.hosts.get(&from).cloned())
+                        .is_some_and(|status| status.dot == app_core::host_state::HostDot::Ok);
+                    self.edited_targets.remove(&from);
+                    cx.emit(SettingsEvent::HostRenamed { from, to, reconnect: connected });
+                }
+                Ok(ssh_hosts::HostEdit::Unchanged) | Err(_) => {}
+            }
+        } else {
+            self.sessions_message = refused.map(String::from);
+        }
         cx.notify();
     }
 
@@ -396,7 +427,7 @@ impl SettingsView {
 
     /// A small text button for a list row's trailing slot.
     #[allow(clippy::too_many_arguments)]
-    fn link(
+    pub(super) fn link(
         &mut self,
         name: &'static str,
         index: usize,

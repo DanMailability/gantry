@@ -2,7 +2,10 @@
 
 pub mod attention;
 pub mod bidi;
+pub mod dir_complete;
 pub mod fuzzy;
+pub mod host_install;
+pub mod host_state;
 pub mod input;
 pub mod launcher;
 pub mod layout;
@@ -14,14 +17,17 @@ pub mod paste;
 pub mod recents;
 pub mod replay;
 pub mod scroll;
+pub mod search_merge;
 pub mod session_tree;
 pub mod sessions;
 pub mod settings;
 pub mod shortcuts;
 pub mod snapshot;
 pub mod split_tree;
+pub mod ssh_config;
 pub mod term_state;
 pub mod text_field;
 pub mod theme_colors;
 pub mod url;
+pub mod version;
 pub mod workspace;

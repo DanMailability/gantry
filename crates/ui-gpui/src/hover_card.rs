@@ -9,9 +9,10 @@ use gpui::{
 };
 
 use crate::context_menu;
-use crate::theme::{RADIUS_SMALL, UI_FONT, container_icon, dir_badge, theme};
+use crate::theme::{RADIUS_SMALL, UI_FONT, container_icon, dir_badge, ssh_icon, theme};
 
-/// The mark before a title: only tones without a fill need one (the fill already says the rest).
+/// The mark before a title: tones without a fill need one (the fill already says the rest), and a row marked unread
+/// carries a pin so it is told apart from Done.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lead {
     /// No mark.
@@ -20,6 +21,8 @@ pub(crate) enum Lead {
     Ring,
     /// `↗` (running outside Gantry).
     Arrow,
+    /// A pin (marked unread by hand).
+    Pin,
 }
 
 /// The lead mark of `tone`.
@@ -27,6 +30,7 @@ pub(crate) fn lead(tone: Tone) -> Lead {
     match tone {
         Tone::Closed => Lead::Ring,
         Tone::Elsewhere => Lead::Arrow,
+        Tone::Unread => Lead::Pin,
         _ => Lead::None,
     }
 }
@@ -42,6 +46,8 @@ pub(crate) struct HoverCard {
     pub dir: Option<DirBadge>,
     /// Runs in a dev container.
     pub container: bool,
+    /// The SSH host it runs on; `None` for this machine.
+    pub host: Option<String>,
     /// Its folder, `~`-shortened.
     pub folder: Option<String>,
 }
@@ -117,6 +123,14 @@ impl Render for HoverCard {
                         .child("Dev container"),
                 )
             })
+            .children(self.host.clone().map(|host| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(ssh_icon(theme.tokens.text, &theme))
+                    .child(format!("Host: {host}"))
+            }))
             .children(
                 self.folder.clone().map(|folder| div().text_xs().text_color(rgb(theme.tokens.muted)).child(folder)),
             )
@@ -146,11 +160,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_tones_without_a_fill_keep_a_lead_mark() {
+    fn only_tones_without_a_fill_and_unread_keep_a_lead_mark() {
         for tone in [Tone::NeedsInput, Tone::Working, Tone::Done, Tone::Idle] {
             assert_eq!(lead(tone), Lead::None, "{tone:?}");
         }
         assert_eq!(lead(Tone::Closed), Lead::Ring);
         assert_eq!(lead(Tone::Elsewhere), Lead::Arrow);
+        assert_eq!(lead(Tone::Unread), Lead::Pin);
     }
 }

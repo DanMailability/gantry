@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use crate::ssh_config::{validate_name, validate_target};
 use crate::theme_colors::ProjectColor;
 
 /// Theme choice.
@@ -257,6 +258,96 @@ pub fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
+/// The remote Gantry command when a host does not name one: where the tarball installer puts it.
+pub const DEFAULT_REMOTE_COMMAND: &str = "~/.local/bin/gantry";
+
+/// How Gantry signs in to an SSH host. It only picks ssh's options; nothing is stored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SshAuth {
+    /// ssh decides (agent, keys, then a password), as `~/.ssh/config` says.
+    #[default]
+    Automatic,
+    /// Only a password: keys and the agent are not tried.
+    Password,
+    /// Only keys (the agent and the default keys): no password fallback.
+    Key,
+}
+
+impl SshAuth {
+    /// The value in settings.json.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SshAuth::Automatic => "automatic",
+            SshAuth::Password => "password",
+            SshAuth::Key => "key",
+        }
+    }
+
+    /// Parse a settings.json value.
+    pub fn parse(text: &str) -> Option<SshAuth> {
+        match text {
+            "automatic" => Some(SshAuth::Automatic),
+            "password" => Some(SshAuth::Password),
+            "key" => Some(SshAuth::Key),
+            _ => None,
+        }
+    }
+
+    /// The `-o` options ssh needs for this method (empty for `Automatic`).
+    pub fn ssh_options(self) -> &'static [&'static str] {
+        match self {
+            SshAuth::Automatic => &[],
+            SshAuth::Password => {
+                &["-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "IdentitiesOnly=yes"]
+            }
+            SshAuth::Key => &["-o", "PreferredAuthentications=publickey"],
+        }
+    }
+}
+
+/// One SSH host the user listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshHost {
+    /// Unique, non-empty name without `/`, never `local`: shown in menus and project headings.
+    pub name: String,
+    /// What follows `ssh`: an alias from `~/.ssh/config` or `user@host`.
+    pub target: String,
+    /// The remote Gantry binary.
+    pub command: String,
+    /// How to sign in.
+    pub auth: SshAuth,
+}
+
+/// Add `host` to the list; its name must be valid and unused, its target valid.
+pub fn add_ssh_host(hosts: &mut Vec<SshHost>, host: SshHost) -> Result<(), String> {
+    let names: Vec<&str> = hosts.iter().map(|known| known.name.as_str()).collect();
+    validate_name(&host.name, &names)?;
+    validate_target(&host.target)?;
+    hosts.push(host);
+    Ok(())
+}
+
+/// Replace the entry called `old_name` with `host` (same place in the list); the name may stay or change but must not
+/// clash with another entry.
+pub fn replace_ssh_host(hosts: &mut [SshHost], old_name: &str, host: SshHost) -> Result<(), String> {
+    let Some(index) = hosts.iter().position(|known| known.name == old_name) else {
+        return Err(format!("no host called {old_name}"));
+    };
+    let others: Vec<&str> =
+        hosts.iter().enumerate().filter(|(at, _)| *at != index).map(|(_, known)| known.name.as_str()).collect();
+    validate_name(&host.name, &others)?;
+    validate_target(&host.target)?;
+    hosts[index] = host;
+    Ok(())
+}
+
+/// Remove the entry called `name`; whether there was one.
+pub fn remove_ssh_host(hosts: &mut Vec<SshHost>, name: &str) -> bool {
+    let before = hosts.len();
+    hosts.retain(|host| host.name != name);
+    hosts.len() != before
+}
+
 /// Everything in settings.json.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -280,6 +371,8 @@ pub struct Settings {
     pub default_claude_dir: Option<String>,
     /// Folder to the name of the dir picked for it.
     pub folder_claude_dirs: BTreeMap<PathBuf, String>,
+    /// SSH hosts, connected on first use.
+    pub ssh_hosts: Vec<SshHost>,
     /// Shell for new shell panes.
     pub shell: ShellSettings,
     /// Recent sessions pop-up sizes.
@@ -344,6 +437,7 @@ impl Default for Settings {
             claude_dirs: Vec::new(),
             default_claude_dir: None,
             folder_claude_dirs: BTreeMap::new(),
+            ssh_hosts: Vec::new(),
             shell: ShellSettings::default(),
             recents: RecentsSettings { per_project: 5, chips: 6 },
             favorites: Vec::new(),
@@ -556,6 +650,54 @@ impl Reader {
         out
     }
 
+    fn ssh_hosts(&mut self, raw: &Map<String, Value>) -> Vec<SshHost> {
+        let items = match raw.get("sshHosts") {
+            None => return Vec::new(),
+            Some(Value::Array(items)) => items,
+            Some(_) => {
+                self.problem("sshHosts", "expected a list".into());
+                return Vec::new();
+            }
+        };
+        let mut hosts: Vec<SshHost> = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let key = format!("sshHosts[{index}]");
+            let Value::Object(map) = item else {
+                self.problem(&key, "expected an object; dropped".into());
+                continue;
+            };
+            let name = self.string(map, &format!("{key}."), "name");
+            let target = self.string(map, &format!("{key}."), "target");
+            let command = match map.get("command") {
+                None => DEFAULT_REMOTE_COMMAND.to_string(),
+                Some(_) => self.string(map, &format!("{key}."), "command"),
+            };
+            let auth = match map.get("auth") {
+                None => SshAuth::Automatic,
+                Some(Value::String(text)) => SshAuth::parse(text).unwrap_or_else(|| {
+                    self.problem(&format!("{key}.auth"), "expected automatic, password or key".into());
+                    SshAuth::Automatic
+                }),
+                Some(_) => {
+                    self.problem(&format!("{key}.auth"), "expected automatic, password or key".into());
+                    SshAuth::Automatic
+                }
+            };
+            if name.is_empty() || target.is_empty() || command.is_empty() {
+                self.problem(&key, "needs a name, a target and a command; dropped".into());
+            } else if name.contains('/') {
+                self.problem(&key, format!("the name \"{name}\" may not contain /; dropped"));
+            } else if name.eq_ignore_ascii_case("local") {
+                self.problem(&key, "\"local\" is this machine; dropped".into());
+            } else if hosts.iter().any(|host| host.name == name) {
+                self.problem(&key, format!("the name \"{name}\" is used twice; dropped"));
+            } else {
+                hosts.push(SshHost { name, target, command, auth });
+            }
+        }
+        hosts
+    }
+
     fn claude_dirs(&mut self, raw: &Map<String, Value>) -> Vec<ClaudeDir> {
         let items = match raw.get("claudeDirs") {
             None => return Vec::new(),
@@ -720,6 +862,7 @@ impl Reader {
             }
         };
         let folder_claude_dirs = self.folder_claude_dirs(raw, &names);
+        let ssh_hosts = self.ssh_hosts(raw);
 
         let map = self.object(raw, "", "shell");
         let shell = ShellSettings {
@@ -781,6 +924,7 @@ impl Reader {
             claude_dirs,
             default_claude_dir,
             folder_claude_dirs,
+            ssh_hosts,
             shell,
             recents,
             favorites,
@@ -864,6 +1008,18 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         })
         .collect();
     add(&["claudeDirs"], Value::Array(dirs), !settings.claude_dirs.is_empty());
+    let ssh_hosts: Vec<Value> = settings
+        .ssh_hosts
+        .iter()
+        .map(|host| {
+            let mut value = serde_json::json!({"name": host.name, "target": host.target, "command": host.command});
+            if host.auth != SshAuth::Automatic {
+                value["auth"] = host.auth.as_str().into();
+            }
+            value
+        })
+        .collect();
+    add(&["sshHosts"], Value::Array(ssh_hosts), !settings.ssh_hosts.is_empty());
     add(
         &["defaultClaudeDir"],
         settings.default_claude_dir.clone().map_or(Value::Null, Value::from),
@@ -951,7 +1107,7 @@ fn put(map: &mut Map<String, Value>, path: &[&str], value: Option<Value>) {
 
 /// Write `settings` to `path` atomically: `raw` with every known key replaced by its value in `settings`, and
 /// known keys equal to their default removed (an object left empty is removed too). Unknown keys stay. The
-/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `shortcuts`, `projectColors.folders`) are only rewritten when `settings`
+/// whole-list keys (`claudeDirs`, `favorites`, `folderClaudeDirs`, `sshHosts`, `shortcuts`, `projectColors.folders`) are only rewritten when `settings`
 /// differs from what `raw` loads as, so hand-written entries that failed validation, and unknown fields in them,
 /// survive other changes.
 pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::Result<()> {
@@ -960,6 +1116,7 @@ pub fn save(path: &Path, settings: &Settings, raw: &Map<String, Value>) -> io::R
         ["claudeDirs"] => settings.claude_dirs == loaded.claude_dirs,
         ["favorites"] => settings.favorites == loaded.favorites,
         ["folderClaudeDirs"] => settings.folder_claude_dirs == loaded.folder_claude_dirs,
+        ["sshHosts"] => settings.ssh_hosts == loaded.ssh_hosts,
         ["shortcuts"] => settings.shortcuts == loaded.shortcuts,
         ["projectColors", "folders"] => settings.project_colors.folders == loaded.project_colors.folders,
         _ => false,
@@ -1476,5 +1633,151 @@ mod tests {
         assert_eq!(hex(0xc1e5cd), "#c1e5cd");
         assert_eq!(parse_hex("c1e5cd"), None);
         assert_eq!(parse_hex("#c1e5c"), None);
+    }
+
+    #[test]
+    fn ssh_hosts_load_with_the_default_command() {
+        let loaded = parse(
+            r#"{"sshHosts": [
+                {"name": "devbox", "target": "me@devbox"},
+                {"name": "lab", "target": "lab", "command": "/opt/gantry/bin/gantry"}
+            ]}"#,
+        );
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let hosts = loaded.settings.unwrap().ssh_hosts;
+        assert_eq!(
+            hosts,
+            vec![
+                SshHost {
+                    name: "devbox".into(),
+                    target: "me@devbox".into(),
+                    command: DEFAULT_REMOTE_COMMAND.into(),
+                    auth: SshAuth::Automatic,
+                },
+                SshHost {
+                    name: "lab".into(),
+                    target: "lab".into(),
+                    command: "/opt/gantry/bin/gantry".into(),
+                    auth: SshAuth::Automatic,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn bad_ssh_hosts_are_dropped_with_a_problem_and_the_others_load() {
+        let loaded = parse(
+            r#"{"sshHosts": [
+                {"name": "ok", "target": "ok"},
+                {"name": "", "target": "x"},
+                {"name": "no-target"},
+                {"name": "a/b", "target": "x"},
+                {"name": "Local", "target": "x"},
+                {"name": "ok", "target": "other"},
+                {"name": "empty-command", "target": "x", "command": ""},
+                "not an object"
+            ]}"#,
+        );
+        let hosts = loaded.settings.unwrap().ssh_hosts;
+        assert_eq!(hosts.iter().map(|host| host.name.as_str()).collect::<Vec<_>>(), ["ok"]);
+        let keys: Vec<_> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["sshHosts[1]", "sshHosts[2]", "sshHosts[3]", "sshHosts[4]", "sshHosts[5]", "sshHosts[6]", "sshHosts[7]"]
+        );
+        let not_a_list = parse(r#"{"sshHosts": 3}"#);
+        assert_eq!(not_a_list.problems[0].key, "sshHosts");
+        assert!(not_a_list.settings.unwrap().ssh_hosts.is_empty());
+    }
+
+    #[test]
+    fn ssh_host_auth_loads_and_a_bad_value_falls_back_with_a_problem() {
+        let loaded = parse(
+            r#"{"sshHosts": [
+                {"name": "a", "target": "a"},
+                {"name": "b", "target": "b", "auth": "password"},
+                {"name": "c", "target": "c", "auth": "key"},
+                {"name": "d", "target": "d", "auth": "fingerprint"},
+                {"name": "e", "target": "e", "auth": 3}
+            ]}"#,
+        );
+        let auths: Vec<SshAuth> = loaded.settings.unwrap().ssh_hosts.iter().map(|host| host.auth).collect();
+        assert_eq!(
+            auths,
+            [SshAuth::Automatic, SshAuth::Password, SshAuth::Key, SshAuth::Automatic, SshAuth::Automatic]
+        );
+        let keys: Vec<&str> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["sshHosts[3].auth", "sshHosts[4].auth"]);
+    }
+
+    #[test]
+    fn hand_written_ssh_hosts_survive_a_save_of_something_else() {
+        let text =
+            r#"{"theme": "Mist", "sshHosts": [{"name": "devbox", "target": "me@devbox", "note": 1}, {"name": ""}]}"#;
+        let loaded = parse(text);
+        let mut settings = loaded.settings.unwrap();
+        settings.animate_working = !settings.animate_working;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["sshHosts"], serde_json::from_str::<Value>(text).unwrap()["sshHosts"]);
+    }
+
+    #[test]
+    fn changed_ssh_hosts_are_written() {
+        let loaded = parse(r#"{}"#);
+        let mut settings = loaded.settings.unwrap();
+        settings.ssh_hosts.push(SshHost {
+            name: "devbox".into(),
+            target: "me@devbox".into(),
+            command: DEFAULT_REMOTE_COMMAND.into(),
+            auth: SshAuth::Password,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &loaded.raw).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["sshHosts"][0]["name"], "devbox");
+        assert_eq!(written["sshHosts"][0]["command"], DEFAULT_REMOTE_COMMAND);
+        assert_eq!(written["sshHosts"][0]["auth"], "password");
+    }
+
+    fn host(name: &str, target: &str) -> SshHost {
+        SshHost {
+            name: name.into(),
+            target: target.into(),
+            command: DEFAULT_REMOTE_COMMAND.into(),
+            auth: SshAuth::Automatic,
+        }
+    }
+
+    #[test]
+    fn add_ssh_host_rejects_clashes_and_bad_targets() {
+        let mut hosts = vec![host("a", "a")];
+        assert!(add_ssh_host(&mut hosts, host("b", "me@b")).is_ok());
+        assert!(add_ssh_host(&mut hosts, host("a", "x")).is_err());
+        assert!(add_ssh_host(&mut hosts, host("local", "x")).is_err());
+        assert!(add_ssh_host(&mut hosts, host("c", "-oProxyCommand=x")).is_err());
+        assert_eq!(hosts.len(), 2);
+    }
+
+    #[test]
+    fn replace_ssh_host_renames_without_clashing_with_others() {
+        let mut hosts = vec![host("a", "a"), host("b", "b")];
+        assert!(replace_ssh_host(&mut hosts, "a", host("a", "me@a")).is_ok());
+        assert_eq!(hosts[0].target, "me@a");
+        assert!(replace_ssh_host(&mut hosts, "a", host("b", "x")).is_err());
+        assert!(replace_ssh_host(&mut hosts, "a", host("c", "x")).is_ok());
+        assert_eq!(hosts[0].name, "c");
+        assert!(replace_ssh_host(&mut hosts, "zzz", host("d", "x")).is_err());
+    }
+
+    #[test]
+    fn remove_ssh_host_reports_whether_it_existed() {
+        let mut hosts = vec![host("a", "a")];
+        assert!(remove_ssh_host(&mut hosts, "a"));
+        assert!(!remove_ssh_host(&mut hosts, "a"));
+        assert!(hosts.is_empty());
     }
 }

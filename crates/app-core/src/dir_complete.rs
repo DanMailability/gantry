@@ -1,0 +1,187 @@
+//! Path completion for the launcher on a remote host: split what was typed, filter a folder listing, drop stale
+//! answers.
+
+use protocol::message::DirEntry;
+
+/// The parent folder typed so far (with its trailing `/`; `~/` for `~`) and the name prefix after the last `/`.
+/// `("", input)` when there is no `/` and the input does not start with `~`.
+pub fn split_typed(input: &str) -> (String, String) {
+    match input.rfind('/') {
+        Some(at) => (input[..=at].to_string(), input[at + 1..].to_string()),
+        None if input == "~" => ("~/".to_string(), String::new()),
+        None => (String::new(), input.to_string()),
+    }
+}
+
+/// The folders whose name starts with `prefix` (case ignored), in order. Names starting with `.` appear only when
+/// the prefix does.
+pub fn filter(dirs: &[DirEntry], prefix: &str) -> Vec<DirEntry> {
+    let prefix = prefix.to_lowercase();
+    dirs.iter()
+        .filter(|dir| {
+            (!dir.name.starts_with('.') || prefix.starts_with('.')) && dir.name.to_lowercase().starts_with(&prefix)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the typed text needs a new folder listing: it has a `/` (or is `~`, the home folder) and its parent is
+/// not the one listed.
+pub fn wants_listing(typed: &str, listed_parent: &str) -> bool {
+    (typed.contains('/') || typed == "~") && split_typed(typed).0 != listed_parent
+}
+
+/// What Tab does in the path field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TabAction {
+    /// Complete with this row.
+    Accept(usize),
+    /// Ask for the listing of this parent now.
+    Request(String),
+    /// Nothing to complete or ask.
+    Nothing,
+}
+
+/// Tab with `rows` matching folders listed (`selected` is the highlighted one): complete with a row; with none, ask for
+/// the typed parent's listing unless it was asked for already (`requested`), so the next Tab can complete.
+pub fn tab_action(typed: &str, requested: &str, rows: usize, selected: Option<usize>) -> TabAction {
+    if rows > 0 {
+        TabAction::Accept(selected.unwrap_or(0))
+    } else if wants_listing(typed, requested) {
+        TabAction::Request(split_typed(typed).0)
+    } else {
+        TabAction::Nothing
+    }
+}
+
+/// Whether the 120 ms pause after the last edit has passed.
+pub fn debounce_due(last_edit_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_edit_ms) >= 120
+}
+
+/// The newest folder listing and what asked for it; answers to older requests are ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Completion {
+    /// The newest request id sent.
+    pub request: u64,
+    /// The parent folder as typed that the newest request asked for.
+    pub requested: String,
+    /// The parent folder as typed that `dirs` belongs to (empty before the first answer).
+    pub parent: String,
+    /// Its folders.
+    pub dirs: Vec<DirEntry>,
+    /// Why the last listing failed, if it did.
+    pub error: Option<String>,
+}
+
+impl Completion {
+    /// Note that request `request` asks for the listing of `parent`.
+    pub fn start_request(&mut self, request: u64, parent: String) {
+        self.request = request;
+        self.requested = parent;
+    }
+
+    /// Take the listing of the requested parent, unless it answers an older request than the newest.
+    pub fn accept_listing(&mut self, request: u64, dirs: Vec<DirEntry>) {
+        if request < self.request {
+            return;
+        }
+        self.parent = self.requested.clone();
+        self.dirs = dirs;
+        self.error = None;
+    }
+
+    /// Take a failure of the requested parent, unless it answers an older request than the newest.
+    pub fn accept_failure(&mut self, request: u64, reason: String) {
+        if request < self.request {
+            return;
+        }
+        self.parent = self.requested.clone();
+        self.dirs.clear();
+        self.error = Some(reason);
+    }
+
+    /// Whether `typed` needs a listing other than the newest one asked for (an answer in flight for a parent that is
+    /// no longer typed does not count).
+    pub fn wants_request(&self, typed: &str) -> bool {
+        wants_listing(typed, &self.requested)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> DirEntry {
+        DirEntry { name: name.into(), symlink: false }
+    }
+
+    #[test]
+    fn typed_paths_split_at_the_last_slash() {
+        assert_eq!(split_typed("~/pro"), ("~/".to_string(), "pro".to_string()));
+        assert_eq!(split_typed("/home/me/"), ("/home/me/".to_string(), String::new()));
+        assert_eq!(split_typed("~"), ("~/".to_string(), String::new()));
+        assert_eq!(split_typed("pro"), (String::new(), "pro".to_string()));
+    }
+
+    #[test]
+    fn filter_ignores_case_and_shows_dotfiles_only_for_a_dot() {
+        let dirs = [dir("Projects"), dir("pics"), dir(".cache"), dir("src")];
+        let names = |found: Vec<DirEntry>| found.into_iter().map(|d| d.name).collect::<Vec<_>>();
+        assert_eq!(names(filter(&dirs, "p")), ["Projects", "pics"]);
+        assert_eq!(names(filter(&dirs, "")), ["Projects", "pics", "src"]);
+        assert_eq!(names(filter(&dirs, ".c")), [".cache"]);
+    }
+
+    #[test]
+    fn a_listing_is_wanted_when_the_parent_changes() {
+        assert!(wants_listing("~/pro", ""));
+        assert!(!wants_listing("~/pro", "~/"));
+        assert!(!wants_listing("pro", ""));
+        // A lone `~` lists the home folder too.
+        assert!(wants_listing("~", "") && !wants_listing("~", "~/"));
+        assert!(wants_listing("~/", ""));
+        assert!(!debounce_due(1000, 1119));
+        assert!(debounce_due(1000, 1120));
+    }
+
+    #[test]
+    fn a_stale_answer_never_replaces_a_newer_one() {
+        let mut completion = Completion::default();
+        completion.start_request(3, "~/".into());
+        completion.accept_listing(2, vec![dir("x")]);
+        assert_eq!(completion.parent, "");
+        completion.accept_failure(1, "late".into());
+        assert_eq!(completion.error, None);
+        completion.accept_listing(3, vec![dir("a")]);
+        assert_eq!((completion.parent.as_str(), completion.dirs.len()), ("~/", 1));
+        completion.accept_failure(3, "No such file".into());
+        assert_eq!(completion.error.as_deref(), Some("No such file"));
+        assert!(completion.dirs.is_empty());
+    }
+
+    #[test]
+    fn an_answer_for_a_parent_no_longer_typed_is_asked_again() {
+        let mut completion = Completion::default();
+        completion.start_request(1, "~/".into());
+        completion.accept_listing(1, vec![dir("a")]);
+        assert!(!completion.wants_request("~/a"));
+        // `~/a/` is asked for, then the user backspaces to `~/a` before the answer comes.
+        completion.start_request(2, "~/a/".into());
+        assert!(completion.wants_request("~/a"));
+        completion.accept_listing(2, vec![dir("x")]);
+        assert_eq!(completion.parent, "~/a/");
+        assert!(completion.wants_request("~/a"), "the late answer is not the typed parent's");
+        completion.start_request(3, "~/".into());
+        assert!(!completion.wants_request("~/a"));
+    }
+
+    #[test]
+    fn tab_accepts_a_row_or_asks_for_the_listing() {
+        assert_eq!(tab_action("~/a", "~/", 2, None), TabAction::Accept(0));
+        assert_eq!(tab_action("~/a", "~/", 2, Some(1)), TabAction::Accept(1));
+        assert_eq!(tab_action("~", "", 0, None), TabAction::Request("~/".into()));
+        assert_eq!(tab_action("/srv/x", "/", 0, None), TabAction::Request("/srv/".into()));
+        assert_eq!(tab_action("~/zz", "~/", 0, None), TabAction::Nothing);
+    }
+}

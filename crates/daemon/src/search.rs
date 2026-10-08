@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use anyhow::Context as _;
 use claude_index::search::{Speaker as MessageSpeaker, read_messages};
+use protocol::host::HostId;
 use protocol::message::{SearchHit, Speaker};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
@@ -395,6 +396,7 @@ impl ConversationSearcher {
                 speaker: if field(self.fields.speaker) == "claude" { Speaker::Claude } else { Speaker::You },
                 snippet,
                 highlights,
+                host: HostId::local(),
             });
         }
         Ok(hits)

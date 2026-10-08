@@ -4,7 +4,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use app_core::host_state::HostDot;
 use app_core::menus::{MenuAction, MenuEntry, MenuItem, Shortcut};
+use app_core::session_tree::Tone;
 use app_core::settings::Settings;
 use gpui::{
     App, Bounds, FocusHandle, FontWeight, IntoElement, Pixels, Point, Window, anchored, canvas, deferred, div,
@@ -51,6 +53,17 @@ impl Drop for OpenMenu {
     }
 }
 
+/// The color of a host's state dot: the status tones of the sidebar, the danger and muted tokens.
+pub(crate) fn host_dot_color(theme: &Theme, dot: HostDot) -> u32 {
+    match dot {
+        HostDot::Ok => theme.tone(Tone::Done).dot,
+        HostDot::Busy => theme.tone(Tone::Working).dot,
+        HostDot::Warn => theme.tone(Tone::NeedsInput).dot,
+        HostDot::Bad => theme.tokens.danger,
+        HostDot::None => theme.tokens.muted,
+    }
+}
+
 /// The hint shown for `shortcut`, following the user's key bindings.
 fn shortcut_text(shortcut: Shortcut, settings: &Settings) -> String {
     let action = match shortcut {
@@ -92,6 +105,9 @@ pub(crate) fn render(
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tokens.line)))
             .when(entry.accent, |item| item.text_color(rgb(theme.tokens.accent)).font_weight(FontWeight::SEMIBOLD))
+            .when_some(entry.dot, |item, dot| {
+                item.child(div().flex_none().size(theme.ui(8.)).rounded_full().bg(rgb(host_dot_color(theme, dot))))
+            })
             .child(div().flex_1().whitespace_nowrap().child(entry.label.clone()))
             .when(entry.checked, |item| item.child(div().flex_none().text_color(rgb(theme.tokens.accent)).child("✓")))
             .when_some(entry.shortcut, |item, shortcut| {

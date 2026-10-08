@@ -1,9 +1,10 @@
 //! The GUI's workspace: tabs of split panes, what each pane runs, and reconciling a saved layout
 //! with the daemon's live panes at startup.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use protocol::host::{HostId, PaneKey};
 use protocol::message::{PaneId, PaneInfo, SessionState, SessionStatus, SpawnRequest, claude_session};
 use serde::{Deserialize, Serialize};
 
@@ -328,6 +329,9 @@ pub struct Launch {
 pub struct Leaf {
     /// Daemon pane shown here; `None` while starting or after its process ended.
     pub pane: Option<PaneId>,
+    /// The host whose daemon runs (ran) it; `local` unless it is on an SSH host.
+    #[serde(default, skip_serializing_if = "HostId::is_local")]
+    pub host: HostId,
     /// What it runs.
     pub launch: PaneLaunch,
     /// Claude session it last ran (followed across `/clear`); `None` for other programs.
@@ -342,19 +346,24 @@ impl Leaf {
     /// A leaf about to run `launch`.
     pub fn new(launch: PaneLaunch) -> Leaf {
         let session = launch.session().map(String::from);
-        Leaf { pane: None, launch, session, name: None }
+        Leaf { pane: None, host: HostId::local(), launch, session, name: None }
+    }
+
+    /// The pane's host and id, while it runs.
+    pub fn key(&self) -> Option<PaneKey> {
+        Some(PaneKey::new(self.host.clone(), self.pane?))
     }
 
     /// What Continue / Restart does, given the daemon's sessions: focus the pane that already runs the
     /// leaf's session, refuse while it runs outside Gantry, else start `rerun` — resuming when the session is
     /// known, or when the list has not arrived yet.
     pub fn rerun_with(&self, sessions: &SessionStore, dirs: &ClaudeDirs, daemon_dir: Option<&Path>) -> Rerun {
-        let known = self.session.as_deref().and_then(|id| sessions.get(id));
+        let known = self.session.as_deref().and_then(|id| sessions.get(&self.host, id));
         match known.map(|session| session.state) {
-            Some(SessionState::Managed { pane }) => Rerun::Focus(pane),
+            Some(SessionState::Managed { pane }) => Rerun::Focus(PaneKey::new(self.host.clone(), pane)),
             Some(SessionState::External { .. }) => Rerun::Busy,
             _ => Rerun::Start(self.rerun_resolved(
-                known.is_some() || !sessions.loaded(),
+                known.is_some() || !sessions.loaded(&self.host),
                 known.and_then(|info| info.claude_dir.as_deref()),
                 dirs,
                 daemon_dir,
@@ -363,7 +372,8 @@ impl Leaf {
     }
 
     /// `rerun`, but a Claude leaf with a session is launched through its config dir's current command, arguments and
-    /// environment: `session_dir` (where the session was recorded), else the dir the leaf ran with.
+    /// environment (a leaf on an SSH host runs plain `claude`): `session_dir` (where the session was recorded), else
+    /// the dir the leaf ran with.
     pub fn rerun_resolved(
         &self,
         resumable: bool,
@@ -373,6 +383,15 @@ impl Leaf {
     ) -> PaneLaunch {
         let launch = &self.launch;
         let Some(id) = self.session.as_deref().filter(|_| launch.is_claude()) else { return self.rerun(resumable) };
+        if !self.host.is_local() {
+            // A remote host uses its own config dir and command; nothing configured here applies there.
+            let plain = PaneLaunch::resume(id, launch.cwd.clone(), None);
+            return if resumable {
+                plain
+            } else {
+                PaneLaunch { args: vec!["--session-id".into(), id.into()], ..plain }
+            };
+        }
         let session_dir = session_dir.or(launch.claude_dir.as_deref());
         let (cwd, container) = (launch.cwd.clone(), launch.container.clone());
         if resumable {
@@ -412,7 +431,7 @@ pub enum Rerun {
     /// Start this.
     Start(PaneLaunch),
     /// The session already runs in this pane: show it instead.
-    Focus(PaneId),
+    Focus(PaneKey),
     /// The session runs outside Gantry; starting it again would run it twice.
     Busy,
 }
@@ -456,8 +475,9 @@ pub const MAX_PANES_PER_TAB: usize = 4;
 /// All tabs of the window.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
-    /// Daemon instance the pane ids belong to.
-    pub instance: String,
+    /// The daemon instance each host's pane ids belong to.
+    #[serde(default)]
+    pub instances: BTreeMap<HostId, String>,
     /// Tabs, left to right.
     pub tabs: Vec<Tab>,
     /// Index of the visible tab.
@@ -480,6 +500,11 @@ impl Workspace {
         self.next_id
     }
 
+    /// Remember which daemon instance `host`'s pane ids belong to.
+    pub fn set_instance(&mut self, host: &HostId, instance: &str) {
+        self.instances.insert(host.clone(), instance.into());
+    }
+
     /// Open `launch` in a new tab (before the Settings tab, which stays last) and focus it. Returns the new leaf.
     pub fn new_tab(&mut self, launch: PaneLaunch) -> NodeId {
         let leaf = self.alloc();
@@ -488,6 +513,56 @@ impl Workspace {
         self.tabs.insert(at, Tab { root: Node::Leaf(leaf), focused: leaf, settings: false, name: None });
         self.active = at;
         leaf
+    }
+
+    /// `new_tab`, running on `host`.
+    pub fn new_tab_on(&mut self, launch: PaneLaunch, host: HostId) -> NodeId {
+        let leaf = self.new_tab(launch);
+        self.leaves.get_mut(&leaf).expect("the leaf was just created").host = host;
+        leaf
+    }
+
+    /// Every host that has a leaf (live or parked aside at startup) or a daemon instance in this workspace.
+    pub fn host_names(&self) -> BTreeSet<HostId> {
+        let parked = self.dropped.iter().flat_map(|(_, leaves)| leaves.iter().map(|(_, leaf)| &leaf.host));
+        self.leaves.values().map(|leaf| &leaf.host).chain(parked).chain(self.instances.keys()).cloned().collect()
+    }
+
+    /// Move `from`'s leaves and its daemon instance to the name `to` (a rename of an SSH host). Refused, changing
+    /// nothing, when `to` still has leaves or an instance here (their panes would be mixed up with `from`'s).
+    pub fn rename_host(&mut self, from: &HostId, to: &HostId) -> Result<(), String> {
+        if from == to {
+            return Ok(());
+        }
+        if self.host_names().contains(to) {
+            return Err(format!("{} still has panes in the layout", to.name()));
+        }
+        let dropped = self.dropped.iter_mut().flat_map(|(_, leaves)| leaves.iter_mut().map(|(_, leaf)| leaf));
+        for leaf in self.leaves.values_mut().chain(dropped).filter(|leaf| leaf.host == *from) {
+            leaf.host = to.clone();
+        }
+        if let Some(instance) = self.instances.remove(from) {
+            self.instances.insert(to.clone(), instance);
+        }
+        Ok(())
+    }
+
+    /// Drop every leaf of `host` (closing the tabs that empties) and its daemon instance. Returns the panes those
+    /// leaves had.
+    pub fn remove_host(&mut self, host: &HostId) -> Vec<PaneKey> {
+        let doomed: Vec<NodeId> =
+            self.leaves.iter().filter(|(_, leaf)| leaf.host == *host).map(|(id, _)| *id).collect();
+        let mut panes = Vec::new();
+        for id in doomed {
+            if let Some(leaf) = self.close(id) {
+                panes.extend(leaf.pane.map(|pane| PaneKey::new(host.clone(), pane)));
+            }
+        }
+        for (_, leaves) in &mut self.dropped {
+            leaves.retain(|(_, leaf)| leaf.host != *host);
+        }
+        self.instances.remove(host);
+        panes
     }
 
     /// Name a shell pane (trimmed; empty clears it). False, changing nothing, for a missing or Claude leaf.
@@ -567,9 +642,14 @@ impl Workspace {
         self.tabs.get(self.active).is_some_and(|tab| !tab.settings && tab.root.leaves().len() < MAX_PANES_PER_TAB)
     }
 
-    /// Split the focused leaf, putting `launch` second, and focus it. `None` when there are no tabs or the tab is
-    /// full.
+    /// Split the focused leaf, putting `launch` second (on this machine), and focus it. `None` when there are no
+    /// tabs or the tab is full.
     pub fn split(&mut self, axis: Axis, launch: PaneLaunch) -> Option<NodeId> {
+        self.split_on(axis, launch, HostId::local())
+    }
+
+    /// Like `split`, with the new leaf on `host`.
+    pub fn split_on(&mut self, axis: Axis, launch: PaneLaunch, host: HostId) -> Option<NodeId> {
         if !self.can_split() {
             return None;
         }
@@ -578,7 +658,7 @@ impl Workspace {
         let tab = &mut self.tabs[self.active];
         tab.root.split(target, axis, split_id, leaf);
         tab.focused = leaf;
-        self.leaves.insert(leaf, Leaf::new(launch));
+        self.leaves.insert(leaf, Leaf { host, ..Leaf::new(launch) });
         Some(leaf)
     }
 
@@ -681,14 +761,17 @@ impl Workspace {
         }
     }
 
-    /// Leaf showing daemon pane `pane`.
-    pub fn leaf_for_pane(&self, pane: PaneId) -> Option<NodeId> {
-        self.leaves.iter().find(|(_, leaf)| leaf.pane == Some(pane)).map(|(id, _)| *id)
+    /// Leaf showing pane `key`.
+    pub fn leaf_for_pane(&self, key: &PaneKey) -> Option<NodeId> {
+        self.leaves.iter().find(|(_, leaf)| leaf.host == key.host && leaf.pane == Some(key.pane)).map(|(id, _)| *id)
     }
 
-    /// Leaf whose Claude session is `session`.
-    pub fn leaf_for_session(&self, session: &str) -> Option<NodeId> {
-        self.leaves.iter().find(|(_, leaf)| leaf.session.as_deref() == Some(session)).map(|(id, _)| *id)
+    /// Leaf on `host` whose Claude session is `session`.
+    pub fn leaf_for_session(&self, host: &HostId, session: &str) -> Option<NodeId> {
+        self.leaves
+            .iter()
+            .find(|(_, leaf)| leaf.host == *host && leaf.session.as_deref() == Some(session))
+            .map(|(id, _)| *id)
     }
 
     /// Whether `leaf` is in the visible tab.
@@ -700,7 +783,7 @@ impl Workspace {
     pub fn leaf_status<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s SessionStatus> {
         let leaf = self.leaves.get(&leaf)?;
         let pane = leaf.pane?;
-        let session = sessions.get(leaf.session.as_deref()?)?;
+        let session = sessions.get(&leaf.host, leaf.session.as_deref()?)?;
         if session.state != (SessionState::Managed { pane }) {
             return None;
         }
@@ -711,7 +794,7 @@ impl Workspace {
     pub fn leaf_last_prompt<'s>(&self, leaf: NodeId, sessions: &'s SessionStore) -> Option<&'s str> {
         let leaf = self.leaves.get(&leaf)?;
         let pane = leaf.pane?;
-        let session = sessions.get(leaf.session.as_deref()?)?;
+        let session = sessions.get(&leaf.host, leaf.session.as_deref()?)?;
         if session.state != (SessionState::Managed { pane }) {
             return None;
         }
@@ -743,16 +826,16 @@ impl Workspace {
         }
     }
 
-    /// `pane`'s process ended; returns the leaf that showed it.
-    pub fn pane_exited(&mut self, pane: PaneId) -> Option<NodeId> {
-        let leaf = self.leaf_for_pane(pane)?;
+    /// `key`'s process ended; returns the leaf that showed it.
+    pub fn pane_exited(&mut self, key: &PaneKey) -> Option<NodeId> {
+        let leaf = self.leaf_for_pane(key)?;
         self.leaves.get_mut(&leaf)?.pane = None;
         Some(leaf)
     }
 
-    /// The daemon reports that `pane` runs `session`; returns whether the leaf's session changed.
-    pub fn session_seen(&mut self, pane: PaneId, session: &str) -> bool {
-        let Some(leaf) = self.leaf_for_pane(pane).and_then(|leaf| self.leaves.get_mut(&leaf)) else { return false };
+    /// The daemon reports that pane `key` runs `session`; returns whether the leaf's session changed.
+    pub fn session_seen(&mut self, key: &PaneKey, session: &str) -> bool {
+        let Some(leaf) = self.leaf_for_pane(key).and_then(|leaf| self.leaves.get_mut(&leaf)) else { return false };
         if leaf.session.as_deref() == Some(session) {
             return false;
         }
@@ -786,62 +869,126 @@ impl Workspace {
     }
 }
 
-/// A saved layout reconciled with the daemon's live panes.
+/// One connected host's daemon, as `restore` sees it.
+pub struct HostLive<'a> {
+    /// The host.
+    pub host: HostId,
+    /// Its daemon's instance id (in `Welcome`).
+    pub instance: &'a str,
+    /// Its live panes, most recently focused first.
+    pub panes: &'a [PaneInfo],
+}
+
+/// A saved layout reconciled with the daemons' live panes.
 pub struct Restored {
     /// The workspace to show.
     pub workspace: Workspace,
     /// Leaves to attach to their (live) pane.
-    pub attach: Vec<(NodeId, PaneId)>,
+    pub attach: Vec<(NodeId, PaneKey)>,
     /// Leaves whose process must be started.
     pub spawn: Vec<NodeId>,
 }
 
-/// Rebuild the workspace at startup. Leaves keep their live pane; leaves whose pane is gone (or
-/// belongs to another daemon instance) become dead; live panes missing from the layout become new
-/// tabs (most recently focused last, and active); an explicit launch opens a new focused tab; an
-/// empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped from the workspace (live panes
-/// still reattach) but kept aside for `saveable`.
-pub fn restore(
-    saved: Option<Workspace>,
-    instance: &str,
-    live: &[PaneInfo],
-    launch: &Launch,
-    restore_layout: bool,
-) -> Restored {
-    let mut workspace = saved.unwrap_or_default();
-    let same_daemon = workspace.instance == instance;
-    workspace.instance = instance.into();
-    let live_ids: HashSet<PaneId> = live.iter().map(|info| info.pane).collect();
-    for leaf in workspace.leaves.values_mut() {
-        if !same_daemon || leaf.pane.is_some_and(|pane| !live_ids.contains(&pane)) {
+/// Match one host's leaves with its daemon's live panes, when the host connects (at start, or again after a
+/// reconnect): leaves keep their pane while it is the same daemon instance and the pane is still live, the others
+/// lose it (they show Continue / Restart); live panes no leaf shows become new tabs on that host (most recently
+/// focused last). The host's instance is recorded. Returns the leaves to attach, with their panes.
+pub fn reconcile(workspace: &mut Workspace, live: &HostLive<'_>) -> Vec<(NodeId, PaneKey)> {
+    let same_instance = workspace.instances.get(&live.host).map(String::as_str) == Some(live.instance);
+    let live_panes: HashSet<PaneId> = live.panes.iter().map(|info| info.pane).collect();
+    for leaf in workspace.leaves.values_mut().filter(|leaf| leaf.host == live.host) {
+        if !leaf.pane.is_some_and(|pane| same_instance && live_panes.contains(&pane)) {
             leaf.pane = None;
         }
     }
+    workspace.set_instance(&live.host, live.instance);
+    let mut attach: Vec<(NodeId, PaneKey)> = workspace
+        .leaves
+        .iter()
+        .filter(|(_, leaf)| leaf.host == live.host)
+        .filter_map(|(id, leaf)| Some((*id, leaf.key()?)))
+        .collect();
+    let known: HashSet<PaneId> = attach.iter().map(|(_, key)| key.pane).collect();
+    let mut orphans: Vec<&PaneInfo> = live.panes.iter().filter(|info| !known.contains(&info.pane)).collect();
+    orphans.sort_by_key(|info| (info.last_focused, info.pane));
+    for info in orphans {
+        let leaf = workspace.new_tab_on(
+            PaneLaunch {
+                program: info.program.clone(),
+                args: info.args.clone(),
+                cwd: info.cwd.clone(),
+                container: info.container.clone(),
+                claude: info.claude,
+                claude_dir: None,
+                env: Vec::new(),
+            },
+            live.host.clone(),
+        );
+        workspace.pane_started(leaf, info.pane, info.cwd.clone());
+        attach.push((leaf, PaneKey::new(live.host.clone(), info.pane)));
+    }
+    attach
+}
+
+/// A pane closed while its host was not connected: the host, the daemon instance it belonged to, and its id.
+pub type KilledOffline = (HostId, String, PaneId);
+
+/// Take `host`'s entries out of `killed` and apply them to the live panes of the daemon instance `instance` that
+/// just connected: returns the panes that are left to show, and the ones to kill now (closed while offline, still
+/// running). Entries of another instance of the host mean nothing now and are dropped.
+pub fn without_killed_offline(
+    killed: &mut Vec<KilledOffline>,
+    host: &HostId,
+    instance: &str,
+    panes: &[PaneInfo],
+) -> (Vec<PaneInfo>, Vec<PaneId>) {
+    let mut ours = HashSet::new();
+    killed.retain(|(killed_host, killed_instance, pane)| {
+        if killed_host != host {
+            return true;
+        }
+        if killed_instance == instance {
+            ours.insert(*pane);
+        }
+        false
+    });
+    let to_kill: Vec<PaneId> = panes.iter().map(|info| info.pane).filter(|pane| ours.contains(pane)).collect();
+    let kept = panes.iter().filter(|info| !ours.contains(&info.pane)).cloned().collect();
+    (kept, to_kill)
+}
+
+/// Rebuild the workspace at startup, host by host through `reconcile`. Leaves keep their live pane; leaves whose
+/// pane is gone (or belongs to another daemon instance) become dead; leaves of a host that is not connected keep their
+/// saved pane and instance until `reconcile` runs for it (and are never dropped, even without `restore_layout`); live panes
+/// missing from the layout become new tabs (most recently focused last, and active); an explicit launch opens a new
+/// focused tab; an empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped
+/// from the workspace (live panes still reattach) but kept aside for `saveable`; leaves in `keep` (the ones that
+/// were running when an update stopped everything) stay in the workspace as finished leaves instead.
+pub fn restore(
+    saved: Option<Workspace>,
+    hosts: &[HostLive<'_>],
+    launch: &Launch,
+    restore_layout: bool,
+    keep: &HashSet<NodeId>,
+) -> Restored {
+    let mut workspace = saved.unwrap_or_default();
+    // A host that is not connected keeps its leaves as saved (pane and instance): `reconcile` decides when it connects.
+    let connected: HashSet<&HostId> = hosts.iter().map(|live| &live.host).collect();
+    let mut attach = Vec::new();
+    for live in hosts {
+        attach.extend(reconcile(&mut workspace, live));
+    }
     if !restore_layout {
-        let dead: Vec<NodeId> =
-            workspace.leaves.iter().filter(|(_, leaf)| leaf.pane.is_none()).map(|(id, _)| *id).collect();
+        let dead: Vec<NodeId> = workspace
+            .leaves
+            .iter()
+            .filter(|(id, leaf)| leaf.pane.is_none() && !keep.contains(id) && connected.contains(&leaf.host))
+            .map(|(id, _)| *id)
+            .collect();
         workspace.dropped = workspace.park(&dead);
         for leaf in dead {
             workspace.close(leaf);
         }
-    }
-    let mut attach: Vec<(NodeId, PaneId)> =
-        workspace.leaves.iter().filter_map(|(id, leaf)| leaf.pane.map(|pane| (*id, pane))).collect();
-    let known: HashSet<PaneId> = attach.iter().map(|(_, pane)| *pane).collect();
-    let mut orphans: Vec<&PaneInfo> = live.iter().filter(|info| !known.contains(&info.pane)).collect();
-    orphans.sort_by_key(|info| (info.last_focused, info.pane));
-    for info in orphans {
-        let leaf = workspace.new_tab(PaneLaunch {
-            program: info.program.clone(),
-            args: info.args.clone(),
-            cwd: info.cwd.clone(),
-            container: info.container.clone(),
-            claude: info.claude,
-            claude_dir: None,
-            env: Vec::new(),
-        });
-        workspace.pane_started(leaf, info.pane, info.cwd.clone());
-        attach.push((leaf, info.pane));
     }
     let mut spawn = Vec::new();
     if let Some(explicit) = &launch.explicit {
@@ -1069,7 +1216,7 @@ mod tests {
 
     #[test]
     fn settings_tab_is_never_saved() {
-        let mut ws = Workspace { instance: "i".into(), ..Default::default() };
+        let mut ws = workspace_on("i");
         let a = ws.new_tab(shell("/a"));
         ws.open_settings();
         let b = ws.new_tab(shell("/b"));
@@ -1121,7 +1268,7 @@ mod tests {
         ws.open_settings();
         let id = ws.tabs[1].focused;
         assert_eq!((ws.tab_of(id), ws.close(id), ws.focus(id)), (None, None, false));
-        assert_eq!((ws.leaf_for_pane(1), ws.leaf_for_session("x")), (None, None));
+        assert_eq!((ws.leaf_for_pane(&PaneKey::local(1)), ws.leaf_for_session(&HostId::local(), "x")), (None, None));
         assert_eq!((ws.tabs.len(), ws.active), (2, 1));
     }
 
@@ -1196,8 +1343,11 @@ mod tests {
         let mut ws = Workspace::default();
         let a = ws.new_tab(shell("/guess"));
         ws.pane_started(a, 7, "/real".into());
-        assert_eq!((ws.leaf_for_pane(7), ws.leaves[&a].launch.cwd.clone()), (Some(a), PathBuf::from("/real")));
-        assert_eq!(ws.pane_exited(7), Some(a));
+        assert_eq!(
+            (ws.leaf_for_pane(&PaneKey::local(7)), ws.leaves[&a].launch.cwd.clone()),
+            (Some(a), PathBuf::from("/real"))
+        );
+        assert_eq!(ws.pane_exited(&PaneKey::local(7)), Some(a));
         assert_eq!(ws.leaves[&a].pane, None);
     }
 
@@ -1234,12 +1384,13 @@ mod tests {
     fn pane_exited_for_an_unknown_pane_is_ignored() {
         let mut ws = Workspace::default();
         ws.new_tab(shell("/a"));
-        assert_eq!(ws.pane_exited(42), None);
+        assert_eq!(ws.pane_exited(&PaneKey::local(42)), None);
     }
 
     fn claude_leaf(session: Option<&str>) -> Leaf {
         Leaf {
             pane: None,
+            host: HostId::local(),
             launch: PaneLaunch {
                 program: "claude".into(),
                 args: vec![],
@@ -1301,6 +1452,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
+            host: protocol::host::HostId::local(),
         }
     }
 
@@ -1314,13 +1466,13 @@ mod tests {
         let mut store = SessionStore::default();
         // Before the first list: assume it may exist and resume.
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
-        store.replace(vec![]);
+        store.replace(&HostId::local(), vec![]);
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(false)));
-        store.replace(vec![session_info("x", SessionState::Closed)]);
+        store.replace(&HostId::local(), vec![session_info("x", SessionState::Closed)]);
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Start(again(true)));
-        store.replace(vec![session_info("x", SessionState::Managed { pane: 4 })]);
-        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Focus(4));
-        store.replace(vec![session_info("x", SessionState::External { pid: Some(9) })]);
+        store.replace(&HostId::local(), vec![session_info("x", SessionState::Managed { pane: 4 })]);
+        assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Focus(PaneKey::local(4)));
+        store.replace(&HostId::local(), vec![session_info("x", SessionState::External { pid: Some(9) })]);
         assert_eq!(leaf.rerun_with(&store, &dirs, daemon), Rerun::Busy);
         let sh = Leaf::new(shell("/r"));
         assert_eq!(sh.rerun_with(&store, &dirs, daemon), Rerun::Start(sh.launch.clone()));
@@ -1339,13 +1491,13 @@ mod tests {
         settings.claude_dirs[1].args = vec!["--model".into(), "sonnet".into()];
         let dirs = ClaudeDirs::from_settings(&settings, daemon, Some(Path::new("/home/me")));
         let mut store = SessionStore::default();
-        store.replace(vec![]);
+        store.replace(&HostId::local(), vec![]);
         let Rerun::Start(restart) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(
             (restart.program.as_str(), restart.args.clone()),
             ("claude-new", vec!["--model".to_string(), "sonnet".into(), "--session-id".into(), "sid".into()])
         );
-        store.replace(vec![session_info("sid", protocol::message::SessionState::Closed)]);
+        store.replace(&HostId::local(), vec![session_info("sid", protocol::message::SessionState::Closed)]);
         let Rerun::Start(resume) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(
             (resume.program.as_str(), resume.args.clone()),
@@ -1363,12 +1515,12 @@ mod tests {
         let mut info = session_info("sid", protocol::message::SessionState::Closed);
         info.claude_dir = Some("/home/me/.claude-work".into());
         let mut store = SessionStore::default();
-        store.replace(vec![info]);
+        store.replace(&HostId::local(), vec![info]);
         let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(launch.env, vec![("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-work".to_string())]);
         assert_eq!(launch.claude_dir, Some(PathBuf::from("/home/me/.claude-work")));
         leaf.launch.claude_dir = Some("/home/me/.claude-work".into());
-        store.replace(vec![]);
+        store.replace(&HostId::local(), vec![]);
         let Rerun::Start(launch) = leaf.rerun_with(&store, &dirs, daemon) else { panic!("starts") };
         assert_eq!(launch.env.len(), 1, "falls back to the leaf's own dir when the session is unknown");
     }
@@ -1383,19 +1535,23 @@ mod tests {
         ws.pane_started(sh, 2, "/r".into());
         let with = |pane, prompt: Option<&str>| SessionInfo {
             last_prompt: prompt.map(Into::into),
+            host: protocol::host::HostId::local(),
             ..session_info("a", SessionState::Managed { pane })
         };
         let mut store = SessionStore::default();
-        store.replace(vec![with(1, Some("what next"))]);
+        store.replace(&HostId::local(), vec![with(1, Some("what next"))]);
         assert_eq!(ws.leaf_last_prompt(a, &store), Some("what next"));
         assert_eq!(ws.leaf_last_prompt(sh, &store), None, "a shell has no session");
-        store.replace(vec![with(1, None)]);
+        store.replace(&HostId::local(), vec![with(1, None)]);
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "nothing yet");
-        store.replace(vec![with(1, Some(""))]);
+        store.replace(&HostId::local(), vec![with(1, Some(""))]);
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "empty text is nothing");
-        store.replace(vec![with(9, Some("old"))]);
+        store.replace(&HostId::local(), vec![with(9, Some("old"))]);
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "the session moved to another pane");
-        store.replace(vec![SessionInfo { last_prompt: Some("old".into()), ..session_info("a", SessionState::Closed) }]);
+        store.replace(
+            &HostId::local(),
+            vec![SessionInfo { last_prompt: Some("old".into()), ..session_info("a", SessionState::Closed) }],
+        );
         assert_eq!(ws.leaf_last_prompt(a, &store), None, "an ended pane shows Continue, not a prompt");
     }
 
@@ -1413,13 +1569,15 @@ mod tests {
             status: Some(status),
             ..session_info(id, SessionState::Managed { pane })
         };
-        store
-            .replace(vec![with("a", 1, SessionStatus::Idle), with("b", 2, SessionStatus::NeedsInput { reason: None })]);
+        store.replace(
+            &HostId::local(),
+            vec![with("a", 1, SessionStatus::Idle), with("b", 2, SessionStatus::NeedsInput { reason: None })],
+        );
         assert_eq!(ws.leaf_status(a, &store), Some(&SessionStatus::Idle));
         assert_eq!(ws.tab_status(0, &store), Some(&SessionStatus::NeedsInput { reason: None }));
         assert_eq!((ws.leaf_status(other, &store), ws.tab_status(1, &store)), (None, None));
         // A stale entry for another pane (the leaf's process ended, the session moved) is not this leaf's status.
-        store.replace(vec![with("a", 9, SessionStatus::Busy)]);
+        store.replace(&HostId::local(), vec![with("a", 9, SessionStatus::Busy)]);
         assert_eq!(ws.leaf_status(a, &store), None);
         // The visible tab is the second one (opened last).
         assert_eq!((ws.is_visible(other), ws.is_visible(a)), (true, false));
@@ -1430,7 +1588,13 @@ mod tests {
         let mut ws = Workspace::default();
         let a = ws.new_tab(PaneLaunch::resume("x", "/r".into(), None));
         ws.new_tab(shell("/r"));
-        assert_eq!((ws.leaf_for_session("x"), ws.leaf_for_session("y")), (Some(a), None));
+        let local = HostId::local();
+        assert_eq!((ws.leaf_for_session(&local, "x"), ws.leaf_for_session(&local, "y")), (Some(a), None));
+        // The same session id on another host is another leaf.
+        let b = ws.new_tab(PaneLaunch::resume("x", "/r".into(), None));
+        ws.leaves.get_mut(&b).unwrap().host = HostId::named("box");
+        assert_eq!(ws.leaf_for_session(&HostId::named("box"), "x"), Some(b));
+        assert_eq!(ws.leaf_for_session(&local, "x"), Some(a));
     }
 
     #[test]
@@ -1438,9 +1602,9 @@ mod tests {
         let mut ws = Workspace::default();
         let leaf = ws.new_tab(PaneLaunch::claude("/r".into()));
         ws.pane_started(leaf, 5, "/r".into());
-        assert!(ws.session_seen(5, "after-clear"));
-        assert!(!ws.session_seen(5, "after-clear"));
-        assert!(!ws.session_seen(99, "x"));
+        assert!(ws.session_seen(&PaneKey::local(5), "after-clear"));
+        assert!(!ws.session_seen(&PaneKey::local(5), "after-clear"));
+        assert!(!ws.session_seen(&PaneKey::local(99), "x"));
         assert_eq!(ws.leaves[&leaf].session.as_deref(), Some("after-clear"));
         assert_eq!(ws.leaves[&leaf].rerun(true).args, vec!["--resume".to_string(), "after-clear".to_string()]);
     }
@@ -1456,7 +1620,7 @@ mod tests {
             container: None,
             claude: false,
         }];
-        let restored = restore(None, "i", &live, &launch(), true);
+        let restored = restore_local(None, "i", &live, &launch(), true, &HashSet::new());
         let leaf = restored.attach[0].0;
         assert_eq!(restored.workspace.leaves[&leaf].session.as_deref(), Some("xyz"));
     }
@@ -1486,24 +1650,184 @@ mod tests {
         Launch { explicit: None, default: shell("/home") }
     }
 
+    fn workspace_on(instance: &str) -> Workspace {
+        let mut ws = Workspace::default();
+        ws.set_instance(&HostId::local(), instance);
+        ws
+    }
+
+    fn on_host(ws: &mut Workspace, leaf: NodeId, host: &str) {
+        ws.leaves.get_mut(&leaf).unwrap().host = HostId::named(host);
+    }
+
+    fn restore_local(
+        saved: Option<Workspace>,
+        instance: &str,
+        live: &[PaneInfo],
+        launch: &Launch,
+        restore_layout: bool,
+        keep: &HashSet<NodeId>,
+    ) -> Restored {
+        let hosts = [HostLive { host: HostId::local(), instance, panes: live }];
+        restore(saved, &hosts, launch, restore_layout, keep)
+    }
+
+    #[test]
+    fn leaves_of_two_hosts_with_the_same_pane_id_stay_apart() {
+        let mut ws = Workspace::default();
+        let local = ws.new_tab(shell("/a"));
+        let remote = ws.new_tab(shell("/b"));
+        on_host(&mut ws, remote, "devbox");
+        ws.pane_started(local, 1, "/a".into());
+        ws.pane_started(remote, 1, "/b".into());
+        let devbox = |pane| PaneKey::new(HostId::named("devbox"), pane);
+        assert_eq!(ws.leaf_for_pane(&PaneKey::local(1)), Some(local));
+        assert_eq!(ws.leaf_for_pane(&devbox(1)), Some(remote));
+        assert_eq!(ws.pane_exited(&PaneKey::local(1)), Some(local));
+        assert_eq!(ws.leaves[&remote].pane, Some(1), "the other host's pane 1 is untouched");
+        assert_eq!(ws.leaves[&remote].key(), Some(devbox(1)));
+        ws.leaves.get_mut(&remote).unwrap().session = None;
+        assert!(ws.session_seen(&devbox(1), "s"));
+        assert_eq!(ws.leaves[&local].session, None, "a session seen on one host never lands on the other's leaf");
+    }
+
+    #[test]
+    fn splitting_a_pane_with_its_host_runs_there() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        on_host(&mut ws, a, "devbox");
+        let b = ws.split_on(Axis::Vertical, shell("/b"), HostId::named("devbox")).unwrap();
+        assert_eq!(ws.leaves[&b].host, HostId::named("devbox"));
+        let c = ws.new_tab(shell("/c"));
+        assert!(ws.leaves[&c].host.is_local(), "a new tab opens on this machine");
+    }
+
+    #[test]
+    fn a_split_is_local_unless_given_a_host() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        on_host(&mut ws, a, "devbox");
+        let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
+        assert!(ws.leaves[&b].host.is_local());
+    }
+
+    #[test]
+    fn restore_decides_per_host_which_leaves_are_still_live() {
+        let mut saved = workspace_on("i1");
+        saved.set_instance(&HostId::named("devbox"), "r1");
+        let local = saved.new_tab(shell("/a"));
+        saved.pane_started(local, 1, "/a".into());
+        let remote = saved.new_tab(shell("/b"));
+        on_host(&mut saved, remote, "devbox");
+        saved.pane_started(remote, 1, "/b".into());
+        // The local daemon is the same instance; devbox restarted (new instance) and has a pane 1 of its own.
+        let devbox_panes = [info(1, "zsh", 9)];
+        let hosts = [
+            HostLive { host: HostId::local(), instance: "i1", panes: &[info(1, "bash", 5)] },
+            HostLive { host: HostId::named("devbox"), instance: "r2", panes: &devbox_panes },
+        ];
+        let restored = restore(Some(saved), &hosts, &launch(), true, &HashSet::new());
+        let ws = &restored.workspace;
+        assert_eq!(ws.leaves[&local].pane, Some(1), "the local leaf keeps its live pane");
+        assert_eq!(ws.leaves[&remote].pane, None, "devbox restarted: its old pane ids mean nothing");
+        assert_eq!(ws.instances[&HostId::named("devbox")], "r2");
+        let adopted: Vec<_> = restored.attach.iter().filter(|(_, key)| !key.host.is_local()).collect();
+        assert_eq!(adopted.len(), 1, "devbox's live pane 1 is adopted as a tab of its own");
+        assert_eq!(ws.leaves[&adopted[0].0].host, HostId::named("devbox"));
+        assert_ne!(adopted[0].0, remote);
+    }
+
+    fn saved_with_a_remote_leaf() -> (Workspace, NodeId) {
+        let mut saved = workspace_on("i1");
+        saved.set_instance(&HostId::named("devbox"), "r1");
+        let remote = saved.new_tab(shell("/b"));
+        on_host(&mut saved, remote, "devbox");
+        saved.pane_started(remote, 3, "/b".into());
+        (saved, remote)
+    }
+
+    #[test]
+    fn restore_without_a_connection_keeps_a_hosts_leaves_and_their_panes_for_when_it_connects() {
+        let (saved, remote) = saved_with_a_remote_leaf();
+        let restored = restore_local(Some(saved), "i1", &[], &launch(), true, &HashSet::new());
+        let ws = &restored.workspace;
+        assert_eq!(ws.leaves[&remote].pane, Some(3), "the remote pane may still run: reconcile decides");
+        assert!(restored.spawn.is_empty(), "nothing is started in place of a remote leaf");
+        assert!(restored.attach.is_empty(), "nothing is attached to a host that is not connected");
+        assert_eq!(ws.instances[&HostId::named("devbox")], "r1", "kept for when the host is back");
+        assert!(ws.finished_leaves().is_empty(), "a remote leaf waiting for its host is not finished");
+    }
+
+    #[test]
+    fn a_pane_closed_while_offline_is_killed_and_left_out_when_the_host_connects() {
+        let (devbox, lab) = (HostId::named("devbox"), HostId::named("lab"));
+        let mut killed = vec![
+            (devbox.clone(), "r1".to_string(), 3),
+            (devbox.clone(), "r0".to_string(), 4),
+            (lab.clone(), "l1".to_string(), 3),
+        ];
+        let panes = [info(3, "bash", 1), info(4, "bash", 2), info(5, "bash", 3)];
+        let (kept, to_kill) = without_killed_offline(&mut killed, &devbox, "r1", &panes);
+        assert_eq!(kept.iter().map(|info| info.pane).collect::<Vec<_>>(), vec![4, 5], "only the same instance counts");
+        assert_eq!(to_kill, vec![3]);
+        assert_eq!(killed, vec![(lab, "l1".to_string(), 3)], "the host's entries are used up, the other host's stay");
+    }
+
+    #[test]
+    fn restore_then_reconcile_with_the_same_instance_reattaches_the_same_leaf() {
+        let (saved, remote) = saved_with_a_remote_leaf();
+        let mut ws = restore_local(Some(saved), "i1", &[], &launch(), true, &HashSet::new()).workspace;
+        let tabs = ws.tabs.len();
+        let panes = [info(3, "bash", 5)];
+        let devbox = HostId::named("devbox");
+        let attach = reconcile(&mut ws, &HostLive { host: devbox.clone(), instance: "r1", panes: &panes });
+        assert_eq!(attach, vec![(remote, PaneKey::new(devbox, 3))]);
+        assert_eq!(ws.tabs.len(), tabs, "no duplicate tab");
+    }
+
+    #[test]
+    fn restore_then_reconcile_with_a_new_instance_makes_the_leaf_dead_and_adopts_the_live_panes() {
+        let (saved, remote) = saved_with_a_remote_leaf();
+        let mut ws = restore_local(Some(saved), "i1", &[], &launch(), true, &HashSet::new()).workspace;
+        let panes = [info(3, "zsh", 5)];
+        let devbox = HostId::named("devbox");
+        let attach = reconcile(&mut ws, &HostLive { host: devbox, instance: "r2", panes: &panes });
+        assert_eq!(ws.leaves[&remote].pane, None);
+        assert_eq!(ws.finished_leaves(), vec![remote]);
+        assert_eq!(attach.len(), 1);
+        assert_ne!(attach[0].0, remote, "the live pane became a tab of its own");
+    }
+
+    #[test]
+    fn restore_without_the_layout_keeps_the_leaves_of_hosts_that_are_not_connected() {
+        let (mut saved, remote) = saved_with_a_remote_leaf();
+        let dead = saved.new_tab(shell("/c"));
+        on_host(&mut saved, dead, "devbox");
+        let restored = restore_local(Some(saved), "i1", &[], &launch(), false, &HashSet::new());
+        let ws = &restored.workspace;
+        assert!(ws.leaves.contains_key(&remote), "a live-looking remote leaf stays");
+        assert!(ws.leaves.contains_key(&dead), "so does a finished one: its host is simply not connected yet");
+        assert!(ws.is_consistent());
+    }
+
     #[test]
     fn restore_with_nothing_spawns_the_default() {
-        let restored = restore(None, "i1", &[], &launch(), true);
+        let restored = restore_local(None, "i1", &[], &launch(), true, &HashSet::new());
         assert_eq!(restored.workspace.tabs.len(), 1);
         assert_eq!(restored.spawn, vec![restored.workspace.focused().unwrap()]);
         assert!(restored.attach.is_empty());
-        assert_eq!(restored.workspace.instance, "i1");
+        assert_eq!(restored.workspace.instances[&HostId::local()], "i1");
     }
 
     #[test]
     fn restore_reattaches_live_panes_and_marks_missing_ones_dead() {
-        let mut saved = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let mut saved = workspace_on("i1");
         let a = saved.new_tab(shell("/a"));
         saved.pane_started(a, 1, "/a".into());
         let b = saved.split(Axis::Vertical, shell("/b")).unwrap();
         saved.pane_started(b, 2, "/b".into());
-        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), true);
-        assert_eq!(restored.attach, vec![(a, 1)]);
+        let restored = restore_local(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), true, &HashSet::new());
+        assert_eq!(restored.attach, vec![(a, PaneKey::local(1))]);
         assert_eq!(restored.workspace.leaves[&b].pane, None, "pane 2 is gone");
         assert!(restored.spawn.is_empty(), "dead panes wait for Continue/Restart");
         assert_eq!(restored.workspace.tabs.len(), 1);
@@ -1511,7 +1835,7 @@ mod tests {
 
     #[test]
     fn finished_leaves_are_the_ones_without_a_pane_in_screen_order() {
-        let mut ws = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let mut ws = workspace_on("i1");
         let a = ws.new_tab(shell("/a"));
         let b = ws.split(Axis::Vertical, shell("/b")).unwrap();
         let c = ws.new_tab(shell("/c"));
@@ -1521,22 +1845,22 @@ mod tests {
 
     #[test]
     fn restore_from_another_daemon_instance_attaches_nothing() {
-        let mut saved = Workspace { instance: "old".into(), ..Workspace::default() };
+        let mut saved = workspace_on("old");
         let a = saved.new_tab(shell("/a"));
         saved.pane_started(a, 1, "/a".into());
-        let restored = restore(Some(saved), "new", &[info(1, "zsh", 1)], &launch(), true);
+        let restored = restore_local(Some(saved), "new", &[info(1, "zsh", 1)], &launch(), true, &HashSet::new());
         assert_eq!(restored.workspace.leaves[&a].pane, None);
         assert_eq!(restored.workspace.tabs.len(), 2, "the new daemon's pane 1 is adopted as its own tab");
-        let (adopted, pane) = restored.attach[0];
+        let (adopted, pane) = restored.attach[0].clone();
         assert_ne!(adopted, a);
-        assert_eq!((pane, restored.workspace.leaves[&adopted].launch.program.as_str()), (1, "zsh"));
+        assert_eq!((pane.pane, restored.workspace.leaves[&adopted].launch.program.as_str()), (1, "zsh"));
     }
 
     #[test]
     fn restore_adopts_live_panes_missing_from_the_layout_most_recent_last() {
-        let restored = restore(None, "i", &[info(5, "a", 9), info(4, "b", 2)], &launch(), true);
+        let restored = restore_local(None, "i", &[info(5, "a", 9), info(4, "b", 2)], &launch(), true, &HashSet::new());
         let ws = &restored.workspace;
-        assert_eq!(restored.attach.iter().map(|(_, pane)| *pane).collect::<Vec<_>>(), vec![4, 5]);
+        assert_eq!(restored.attach.iter().map(|(_, key)| key.pane).collect::<Vec<_>>(), vec![4, 5]);
         assert_eq!(ws.leaves[&ws.focused().unwrap()].pane, Some(5));
         assert_eq!(ws.leaves[&ws.focused().unwrap()].launch.args, vec!["-l".to_string()]);
         assert!(restored.spawn.is_empty());
@@ -1547,7 +1871,7 @@ mod tests {
         let mut saved = Workspace::default();
         saved.new_tab(shell("/a"));
         let launch = Launch { explicit: Some(PaneLaunch::claude("/x".into())), default: shell("/home") };
-        let restored = restore(Some(saved), "i", &[], &launch, true);
+        let restored = restore_local(Some(saved), "i", &[], &launch, true, &HashSet::new());
         let focused = restored.workspace.focused().unwrap();
         assert_eq!(restored.spawn, vec![focused]);
         assert!(restored.workspace.leaves[&focused].launch.is_claude());
@@ -1674,6 +1998,21 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_leaf_resumes_with_plain_claude() {
+        let dirs = two_dirs();
+        let daemon = Some(Path::new("/home/me/.claude"));
+        let mut leaf = claude_leaf(Some("s1"));
+        leaf.host = HostId::named("box");
+        leaf.launch.claude_dir = Some("/home/me/.claude-work".into());
+        leaf.launch.container = Some("/r".into());
+        let resume = leaf.rerun_resolved(true, Some(Path::new("/home/me/.claude-work")), &dirs, daemon);
+        assert_eq!(resume, PaneLaunch::resume("s1", "/r".into(), None));
+        let restart = leaf.rerun_resolved(false, None, &dirs, daemon);
+        assert_eq!(restart.args, ["--session-id", "s1"]);
+        assert_eq!((restart.program.as_str(), restart.container, restart.env.is_empty()), ("claude", None, true));
+    }
+
+    #[test]
     fn resume_unconfigured_dir_keeps_its_path() {
         let dirs = two_dirs();
         let launch = PaneLaunch::resume_with(
@@ -1720,26 +2059,46 @@ mod tests {
 
     #[test]
     fn restore_without_layout_drops_dead_leaves_keeps_live() {
-        let mut saved = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let mut saved = workspace_on("i1");
         let a = saved.new_tab(shell("/a"));
         saved.pane_started(a, 1, "/a".into());
         let b = saved.split(Axis::Vertical, shell("/b")).unwrap();
         saved.pane_started(b, 2, "/b".into());
         let c = saved.new_tab(shell("/c"));
         saved.pane_started(c, 3, "/c".into());
-        let restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false);
-        assert_eq!(restored.attach, vec![(a, 1)]);
+        let restored = restore_local(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false, &HashSet::new());
+        assert_eq!(restored.attach, vec![(a, PaneKey::local(1))]);
         assert_eq!(restored.workspace.leaves.keys().copied().collect::<Vec<_>>(), vec![a]);
         assert_eq!(restored.workspace.tabs.len(), 1);
         assert!(restored.spawn.is_empty() && restored.workspace.is_consistent());
-        let none =
-            restore(Some(Workspace { instance: "i1".into(), ..Workspace::default() }), "i1", &[], &launch(), false);
+        let none = restore_local(Some(workspace_on("i1")), "i1", &[], &launch(), false, &HashSet::new());
         assert_eq!(none.spawn.len(), 1, "no tab left: one new tab");
     }
 
     #[test]
+    fn restore_keep_holds_the_listed_finished_leaves_when_the_layout_is_off() {
+        let mut saved = workspace_on("i1");
+        let a = saved.new_tab(shell("/a"));
+        saved.pane_started(a, 1, "/a".into());
+        let b = saved.new_tab(shell("/b"));
+        let keep = HashSet::from([a]);
+        // A new daemon: every pane id is stale, so `a` is finished too.
+        let restored = restore_local(Some(saved.clone()), "i2", &[], &launch(), false, &keep);
+        assert_eq!(restored.workspace.leaves.keys().copied().collect::<Vec<_>>(), vec![a]);
+        assert_eq!(restored.workspace.finished_leaves(), vec![a]);
+        assert!(restored.spawn.is_empty() && restored.workspace.is_consistent());
+        let saved_back = restored.workspace.saveable();
+        assert_eq!(saved_back.leaves.keys().copied().collect::<Vec<_>>(), vec![a, b], "the other tab is parked");
+        // With the layout on, nothing changes.
+        let on = restore_local(Some(saved.clone()), "i2", &[], &launch(), true, &keep);
+        let plain = restore_local(Some(saved), "i2", &[], &launch(), true, &HashSet::new());
+        assert_eq!(on.workspace.leaves.len(), 2);
+        assert_eq!(on.workspace.tabs, plain.workspace.tabs);
+    }
+
+    #[test]
     fn restore_without_layout_keeps_dead_leaves_for_saving_and_live_launches() {
-        let mut saved = Workspace { instance: "i1".into(), ..Workspace::default() };
+        let mut saved = workspace_on("i1");
         let a = saved.new_tab(PaneLaunch {
             claude_dir: Some("/w".into()),
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/w".into())],
@@ -1753,7 +2112,8 @@ mod tests {
         let d = saved.split(Axis::Vertical, shell("/d")).unwrap();
         saved.pane_started(d, 4, "/d".into());
         saved.sidebar.visible = false;
-        let mut restored = restore(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false).workspace;
+        let mut restored =
+            restore_local(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), false, &HashSet::new()).workspace;
         restored.sidebar.width = 300.0;
         let kept = restored.saveable();
         assert!(kept.is_consistent());
@@ -1768,7 +2128,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("layout.json");
         crate::layout_store::save(&file, &restored).unwrap();
-        let back = restore(crate::layout_store::load(&file).unwrap(), "i1", &[info(1, "bash", 5)], &launch(), true);
+        let back = restore_local(
+            crate::layout_store::load(&file).unwrap(),
+            "i1",
+            &[info(1, "bash", 5)],
+            &launch(),
+            true,
+            &HashSet::new(),
+        );
         assert_eq!(back.workspace.leaves.len(), 4, "switching back restores the finished leaves");
         assert!(!back.workspace.sidebar.visible);
         assert_eq!(restored.leaves.len(), 1, "the running workspace only has the live leaf");
@@ -1862,5 +2229,160 @@ mod tests {
         let settings = ws.open_settings();
         ws.select_tab(settings);
         assert!(!ws.can_split());
+    }
+
+    #[test]
+    fn a_new_tab_can_open_on_a_host() {
+        let mut ws = Workspace::default();
+        let remote = ws.new_tab_on(shell("/home/me"), HostId::named("devbox"));
+        let local = ws.new_tab(shell("/a"));
+        assert_eq!(ws.leaves[&remote].host, HostId::named("devbox"));
+        assert!(ws.leaves[&local].host.is_local());
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn reconcile_reattaches_a_hosts_leaves_when_its_daemon_is_the_same_instance() {
+        let devbox = HostId::named("devbox");
+        let mut ws = Workspace::default();
+        ws.set_instance(&devbox, "r1");
+        let a = ws.new_tab_on(shell("/a"), devbox.clone());
+        ws.pane_started(a, 4, "/a".into());
+        let panes = [info(4, "bash", 5)];
+        let attach = reconcile(&mut ws, &HostLive { host: devbox.clone(), instance: "r1", panes: &panes });
+        assert_eq!(attach, vec![(a, PaneKey::new(devbox, 4))]);
+        assert_eq!(ws.leaves[&a].pane, Some(4));
+        assert_eq!(ws.tabs.len(), 1, "nothing was adopted");
+    }
+
+    #[test]
+    fn reconcile_kills_the_leaves_of_a_restarted_daemon_and_adopts_its_live_panes() {
+        let devbox = HostId::named("devbox");
+        let mut ws = Workspace::default();
+        ws.set_instance(&devbox, "r1");
+        let old = ws.new_tab_on(shell("/a"), devbox.clone());
+        ws.pane_started(old, 4, "/a".into());
+        let panes = [info(4, "zsh", 9)];
+        let attach = reconcile(&mut ws, &HostLive { host: devbox.clone(), instance: "r2", panes: &panes });
+        assert_eq!(ws.leaves[&old].pane, None, "pane 4 of the old instance means nothing now");
+        assert_eq!(ws.instances[&devbox], "r2");
+        assert_eq!(attach.len(), 1);
+        let (adopted, key) = &attach[0];
+        assert_ne!(*adopted, old);
+        assert_eq!(key.pane, 4);
+        assert_eq!(ws.leaves[adopted].host, devbox);
+        assert_eq!(ws.leaves[adopted].launch.program, "zsh");
+    }
+
+    #[test]
+    fn reconcile_leaves_the_other_hosts_alone() {
+        let (devbox, lab) = (HostId::named("devbox"), HostId::named("lab"));
+        let mut ws = workspace_on("i1");
+        ws.set_instance(&lab, "l1");
+        let local = ws.new_tab(shell("/a"));
+        ws.pane_started(local, 1, "/a".into());
+        let other = ws.new_tab_on(shell("/b"), lab.clone());
+        ws.pane_started(other, 1, "/b".into());
+        // devbox connects with a pane 1 of its own and a new instance.
+        let panes = [info(1, "bash", 1)];
+        let attach = reconcile(&mut ws, &HostLive { host: devbox.clone(), instance: "r1", panes: &panes });
+        assert_eq!(ws.leaves[&local].pane, Some(1));
+        assert_eq!(ws.leaves[&other].pane, Some(1), "lab is not connected now but its leaf is not touched");
+        assert!(attach.iter().all(|(_, key)| key.host == devbox));
+        assert_eq!(ws.instances[&lab], "l1");
+    }
+
+    #[test]
+    fn rename_host_moves_leaves_and_the_instance_key() {
+        let (dev, main_pc) = (HostId::named("dev"), HostId::named("MainPC"));
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        ws.set_instance(&HostId::local(), "i1");
+        let a = ws.new_tab_on(shell("/a"), dev.clone());
+        let b = ws.new_tab_on(shell("/b"), dev.clone());
+        let local = ws.new_tab(shell("/c"));
+        ws.rename_host(&dev, &main_pc).unwrap();
+        assert_eq!((ws.leaves[&a].host.clone(), ws.leaves[&b].host.clone()), (main_pc.clone(), main_pc.clone()));
+        assert!(ws.leaves[&local].host.is_local());
+        assert_eq!(ws.instances[&main_pc], "r1");
+        assert!(!ws.instances.contains_key(&dev));
+        assert_eq!(ws.instances[&HostId::local()], "i1");
+    }
+
+    #[test]
+    fn remove_host_drops_its_leaves_and_empty_tabs_keeping_other_hosts() {
+        let dev = HostId::named("dev");
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        let only = ws.new_tab_on(shell("/a"), dev.clone());
+        ws.pane_started(only, 4, "/a".into());
+        let mixed_local = ws.new_tab(shell("/b"));
+        let mixed_dev = ws.split_on(Axis::Horizontal, shell("/c"), dev.clone()).unwrap();
+        ws.pane_started(mixed_dev, 5, "/c".into());
+        let unstarted = ws.new_tab_on(shell("/d"), dev.clone());
+        let removed = ws.remove_host(&dev);
+        assert_eq!(removed.len(), 2, "only started panes have keys: {removed:?}");
+        for pane in [4, 5] {
+            assert!(removed.contains(&PaneKey::new(dev.clone(), pane)));
+        }
+        assert_eq!(ws.tabs.len(), 1, "the dev-only tabs are gone");
+        assert!(ws.leaves.contains_key(&mixed_local));
+        for gone in [only, mixed_dev, unstarted] {
+            assert!(!ws.leaves.contains_key(&gone));
+        }
+        assert_eq!(ws.tabs[0].root.leaves(), vec![mixed_local]);
+        assert!(!ws.instances.contains_key(&dev));
+    }
+
+    #[test]
+    fn removing_a_host_from_the_list_and_the_workspace_leaves_no_key_of_it() {
+        use crate::settings::{SshHost, add_ssh_host, remove_ssh_host};
+        let dev = HostId::named("dev");
+        let mut hosts = Vec::new();
+        let entry = SshHost {
+            name: "dev".into(),
+            target: "me@dev".into(),
+            command: "~/.local/bin/gantry".into(),
+            auth: Default::default(),
+        };
+        add_ssh_host(&mut hosts, entry).unwrap();
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        ws.new_tab_on(shell("/a"), dev.clone());
+        ws.new_tab(shell("/b"));
+        assert!(remove_ssh_host(&mut hosts, "dev"));
+        ws.remove_host(&dev);
+        assert!(hosts.is_empty());
+        assert!(!ws.instances.contains_key(&dev));
+        assert!(ws.leaves.values().all(|leaf| leaf.host != dev));
+        assert_eq!(ws.tabs.len(), 1);
+    }
+
+    #[test]
+    fn rename_host_refuses_a_name_that_still_has_leaves_or_an_instance() {
+        let (dev, lab) = (HostId::named("dev"), HostId::named("lab"));
+        let mut ws = Workspace::default();
+        ws.set_instance(&dev, "r1");
+        ws.new_tab_on(shell("/a"), dev.clone());
+        ws.new_tab_on(shell("/b"), lab.clone());
+        assert!(ws.rename_host(&dev, &lab).unwrap_err().contains("lab"), "lab has a leaf");
+        ws.set_instance(&HostId::named("ghost"), "g1");
+        assert!(ws.rename_host(&dev, &HostId::named("ghost")).is_err(), "ghost has an instance");
+        assert!(ws.rename_host(&dev, &dev).is_ok(), "the same name is a no-op");
+        assert_eq!(ws.instances[&dev], "r1");
+        assert!(ws.leaves.values().any(|leaf| leaf.host == dev));
+    }
+
+    #[test]
+    fn a_host_only_in_the_parked_leaves_is_listed_and_blocks_a_rename() {
+        let (dev, old) = (HostId::named("dev"), HostId::named("old"));
+        let mut ws = Workspace::default();
+        ws.new_tab_on(shell("/a"), dev.clone());
+        let parked = Leaf { host: old.clone(), ..Leaf::new(shell("/b")) };
+        let tab = Tab { root: Node::Leaf(99), focused: 99, settings: false, name: None };
+        ws.dropped.push((tab, vec![(99, parked)]));
+        assert!(ws.host_names().contains(&old), "parked leaves count");
+        assert!(ws.rename_host(&dev, &old).is_err());
+        assert!(ws.leaves.values().all(|leaf| leaf.host == dev));
     }
 }

@@ -4,7 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use protocol::message::{PaneId, SessionInfo, SessionState, SessionStatus};
+use protocol::host::{HostId, PaneKey, project_key, split_project_key};
+use protocol::message::{SessionInfo, SessionState, SessionStatus};
 
 use crate::fuzzy::Fuzzy;
 use crate::split_tree::NodeId;
@@ -18,6 +19,8 @@ pub enum Tone {
     Working,
     /// Idle with a result the user has not seen.
     Done,
+    /// Idle, marked unread by hand.
+    Unread,
     /// Idle (or not reporting yet), nothing new.
     Idle,
     /// Running outside Gantry.
@@ -31,6 +34,8 @@ pub enum Tone {
 pub struct PaneEntry {
     /// Its leaf.
     pub leaf: NodeId,
+    /// The host whose daemon runs it.
+    pub host: HostId,
     /// Directory it was started in.
     pub cwd: PathBuf,
     /// Pane title.
@@ -41,6 +46,8 @@ pub struct PaneEntry {
     pub claude: bool,
     /// Its process ended; the pane shows Continue / Restart.
     pub ended: bool,
+    /// Its host is not connected (an SSH host that is connecting, lost or never connected): the Closed look.
+    pub offline: bool,
     /// Its tab has no other pane.
     pub alone: bool,
     /// Host folder of the dev container it runs in.
@@ -154,10 +161,12 @@ pub struct ActiveInput<'a> {
     pub details: Option<&'a str>,
     /// Sessions with an alert the user has not seen.
     pub unseen: &'a HashSet<String>,
+    /// Sessions the user marked unread by hand (also in `unseen`).
+    pub marked: &'a HashSet<String>,
     /// Tabs of the layout; those with several panes are listed as a heading with their panes under it.
     pub tabs: &'a [TabEntry],
     /// The project a directory belongs to (see [`project_root`]).
-    pub project_of: &'a dyn Fn(&Path) -> PathBuf,
+    pub project_of: &'a dyn Fn(&HostId, &Path) -> PathBuf,
     /// Current time, ms since the Unix epoch.
     pub now_ms: u64,
 }
@@ -175,8 +184,12 @@ impl ProjectRoots {
         ProjectRoots { home, cache: Default::default() }
     }
 
-    /// The project `cwd` belongs to: its git repository, else the directory itself.
-    pub fn of(&self, cwd: &Path) -> PathBuf {
+    /// The project `cwd` belongs to on `host`: its git repository, else the directory itself. Another machine's disk
+    /// cannot be searched, so a remote project is the directory itself.
+    pub fn of(&self, host: &HostId, cwd: &Path) -> PathBuf {
+        if !host.is_local() {
+            return project_key(host, cwd);
+        }
         if let Some(root) = self.cache.borrow().get(cwd) {
             return root.clone();
         }
@@ -277,6 +290,8 @@ pub enum RowKind {
         session: String,
         /// Its directory (where it is resumed).
         cwd: PathBuf,
+        /// The host it runs on.
+        host: HostId,
     },
 }
 
@@ -301,7 +316,7 @@ pub enum RowKey {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activation {
     /// Show the pane running this session.
-    FocusPane(PaneId),
+    FocusPane(PaneKey),
     /// Show this leaf.
     FocusLeaf(NodeId),
     /// Resume a closed session.
@@ -310,6 +325,8 @@ pub enum Activation {
         session: String,
         /// Its directory.
         cwd: PathBuf,
+        /// The host it ran on.
+        host: HostId,
     },
     /// Show or hide an external session's details.
     ToggleDetails(String),
@@ -319,6 +336,8 @@ pub enum Activation {
         session: String,
         /// Its directory.
         cwd: PathBuf,
+        /// The host it runs on.
+        host: HostId,
     },
     /// Expand or collapse a project.
     ToggleProject(PathBuf),
@@ -358,30 +377,54 @@ impl Row {
             RowKind::Session { session, leaf, .. } => match (session.state, leaf) {
                 (SessionState::External { .. }, _) => Activation::ToggleDetails(session.id.clone()),
                 (_, Some(leaf)) => Activation::FocusLeaf(*leaf),
-                (SessionState::Managed { pane }, None) => Activation::FocusPane(pane),
-                (SessionState::Closed, None) if session.cwd_exists => {
-                    Activation::Resume { session: session.id.clone(), cwd: session.cwd.clone() }
+                (SessionState::Managed { pane }, None) => {
+                    Activation::FocusPane(PaneKey::new(session.host.clone(), pane))
                 }
+                (SessionState::Closed, None) if session.cwd_exists => Activation::Resume {
+                    session: session.id.clone(),
+                    cwd: session.cwd.clone(),
+                    host: session.host.clone(),
+                },
                 (SessionState::Closed, None) => Activation::Nothing,
             },
-            RowKind::TakeOver { session, cwd } => Activation::TakeOver { session: session.clone(), cwd: cwd.clone() },
+            RowKind::TakeOver { session, cwd, host } => {
+                Activation::TakeOver { session: session.clone(), cwd: cwd.clone(), host: host.clone() }
+            }
             RowKind::Detail { .. } => Activation::Nothing,
         }
     }
 }
 
-/// Tone of a session in a Gantry pane from its status; `unseen` = it has an alert the user has not seen.
-pub fn status_tone(status: Option<&SessionStatus>, unseen: bool) -> Tone {
-    match status {
-        Some(SessionStatus::NeedsInput { .. }) => Tone::NeedsInput,
-        Some(SessionStatus::Busy) => Tone::Working,
-        _ if unseen => Tone::Done,
-        _ => Tone::Idle,
+/// Whether a session's result is unseen, and why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unseen {
+    /// Nothing new.
+    No,
+    /// An alert the user has not seen.
+    Alert,
+    /// Marked unread by hand.
+    Marked,
+}
+
+/// Tone of a session in a Gantry pane from its status and whether its result is unseen.
+pub fn status_tone(status: Option<&SessionStatus>, unseen: Unseen) -> Tone {
+    match (status, unseen) {
+        (Some(SessionStatus::NeedsInput { .. }), _) => Tone::NeedsInput,
+        (Some(SessionStatus::Busy), _) => Tone::Working,
+        (_, Unseen::Alert) => Tone::Done,
+        (_, Unseen::Marked) => Tone::Unread,
+        (_, Unseen::No) => Tone::Idle,
     }
 }
 
+/// Tone of a leaf's title-bar chip or pane header: Closed while its host is not connected, else from its status
+/// (`None` = no status to color it by).
+pub fn leaf_tone(status: Option<&SessionStatus>, unseen: Unseen, offline: bool) -> Option<Tone> {
+    if offline { Some(Tone::Closed) } else { status.map(|status| status_tone(Some(status), unseen)) }
+}
+
 /// Tone of any session.
-pub fn tone(session: &SessionInfo, unseen: bool) -> Tone {
+pub fn tone(session: &SessionInfo, unseen: Unseen) -> Tone {
     match session.state {
         SessionState::Managed { .. } => status_tone(session.status.as_ref(), unseen),
         SessionState::External { .. } => Tone::Elsewhere,
@@ -434,6 +477,7 @@ pub fn find(rows: &[Row], key: &RowKey) -> Option<usize> {
 /// What one Active row stands for, before grouping.
 struct Entry<'a> {
     key: EntryKey,
+    host: &'a HostId,
     cwd: &'a Path,
     title: &'a str,
     /// `last_active_ms`; panes the session list does not know count as active now.
@@ -448,17 +492,19 @@ enum EntryKind<'a> {
 
 /// The Active list.
 pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut ProjectOrder) -> Vec<Row> {
-    let by_id: HashMap<&str, &SessionInfo> = input.sessions.iter().map(|s| (s.id.as_str(), *s)).collect();
+    let by_id: HashMap<(&HostId, &str), &SessionInfo> =
+        input.sessions.iter().map(|s| ((&s.host, s.id.as_str()), *s)).collect();
     let mut entries: Vec<Entry<'_>> = Vec::new();
-    let mut in_leaves: HashSet<&str> = HashSet::new();
+    let mut in_leaves: HashSet<(&HostId, &str)> = HashSet::new();
     for pane in input.panes {
-        match pane.session.as_deref().and_then(|id| by_id.get(id).copied()) {
+        match pane.session.as_deref().and_then(|id| by_id.get(&(&pane.host, id)).copied()) {
             Some(session) => {
-                in_leaves.insert(session.id.as_str());
+                in_leaves.insert((&session.host, session.id.as_str()));
                 let title = session_title(session);
                 let kind = EntryKind::Session { session, leaf: Some(pane) };
                 entries.push(Entry {
                     key: EntryKey::Leaf(pane.leaf),
+                    host: &session.host,
                     cwd: &session.cwd,
                     title,
                     activity: session.last_active_ms,
@@ -469,6 +515,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                 let title = if pane.claude { "New session" } else { pane.title.as_str() };
                 entries.push(Entry {
                     key: EntryKey::Leaf(pane.leaf),
+                    host: &pane.host,
                     cwd: &pane.cwd,
                     title,
                     activity: u64::MAX,
@@ -478,12 +525,13 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         }
     }
     for session in input.sessions.iter().copied() {
-        if session.state == SessionState::Closed || in_leaves.contains(session.id.as_str()) {
+        if session.state == SessionState::Closed || in_leaves.contains(&(&session.host, session.id.as_str())) {
             continue;
         }
         let kind = EntryKind::Session { session, leaf: None };
         entries.push(Entry {
             key: EntryKey::Session(session.id.clone()),
+            host: &session.host,
             cwd: &session.cwd,
             title: session_title(session),
             activity: session.last_active_ms,
@@ -503,12 +551,12 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     arrivals.update(&keys.into_iter().map(|(key, _)| key.clone()).collect::<Vec<_>>());
 
     // A tab with several panes is one item, placed in the project of its first leaf that has an entry.
-    let leaf_cwd: HashMap<NodeId, &Path> =
-        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, entry.cwd))).collect();
+    let leaf_cwd: HashMap<NodeId, (&HostId, &Path)> =
+        entries.iter().filter_map(|entry| Some((leaf_of(&entry.key)?, (entry.host, entry.cwd)))).collect();
     let mut groups: Vec<Group<'_>> = Vec::new();
     let mut group_of: HashMap<NodeId, usize> = HashMap::new();
     for tab in input.tabs.iter().filter(|tab| tab.leaves.len() >= 2) {
-        let Some(cwd) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf)) else { continue };
+        let Some((host, cwd)) = tab.leaves.iter().find_map(|leaf| leaf_cwd.get(leaf).copied()) else { continue };
         let place = tab
             .leaves
             .iter()
@@ -519,7 +567,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         for leaf in &tab.leaves {
             group_of.insert(*leaf, groups.len());
         }
-        groups.push(Group { tab, project: (input.project_of)(cwd), place, members: Vec::new() });
+        groups.push(Group { tab, project: (input.project_of)(host, cwd), place, members: Vec::new() });
     }
 
     let mut fuzzy = Fuzzy::new(input.filter, entries.iter().map(|entry| keep_text(entry.title, entry.cwd, input.home)));
@@ -531,7 +579,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
         }
         match leaf_of(&entry.key).and_then(|leaf| group_of.get(&leaf)) {
             Some(&group) => groups[group].members.push(entry),
-            None => by_project.entry((input.project_of)(entry.cwd)).or_default().push(entry),
+            None => by_project.entry((input.project_of)(entry.host, entry.cwd)).or_default().push(entry),
         }
     }
     let mut items_of: HashMap<PathBuf, Vec<Item<'_>>> = HashMap::new();
@@ -565,7 +613,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
     let mut paths: Vec<PathBuf> = projects.iter().map(|(path, _)| path.clone()).collect();
     for (_, items) in &projects {
         for entry in items.iter().flat_map(Item::entries) {
-            let own = (input.project_of)(entry.cwd);
+            let own = (input.project_of)(entry.host, entry.cwd);
             if !paths.contains(&own) {
                 paths.push(own);
             }
@@ -580,7 +628,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
             match item {
                 Item::Single(entry) => {
                     let mut row = entry_row(entry, input);
-                    row.project = Some((input.project_of)(entry.cwd));
+                    row.project = Some((input.project_of)(entry.host, entry.cwd));
                     rendered.push(row);
                 }
                 Item::Group(group) => {
@@ -597,7 +645,7 @@ pub fn active(input: &ActiveInput<'_>, arrivals: &mut Arrivals, order: &mut Proj
                     for entry in &group.members {
                         let mut row = entry_row(entry, input);
                         row.in_tab = true;
-                        let own = (input.project_of)(entry.cwd);
+                        let own = (input.project_of)(entry.host, entry.cwd);
                         row.project_label = (own != path).then(|| labels[&own].clone());
                         row.project = Some(own);
                         rendered.push(row);
@@ -667,9 +715,15 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
             let age = age(input.now_ms, session.last_active_ms);
             let (tone, note) = match (session.state, leaf) {
                 (SessionState::Closed, Some(pane)) if pane.ended => (Tone::Closed, "Exited · tab open".to_string()),
+                (_, Some(pane)) if pane.offline => (Tone::Closed, "Not connected".to_string()),
                 (SessionState::Closed, _) => (Tone::Idle, "Starting".to_string()),
                 _ => {
-                    let tone = tone(session, input.unseen.contains(&session.id));
+                    let unseen = match (input.unseen.contains(&session.id), input.marked.contains(&session.id)) {
+                        (_, true) => Unseen::Marked,
+                        (true, false) => Unseen::Alert,
+                        (false, false) => Unseen::No,
+                    };
+                    let tone = tone(session, unseen);
                     (tone, format!("{} · {age}", tone_word(tone)))
                 }
             };
@@ -677,6 +731,7 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
         }
         EntryKind::Pane(pane) => {
             let (tone, note) = match (pane.claude, pane.ended) {
+                (_, false) if pane.offline => (Tone::Closed, "Not connected"),
                 (true, true) => (Tone::Closed, "Exited · tab open"),
                 (true, false) => (Tone::Idle, "Idle"),
                 (false, true) => (Tone::Closed, "Exited"),
@@ -693,6 +748,7 @@ pub fn tone_word(tone: Tone) -> &'static str {
         Tone::NeedsInput => "Needs input",
         Tone::Working => "Working",
         Tone::Done => "Done",
+        Tone::Unread => "Unread",
         Tone::Idle => "Idle",
         Tone::Elsewhere => "Elsewhere",
         Tone::Closed => "Closed",
@@ -704,7 +760,11 @@ fn push_details(rows: &mut Vec<Row>, session: &SessionInfo) {
     if let Some(text) = detail_text(session) {
         rows.push(Row::new(RowKind::Detail { session: session.id.clone(), text }));
         if matches!(session.state, SessionState::External { pid: Some(_) }) && session.cwd_exists {
-            rows.push(Row::new(RowKind::TakeOver { session: session.id.clone(), cwd: session.cwd.clone() }));
+            rows.push(Row::new(RowKind::TakeOver {
+                session: session.id.clone(),
+                cwd: session.cwd.clone(),
+                host: session.host.clone(),
+            }));
         }
     }
 }
@@ -780,21 +840,30 @@ pub fn project_label(rows: &[Row], root: &Path) -> Option<String> {
     })
 }
 
-/// Project names: the folder's name, or its whole displayed path where two projects share a name.
+/// Project names: the folder's name, or its whole displayed path where two projects share a name. A remote project
+/// is `<host> - <name>`.
 pub(crate) fn labels(paths: &[PathBuf], home: Option<&Path>) -> HashMap<PathBuf, String> {
-    let short = |path: &Path| match path.file_name() {
-        Some(name) if Some(path) != home => name.to_string_lossy().into_owned(),
-        _ => display_path(path, home),
+    let name = |path: &Path, whole: bool| {
+        let (host, root) = split_project_key(path);
+        let home = home.filter(|_| host.is_local());
+        let text = match root.file_name() {
+            Some(name) if !whole && Some(root.as_path()) != home => name.to_string_lossy().into_owned(),
+            _ => display_path(&root, home),
+        };
+        match host.remote_name() {
+            Some(host) => format!("{host} - {text}"),
+            None => text,
+        }
     };
     let mut uses: HashMap<String, HashSet<&Path>> = HashMap::new();
     for path in paths {
-        uses.entry(short(path)).or_default().insert(path);
+        uses.entry(name(path, false)).or_default().insert(path);
     }
     paths
         .iter()
         .map(|path| {
-            let name = short(path);
-            let label = if uses[&name].len() > 1 { display_path(path, home) } else { name };
+            let short = name(path, false);
+            let label = if uses[&short].len() > 1 { name(path, true) } else { short };
             (path.clone(), label)
         })
         .collect()
@@ -845,6 +914,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
+            host: protocol::host::HostId::local(),
         }
     }
 
@@ -866,18 +936,21 @@ mod tests {
     }
 
     /// Repositories of the fixtures: every `/r/<name>` directory.
-    fn project_of(cwd: &Path) -> PathBuf {
-        project_root(cwd, Some(Path::new("/home/me")), |dir| dir.parent() == Some(Path::new("/r")))
+    fn project_of(host: &HostId, cwd: &Path) -> PathBuf {
+        let root = project_root(cwd, Some(Path::new("/home/me")), |dir| dir.parent() == Some(Path::new("/r")));
+        project_key(host, &root)
     }
 
     fn pane(leaf: NodeId, cwd: &str, session: Option<&str>) -> PaneEntry {
         PaneEntry {
             leaf,
+            host: HostId::local(),
             cwd: cwd.into(),
             title: format!("pane {leaf}"),
             session: session.map(String::from),
             claude: session.is_some(),
             ended: false,
+            offline: false,
             alone: true,
             container: None,
         }
@@ -895,6 +968,7 @@ mod tests {
         toggled: HashSet<PathBuf>,
         details: Option<String>,
         unseen: HashSet<String>,
+        marked: HashSet<String>,
         tabs: Vec<TabEntry>,
         arrivals: Arrivals,
         order: ProjectOrder,
@@ -915,6 +989,7 @@ mod tests {
                 toggled: &self.toggled,
                 details: self.details.as_deref(),
                 unseen: &self.unseen,
+                marked: &self.marked,
                 tabs: &self.tabs,
                 project_of: &project_of,
                 now_ms: NOW,
@@ -964,6 +1039,28 @@ mod tests {
                 "  e (Elsewhere · 2h)",
             ]
         );
+    }
+
+    #[test]
+    fn a_leaf_of_a_host_that_is_not_connected_has_the_closed_look_whatever_its_last_status() {
+        let mut busy = pane(4, "/r/app", Some("m"));
+        busy.offline = true;
+        let mut shell = shell_pane(5, "/r/app");
+        shell.offline = true;
+        let mut fixture =
+            Fixture::of(vec![with(managed("m", "/r/app", NOW - HOUR_MS), SessionStatus::Busy)], vec![busy, shell]);
+        let rows = fixture.rows();
+        let tones: Vec<(Tone, &str)> = rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::Session { tone, note, .. } | RowKind::Pane { tone, note, .. } => Some((*tone, note.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tones, vec![(Tone::Closed, "Not connected"), (Tone::Closed, "Not connected")]);
+        assert_eq!(leaf_tone(Some(&SessionStatus::Busy), Unseen::No, true), Some(Tone::Closed));
+        assert_eq!(leaf_tone(Some(&SessionStatus::Busy), Unseen::No, false), Some(Tone::Working));
+        assert_eq!(leaf_tone(None, Unseen::No, false), None);
     }
 
     #[test]
@@ -1113,7 +1210,10 @@ mod tests {
         let rows = fixture.rows();
         let index = find(&rows, &RowKey::TakeOver("e".into())).unwrap();
         assert!(rows[index].selectable());
-        assert_eq!(rows[index].activation(), Activation::TakeOver { session: "e".into(), cwd: "/p".into() });
+        assert_eq!(
+            rows[index].activation(),
+            Activation::TakeOver { session: "e".into(), cwd: "/p".into(), host: HostId::local() }
+        );
     }
 
     #[test]
@@ -1141,7 +1241,7 @@ mod tests {
         assert_eq!(by(RowKey::Leaf(9)), Activation::FocusLeaf(9));
         assert_eq!(by(RowKey::Leaf(8)), Activation::FocusLeaf(8));
         assert_eq!(by(RowKey::Session("e".into())), Activation::ToggleDetails("e".into()));
-        assert_eq!(by(RowKey::Session("orphan".into())), Activation::FocusPane(1));
+        assert_eq!(by(RowKey::Session("orphan".into())), Activation::FocusPane(PaneKey::local(1)));
         assert_eq!(by(RowKey::Project("/r/p".into())), Activation::ToggleProject("/r/p".into()));
     }
 
@@ -1160,20 +1260,42 @@ mod tests {
     #[test]
     fn tone_follows_state_status_and_whether_the_result_was_seen() {
         let idle = with(managed("i", "/a", 1), SessionStatus::Idle);
-        assert_eq!(tone(&idle, false), Tone::Idle);
-        assert_eq!(tone(&idle, true), Tone::Done);
-        assert_eq!(tone(&managed("starting", "/a", 1), false), Tone::Idle);
-        assert_eq!(tone(&with(managed("b", "/a", 1), SessionStatus::Busy), true), Tone::Working);
+        assert_eq!(tone(&idle, Unseen::No), Tone::Idle);
+        assert_eq!(tone(&idle, Unseen::Alert), Tone::Done);
+        assert_eq!(tone(&idle, Unseen::Marked), Tone::Unread);
+        assert_eq!(tone(&managed("starting", "/a", 1), Unseen::No), Tone::Idle);
+        for unseen in [Unseen::Alert, Unseen::Marked] {
+            assert_eq!(tone(&with(managed("b", "/a", 1), SessionStatus::Busy), unseen), Tone::Working);
+            assert_eq!(
+                tone(&with(managed("n", "/a", 1), SessionStatus::NeedsInput { reason: None }), unseen),
+                Tone::NeedsInput
+            );
+            assert_eq!(tone(&closed("c", "/a", 1), unseen), Tone::Closed);
+        }
         assert_eq!(
-            tone(&with(managed("n", "/a", 1), SessionStatus::NeedsInput { reason: None }), true),
-            Tone::NeedsInput
-        );
-        assert_eq!(
-            tone(&with(external("e", "/a", 1), SessionStatus::NeedsInput { reason: None }), false),
+            tone(&with(external("e", "/a", 1), SessionStatus::NeedsInput { reason: None }), Unseen::No),
             Tone::Elsewhere
         );
-        assert_eq!(tone(&closed("c", "/a", 1), true), Tone::Closed);
-        assert_eq!(status_tone(None, false), Tone::Idle);
+        assert_eq!(status_tone(None, Unseen::No), Tone::Idle);
+    }
+
+    #[test]
+    fn a_session_marked_unread_by_hand_has_the_unread_tone_not_done() {
+        let mut fx = Fixture::of(
+            vec![with(managed("m", "/a", 1), SessionStatus::Idle), with(managed("d", "/a", 2), SessionStatus::Idle)],
+            vec![],
+        );
+        fx.unseen = HashSet::from(["m".to_string(), "d".to_string()]);
+        fx.marked = HashSet::from(["m".to_string()]);
+        let tones: HashMap<String, Tone> = fx
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row.kind {
+                RowKind::Session { session, tone, .. } => Some((session.id, tone)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!((tones["m"], tones["d"]), (Tone::Unread, Tone::Done));
     }
 
     #[test]
@@ -1506,5 +1628,47 @@ mod tests {
         assert_eq!(leaf_title(&rows, 1), Some(expected));
         assert_eq!(leaf_title(&rows, 2), Some(shell_pane(2, "/r/alpha").title));
         assert_eq!(leaf_title(&rows, 9), None);
+    }
+
+    fn remote(session: SessionInfo) -> SessionInfo {
+        SessionInfo { host: HostId::named("devbox"), ..session }
+    }
+
+    #[test]
+    fn the_same_folder_on_two_hosts_is_two_projects_and_only_the_remote_one_names_its_host() {
+        let mut fixture =
+            Fixture::of(vec![managed("l", "/r/app", NOW - 1), remote(managed("r", "/r/app", NOW - 2))], vec![]);
+        assert_eq!(fixture.outline(), vec!["▾ app", "  l (Idle · now)", "▾ devbox - app", "  r (Idle · now)"]);
+    }
+
+    #[test]
+    fn activating_a_running_session_focuses_its_pane_on_its_own_host() {
+        let mut fixture = Fixture::of(vec![remote(managed("r", "/r/app", NOW - 1))], vec![]);
+        let rows = fixture.rows();
+        let row = rows.iter().find(|row| matches!(row.kind, RowKind::Session { .. })).unwrap();
+        assert_eq!(row.activation(), Activation::FocusPane(PaneKey::new(HostId::named("devbox"), 1)));
+    }
+
+    #[test]
+    fn labels_add_the_host_to_remote_projects_only() {
+        let devbox = HostId::named("devbox");
+        let paths = vec![
+            PathBuf::from("/r/app"),
+            project_key(&devbox, Path::new("/home/u/app")),
+            project_key(&devbox, Path::new("/home/u/api")),
+        ];
+        let labels = labels(&paths, Some(Path::new("/home/me")));
+        assert_eq!(labels[&paths[0]], "app");
+        assert_eq!(labels[&paths[1]], "devbox - app");
+        assert_eq!(labels[&paths[2]], "devbox - api");
+    }
+
+    #[test]
+    fn two_remote_folders_with_one_name_show_their_paths() {
+        let devbox = HostId::named("devbox");
+        let paths = vec![project_key(&devbox, Path::new("/srv/a/app")), project_key(&devbox, Path::new("/srv/b/app"))];
+        let labels = labels(&paths, None);
+        assert_eq!(labels[&paths[0]], "devbox - /srv/a/app");
+        assert_eq!(labels[&paths[1]], "devbox - /srv/b/app");
     }
 }

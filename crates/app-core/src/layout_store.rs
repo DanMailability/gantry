@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::workspace::Workspace;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct SavedLayout {
@@ -19,18 +19,31 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+/// Move a version 1 layout to version 2: the one daemon instance becomes the local host's entry.
+fn migrate_v1(value: &mut serde_json::Value) {
+    if let Some(workspace) = value.get_mut("workspace").and_then(|workspace| workspace.as_object_mut())
+        && let Some(instance) = workspace.remove("instance")
+    {
+        workspace.insert("instances".into(), serde_json::json!({ "local": instance }));
+    }
+    value["version"] = VERSION.into();
+}
+
 /// Read the saved workspace. `Ok(None)` if there is none; an error if it is unreadable, from
-/// another format version, or internally inconsistent.
+/// another format version, or internally inconsistent. Version 1 layouts are migrated.
 pub fn load(path: &Path) -> io::Result<Option<Workspace>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
     };
-    let saved: SavedLayout = serde_json::from_str(&text).map_err(|err| invalid(err.to_string()))?;
-    if saved.version != VERSION {
-        return Err(invalid(format!("layout version {} (expected {VERSION})", saved.version)));
+    let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|err| invalid(err.to_string()))?;
+    match value.get("version").and_then(|version| version.as_u64()) {
+        Some(1) => migrate_v1(&mut value),
+        Some(version) if version == u64::from(VERSION) => {}
+        other => return Err(invalid(format!("layout version {other:?} (expected {VERSION})"))),
     }
+    let saved: SavedLayout = serde_json::from_value(value).map_err(|err| invalid(err.to_string()))?;
     if !saved.workspace.is_consistent() {
         return Err(invalid("layout references missing or duplicate panes"));
     }
@@ -53,10 +66,11 @@ pub fn save(path: &Path, workspace: &Workspace) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::workspace::PaneLaunch;
+    use protocol::host::HostId;
 
     fn sample() -> Workspace {
         let mut ws = Workspace::default();
-        ws.instance = "i".into();
+        ws.set_instance(&protocol::host::HostId::local(), "i");
         let a = ws.new_tab(PaneLaunch::claude("/repo".into()));
         ws.pane_started(a, 3, "/repo".into());
         ws.split(crate::split_tree::Axis::Vertical, PaneLaunch::claude("/repo".into()));
@@ -140,5 +154,41 @@ mod tests {
         let workspace = load(&path).unwrap().unwrap();
         assert_eq!(workspace.leaves[&1].session, None);
         assert_eq!(workspace.sidebar, crate::workspace::SidebarState::default());
+    }
+
+    #[test]
+    fn a_version_1_layout_loads_as_local_and_is_saved_as_version_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"workspace":{"instance":"old","tabs":[{"root":{"Leaf":1},"focused":1}],"active":0,
+            "leaves":{"1":{"pane":4,"launch":{"program":"claude","args":[],"cwd":"/r"}}},"next_id":1}}"#,
+        )
+        .unwrap();
+        let workspace = load(&path).unwrap().unwrap();
+        assert_eq!(workspace.instances[&HostId::local()], "old");
+        assert!(workspace.leaves[&1].host.is_local());
+        assert_eq!(workspace.leaves[&1].pane, Some(4));
+        save(&path, &workspace).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 2") && text.contains("\"instances\""), "{text}");
+        assert!(!text.contains("\"instance\""), "{text}");
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+    }
+
+    #[test]
+    fn remote_leaves_round_trip_and_local_ones_carry_no_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        let remote = workspace.new_tab(PaneLaunch::shell("/srv".into(), &Default::default()));
+        workspace.leaves.get_mut(&remote).unwrap().host = HostId::named("devbox");
+        workspace.pane_started(remote, 9, "/srv".into());
+        workspace.set_instance(&HostId::named("devbox"), "r1");
+        save(&path, &workspace).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"host\"").count(), 1, "only the remote leaf names its host: {text}");
+        assert_eq!(load(&path).unwrap(), Some(workspace));
     }
 }

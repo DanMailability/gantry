@@ -408,3 +408,15 @@ async fn without_a_search_dir_search_is_unavailable() {
         }
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tilde_cwd_starts_in_the_home_folder() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let home = std::env::home_dir().unwrap();
+    let spec = SpawnRequest { cwd: "~".into(), ..sh("pwd; sleep 5", None) };
+    let (pane, cwd) = c.spawn_request(spec).await;
+    assert_eq!(cwd, home);
+    c.output_until(pane, &home.to_string_lossy()).await;
+}

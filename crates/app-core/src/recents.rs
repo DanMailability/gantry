@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use protocol::host::HostId;
 use protocol::message::{SearchHit, SessionInfo, SessionState, Speaker};
 
 use crate::fuzzy::Fuzzy;
@@ -16,8 +17,8 @@ use crate::session_tree::{age, display_path, keep, keep_text, labels, newest_fir
 pub struct RecentsInput<'a> {
     /// Claude sessions.
     pub sessions: &'a [&'a SessionInfo],
-    /// Sessions a leaf of the layout shows (they are in the Active list, not here).
-    pub open: &'a HashSet<String>,
+    /// Sessions a leaf of the layout shows, as (host, session id) (they are in the Active list, not here).
+    pub open: &'a HashSet<(HostId, String)>,
     /// Home directory, shown as `~`.
     pub home: Option<&'a Path>,
     /// Search text (blank = none).
@@ -27,7 +28,7 @@ pub struct RecentsInput<'a> {
     /// Projects whose "Show N more" was used.
     pub expanded: &'a HashSet<PathBuf>,
     /// The project a directory belongs to.
-    pub project_of: &'a dyn Fn(&Path) -> PathBuf,
+    pub project_of: &'a dyn Fn(&HostId, &Path) -> PathBuf,
     /// Current time, ms since the Unix epoch.
     pub now_ms: u64,
     /// Sessions shown per project before "Show N more" (no search, all projects).
@@ -182,8 +183,8 @@ pub struct ProjectItem {
 fn grouped<'a>(input: &RecentsInput<'a>) -> Vec<(PathBuf, Vec<&'a SessionInfo>)> {
     let mut by_project: HashMap<PathBuf, Vec<&'a SessionInfo>> = HashMap::new();
     for session in input.sessions.iter().copied() {
-        if session.state == SessionState::Closed && !input.open.contains(&session.id) {
-            by_project.entry((input.project_of)(&session.cwd)).or_default().push(session);
+        if session.state == SessionState::Closed && !is_open(input, session) {
+            by_project.entry((input.project_of)(&session.host, &session.cwd)).or_default().push(session);
         }
     }
     let mut projects: Vec<(PathBuf, Vec<&'a SessionInfo>)> = by_project.into_iter().collect();
@@ -267,25 +268,26 @@ type Order = (u8, usize, Reverse<u64>);
 fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
     let content = searches_content(input.query);
     let hits: &[SearchHit] = if content { input.hits } else { &[] };
-    let mut hit_of: HashMap<&str, (usize, &SearchHit)> = HashMap::new();
+    let mut hit_of: HashMap<(&HostId, &str), (usize, &SearchHit)> = HashMap::new();
     for (rank, hit) in hits.iter().enumerate() {
-        hit_of.entry(hit.session_id.as_str()).or_insert((rank, hit));
+        hit_of.entry((&hit.host, hit.session_id.as_str())).or_insert((rank, hit));
     }
     let mut candidates: Vec<&SessionInfo> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-    let open_hits = input.sessions.iter().filter(|s| hit_of.contains_key(s.id.as_str()) && input.open.contains(&s.id));
+    let mut seen: HashSet<(&HostId, &str)> = HashSet::new();
+    let open_hits =
+        input.sessions.iter().filter(|s| hit_of.contains_key(&(&s.host, s.id.as_str())) && is_open(input, s));
     for session in grouped(input).into_iter().flat_map(|(_, sessions)| sessions).chain(open_hits.copied()) {
-        if seen.insert(session.id.as_str()) {
+        if seen.insert((&session.host, session.id.as_str())) {
             candidates.push(session);
         }
     }
     let mut rows: Vec<(Order, RecentItem)> = Vec::new();
     for session in candidates {
-        let project = (input.project_of)(&session.cwd);
+        let project = (input.project_of)(&session.host, &session.cwd);
         if !in_scope(input, &project) {
             continue;
         }
-        let hit = hit_of.get(session.id.as_str());
+        let hit = hit_of.get(&(&session.host, session.id.as_str()));
         let (by_title, marks) = match title_match(input, words, session) {
             Some(found) => found,
             None if hit.is_some() => (false, Vec::new()),
@@ -306,7 +308,7 @@ fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
                 project,
                 marks,
                 snippet: hit.map(|&(_, hit)| Snippet::from_hit(hit)),
-                open: input.open.contains(&session.id),
+                open: is_open(input, session),
             },
         ));
     }
@@ -321,6 +323,10 @@ fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
     };
     items.extend(note.map(|text| RecentItem::Note { text }));
     items
+}
+
+fn is_open(input: &RecentsInput<'_>, session: &SessionInfo) -> bool {
+    input.open.contains(&(session.host.clone(), session.id.clone()))
 }
 
 fn item_id(item: &RecentItem) -> &str {
@@ -419,9 +425,30 @@ pub fn counts(input: &RecentsInput<'_>) -> (usize, usize) {
     (matching, scoped.len())
 }
 
+/// The sessions the pop-up lists: those of this machine and of the hosts `connected` says are.
+pub fn listed_sessions<'a>(
+    sessions: impl Iterator<Item = &'a SessionInfo>,
+    connected: impl Fn(&HostId) -> bool,
+) -> Vec<SessionInfo> {
+    sessions.filter(|session| session.host.is_local() || connected(&session.host)).cloned().collect()
+}
+
+/// The configured SSH hosts that are not connected, in settings order. This machine is never one of them.
+pub fn offline_hosts(configured: &[String], connected: impl Fn(&HostId) -> bool) -> Vec<String> {
+    configured
+        .iter()
+        .filter(|name| {
+            let host = HostId::named(name);
+            !host.is_local() && !connected(&host)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::host::project_key;
 
     const NOW: u64 = 1_000_000_000;
     const HOUR: u64 = 60 * 60 * 1000;
@@ -439,16 +466,18 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
+            host: protocol::host::HostId::local(),
         }
     }
 
-    fn project_of(cwd: &Path) -> PathBuf {
-        cwd.ancestors().find(|dir| dir.parent() == Some(Path::new("/r"))).unwrap_or(cwd).to_path_buf()
+    fn project_of(host: &HostId, cwd: &Path) -> PathBuf {
+        let root = cwd.ancestors().find(|dir| dir.parent() == Some(Path::new("/r"))).unwrap_or(cwd);
+        project_key(host, root)
     }
 
     struct Fixture {
         sessions: Vec<SessionInfo>,
-        open: HashSet<String>,
+        open: HashSet<(HostId, String)>,
         query: String,
         project: Option<PathBuf>,
         expanded: HashSet<PathBuf>,
@@ -533,7 +562,7 @@ mod tests {
             closed("tab", "/r/b", 0),
             live,
         ]);
-        fixture.open.insert("tab".into());
+        fixture.open.insert((HostId::local(), "tab".into()));
         assert_eq!(fixture.outline(), vec!["# b", "b", "# a", "a-new", "a-old"]);
         assert_eq!(fixture.with(counts), (3, 3));
     }
@@ -713,6 +742,7 @@ mod tests {
             speaker: Speaker::You,
             snippet: text.into(),
             highlights,
+            host: HostId::local(),
         }
     }
 
@@ -754,7 +784,7 @@ mod tests {
         let mut elsewhere = closed("elsewhere", "/r/a", 1);
         elsewhere.state = SessionState::External { pid: Some(9) };
         let mut fixture = Fixture::of(vec![tab, elsewhere, closed("unknown-to-hits", "/r/a", 1)]);
-        fixture.open.insert("tab".into());
+        fixture.open.insert((HostId::local(), "tab".into()));
         fixture.query = "zzz".into();
         fixture.hits = vec![hit("tab", "x", vec![]), hit("elsewhere", "y", vec![]), hit("not-listed", "z", vec![])];
         fixture.content = ContentState::Ready;
@@ -820,5 +850,48 @@ mod tests {
     fn overlapping_highlights_are_merged_in_order() {
         let snippet = Snippet::from_hit(&hit("s", "abcdefghij", vec![(5, 8), (0, 2), (1, 4)]));
         assert_eq!(snippet.highlights, vec![0..4, 5..8]);
+    }
+
+    #[test]
+    fn the_same_folder_on_two_hosts_is_two_recent_projects_named_with_the_host() {
+        let remote = SessionInfo { host: HostId::named("devbox"), ..closed("r", "/r/app", 2) };
+        let fixture = Fixture::of(vec![closed("l", "/r/app", 1), remote]);
+        assert_eq!(fixture.outline(), vec!["# app", "l", "# devbox - app", "r"]);
+        assert_eq!(fixture.chip_labels()[1..3], ["app 1", "devbox - app 1"]);
+    }
+
+    #[test]
+    fn a_hit_belongs_to_its_host_and_an_open_remote_session_is_marked() {
+        let remote = SessionInfo { host: HostId::named("devbox"), ..closed("same", "/r/app", 2) };
+        let mut fixture = Fixture::of(vec![closed("same", "/r/app", 1), remote]);
+        fixture.query = "zzz".into();
+        fixture.hits = vec![SearchHit { host: HostId::named("devbox"), ..hit("same", "x", vec![]) }];
+        fixture.content = ContentState::Ready;
+        fixture.open.insert((HostId::named("devbox"), "same".into()));
+        let items = fixture.with(items);
+        let found: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                RecentItem::Session { session, snippet, open, .. } => {
+                    Some((session.host.name().to_string(), snippet.is_some(), *open))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found, [("devbox".to_string(), true, true)]);
+    }
+
+    #[test]
+    fn only_connected_hosts_sessions_are_listed_and_the_others_are_offline() {
+        let session = |host: HostId, id: &str| SessionInfo { host, ..closed(id, "/r", 1) };
+        let all =
+            [session(HostId::local(), "l"), session(HostId::named("up"), "u"), session(HostId::named("down"), "d")];
+        let up = |host: &HostId| host.name() == "up";
+        let listed = listed_sessions(all.iter(), up);
+        assert_eq!(listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["l", "u"]);
+        let configured = ["down".to_string(), "up".to_string(), "lab".to_string()];
+        assert_eq!(offline_hosts(&configured, up), ["down", "lab"]);
+        // This machine is never offline, even when it is configured or nothing is connected.
+        assert_eq!(offline_hosts(&["local".to_string(), "".to_string()], |_| false), Vec::<String>::new());
     }
 }

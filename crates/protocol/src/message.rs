@@ -7,8 +7,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::host::HostId;
+
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -160,6 +162,9 @@ pub struct SessionInfo {
     /// Your newest prompt in this session, on one line; `None` when unknown (or from an older daemon).
     #[serde(default)]
     pub last_prompt: Option<String>,
+    /// The host whose daemon reported it. The GUI sets this when the session arrives; it never travels on the wire.
+    #[serde(skip)]
+    pub host: HostId,
 }
 
 /// The session a Claude command line names: the value after `--session-id`, `--resume` or `-r`. With `claude`
@@ -265,8 +270,24 @@ pub enum ClientMessage {
         /// Most sessions to return.
         limit: u32,
     },
+    /// List the folders in `path` (absolute, or starting with `~`); answered by `DirListing` or `DirListingFailed`.
+    ListDir {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// The folder to list.
+        path: String,
+    },
     /// Terminate every pane and stop the daemon (frozen).
     StopAll,
+}
+
+/// One folder in a `DirListing`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    /// The folder's name (no path).
+    pub name: String,
+    /// It is a symlink to a folder.
+    pub symlink: bool,
 }
 
 /// Who wrote the message a search hit shows.
@@ -292,6 +313,9 @@ pub struct SearchHit {
     pub snippet: String,
     /// Byte ranges of `snippet` that matched (start inclusive, end exclusive), in order.
     pub highlights: Vec<(u32, u32)>,
+    /// The host whose daemon found it. The GUI sets this; it never travels on the wire.
+    #[serde(skip)]
+    pub host: HostId,
 }
 
 /// Daemon → GUI.
@@ -307,6 +331,12 @@ pub enum DaemonMessage {
         /// The daemon's default Claude config dir.
         #[serde(default)]
         claude_dir: Option<PathBuf>,
+        /// The daemon's app version (`protocol::build::VERSION`); older daemons send none.
+        #[serde(default)]
+        app_version: Option<String>,
+        /// The daemon's git commit (`protocol::build::COMMIT`); older daemons send none.
+        #[serde(default)]
+        app_commit: Option<String>,
     },
     /// Handshake rejected; only `StopAll` is accepted afterwards.
     VersionMismatch {
@@ -396,6 +426,22 @@ pub enum DaemonMessage {
         /// Why (also in the daemon log).
         reason: String,
     },
+    /// The answer to `ListDir`: the folders in the expanded path.
+    DirListing {
+        /// Echoed request id.
+        request: u64,
+        /// The expanded absolute path.
+        path: String,
+        /// Its folders, sorted, at most 500.
+        dirs: Vec<DirEntry>,
+    },
+    /// `ListDir` failed.
+    DirListingFailed {
+        /// Echoed request id.
+        request: u64,
+        /// Why, readable.
+        reason: String,
+    },
     /// Another GUI connected; this connection is closed next.
     TakenOver,
     /// A request could not be handled.
@@ -416,6 +462,27 @@ mod tests {
             r#"{"type":"hello","protocol":7}"#
         );
         assert_eq!(serde_json::to_string(&ClientMessage::StopAll).unwrap(), r#"{"type":"stop_all"}"#);
+    }
+
+    #[test]
+    fn a_sessions_host_is_not_on_the_wire() {
+        let info = SessionInfo {
+            id: "s".into(),
+            cwd: "/r".into(),
+            title: String::new(),
+            last_active_ms: 0,
+            state: SessionState::Closed,
+            cwd_exists: true,
+            status: None,
+            status_since_ms: 0,
+            container: None,
+            claude_dir: None,
+            last_prompt: None,
+            host: HostId::named("devbox"),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("devbox") && !json.contains("host"), "{json}");
+        assert!(serde_json::from_str::<SessionInfo>(&json).unwrap().host.is_local());
     }
 
     #[test]
@@ -443,8 +510,16 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 instance: "123-456".into(),
                 claude_dir: Some("/home/u/.claude".into()),
+                app_version: Some("0.3.0".into()),
+                app_commit: Some("a1b2c3d".into()),
             },
-            DaemonMessage::Welcome { protocol: PROTOCOL_VERSION, instance: "1".into(), claude_dir: None },
+            DaemonMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                instance: "1".into(),
+                claude_dir: None,
+                app_version: None,
+                app_commit: None,
+            },
             DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
         ] {
             let json = serde_json::to_string(&reply).unwrap();
@@ -486,6 +561,7 @@ mod tests {
             container: None,
             claude_dir: Some("/home/me/.claude-work".into()),
             last_prompt: Some("Fix the build".into()),
+            host: HostId::local(),
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains(r#""state":{"kind":"managed","pane":3}"#), "{json}");
@@ -520,6 +596,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: Some("x".into()),
+            host: HostId::local(),
         };
         let mut json = serde_json::to_value(&session).unwrap();
         json.as_object_mut().unwrap().remove("last_prompt");
@@ -562,6 +639,30 @@ mod tests {
     }
 
     #[test]
+    fn welcome_without_app_version_decodes() {
+        let old = r#"{"type":"welcome","protocol":7,"instance":"x"}"#;
+        assert_eq!(
+            serde_json::from_str::<DaemonMessage>(old).unwrap(),
+            DaemonMessage::Welcome {
+                protocol: 7,
+                instance: "x".into(),
+                claude_dir: None,
+                app_version: None,
+                app_commit: None
+            }
+        );
+        let new = DaemonMessage::Welcome {
+            protocol: 7,
+            instance: "x".into(),
+            claude_dir: None,
+            app_version: Some("0.3.0".into()),
+            app_commit: Some("a1b2c3d".into()),
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), new);
+    }
+
+    #[test]
     fn set_claude_dirs_and_phase2_fields_round_trip() {
         let msg = ClientMessage::SetClaudeDirs { dirs: vec!["/a".into(), "/b".into()] };
         let json = serde_json::to_string(&msg).unwrap();
@@ -570,14 +671,40 @@ mod tests {
         let old_welcome = r#"{"type":"welcome","protocol":5,"instance":"x"}"#;
         assert_eq!(
             serde_json::from_str::<DaemonMessage>(old_welcome).unwrap(),
-            DaemonMessage::Welcome { protocol: 5, instance: "x".into(), claude_dir: None }
+            DaemonMessage::Welcome {
+                protocol: 5,
+                instance: "x".into(),
+                claude_dir: None,
+                app_version: None,
+                app_commit: None
+            }
         );
         let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
         let spec = serde_json::from_str::<SpawnRequest>(spawn).unwrap();
         assert_eq!((spec.claude, spec.env.len(), spec.scrollback), (false, 0, None));
         let pane = r#"{"pane":1,"program":"sh","args":[],"cwd":"/","last_focused":0}"#;
         assert!(!serde_json::from_str::<PaneInfo>(pane).unwrap().claude);
-        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(PROTOCOL_VERSION, 8);
+    }
+
+    #[test]
+    fn list_dir_messages_round_trip() {
+        let request = ClientMessage::ListDir { request: 7, path: "~/projects".into() };
+        assert_eq!(serde_json::from_str::<ClientMessage>(&serde_json::to_string(&request).unwrap()).unwrap(), request);
+        let replies = [
+            DaemonMessage::DirListing {
+                request: 7,
+                path: "/home/me/projects".into(),
+                dirs: vec![
+                    DirEntry { name: "app".into(), symlink: false },
+                    DirEntry { name: "link".into(), symlink: true },
+                ],
+            },
+            DaemonMessage::DirListingFailed { request: 7, reason: "No such file or directory".into() },
+        ];
+        for reply in replies {
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&serde_json::to_string(&reply).unwrap()).unwrap(), reply);
+        }
     }
 
     #[test]
@@ -592,6 +719,7 @@ mod tests {
             speaker: Speaker::Claude,
             snippet: "the font fallback".into(),
             highlights: vec![(4, 8), (9, 17)],
+            host: HostId::local(),
         };
         for reply in [
             DaemonMessage::SearchResults { request: 4, hits: vec![hit] },
