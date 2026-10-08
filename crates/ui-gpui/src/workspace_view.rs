@@ -1825,7 +1825,10 @@ impl WorkspaceView {
             }
             MenuAction::ClosePane(leaf) => self.confirm_close(vec![leaf], window, cx),
             MenuAction::CloseTab(index) => self.close_tab_at(index, window, cx),
-            MenuAction::NewHere { dir, claude } => self.open_new(claude, dir, None, None, HostId::local(), None),
+            MenuAction::NewHere { dir, claude, host } if host.is_local() => {
+                self.open_new(claude, dir, None, None, host, None)
+            }
+            MenuAction::NewHere { dir, claude, host } => self.open_on_host(&host, claude, dir, window, cx),
             MenuAction::NewClaudeWith { dir, dir_name } => {
                 self.remember_pick(&dir, &dir_name, cx);
                 self.open_new(true, dir, None, None, HostId::local(), Some(dir_name));
@@ -1851,8 +1854,8 @@ impl WorkspaceView {
                 self.focus_leaf(leaf, window, cx);
                 self.rerun_leaf(leaf, window, cx);
             }
-            MenuAction::TakeOver { session, cwd } => self.on_sidebar_event(
-                SidebarEvent::Activate { activation: Activation::TakeOver { session, cwd }, split: false },
+            MenuAction::TakeOver { session, cwd, host } => self.on_sidebar_event(
+                SidebarEvent::Activate { activation: Activation::TakeOver { session, cwd, host }, split: false },
                 window,
                 cx,
             ),
@@ -1907,7 +1910,7 @@ impl WorkspaceView {
                 .and_then(|id| sessions.get(&leaf.host, id))
                 .and_then(|info| info.container.clone());
             let vscode = menus::vscode_args(&leaf.launch.cwd, place.as_ref(), leaf.launch.container.as_deref());
-            let context = if leaf.launch.container.is_some() {
+            let context = if leaf.launch.container.is_some() || !leaf.host.is_local() {
                 MenuContext::default()
             } else {
                 MenuContext::for_folder(cx.global::<SettingsStore>().settings(), &leaf.launch.cwd)
@@ -1918,7 +1921,7 @@ impl WorkspaceView {
             });
             let unread = self.unseen.contains_key(&tab.focused);
             let mark = (idle || unread).then_some((tab.focused, unread));
-            menus::tab_menu(index, &leaf.launch.cwd, vscode, &context, mark, tab.root.leaves().len())
+            menus::tab_menu(index, &leaf.host, &leaf.launch.cwd, vscode, &context, mark, tab.root.leaves().len())
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -2054,11 +2057,13 @@ impl WorkspaceView {
 
     /// A new Claude session (else a shell) on SSH host `host`, in its home folder; connects first when needed.
     fn new_session_on_host(&mut self, host: &HostId, claude: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let launch = if claude {
-            PaneLaunch::claude("~".into())
-        } else {
-            PaneLaunch::shell("~".into(), &ShellSettings::default())
-        };
+        self.open_on_host(host, claude, "~".into(), window, cx);
+    }
+
+    /// Start a new Claude session (or shell) in the folder `dir` of a remote host in a new tab; connects the host when
+    /// it is not connected. No container lookup and no Claude config dir: the remote uses its own.
+    fn open_on_host(&mut self, host: &HostId, claude: bool, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let launch = if claude { PaneLaunch::claude(dir) } else { PaneLaunch::shell(dir, &ShellSettings::default()) };
         let leaf = self.workspace.new_tab_on(launch, host.clone());
         self.add_slot(leaf, window, cx);
         self.spawn_leaf(leaf, None, window, cx); // queues the leaf and connects when the host is not connected
@@ -2091,7 +2096,7 @@ impl WorkspaceView {
                 }
                 Activation::FocusLeaf(leaf) => self.focus_leaf(leaf, window, cx),
                 Activation::Resume { session, cwd } => self.resume_session(session, cwd, split, window, cx),
-                Activation::TakeOver { session, cwd } => {
+                Activation::TakeOver { session, cwd, .. } => {
                     let target = match self.workspace.leaf_for_session(&session) {
                         Some(leaf) if self.workspace.leaves[&leaf].pane.is_none() => TakeOverTarget::Leaf(leaf),
                         _ => {

@@ -290,6 +290,8 @@ pub enum RowKind {
         session: String,
         /// Its directory (where it is resumed).
         cwd: PathBuf,
+        /// The host it runs on.
+        host: HostId,
     },
 }
 
@@ -332,6 +334,8 @@ pub enum Activation {
         session: String,
         /// Its directory.
         cwd: PathBuf,
+        /// The host it runs on.
+        host: HostId,
     },
     /// Expand or collapse a project.
     ToggleProject(PathBuf),
@@ -379,7 +383,9 @@ impl Row {
                 }
                 (SessionState::Closed, None) => Activation::Nothing,
             },
-            RowKind::TakeOver { session, cwd } => Activation::TakeOver { session: session.clone(), cwd: cwd.clone() },
+            RowKind::TakeOver { session, cwd, host } => {
+                Activation::TakeOver { session: session.clone(), cwd: cwd.clone(), host: host.clone() }
+            }
             RowKind::Detail { .. } => Activation::Nothing,
         }
     }
@@ -750,7 +756,11 @@ fn push_details(rows: &mut Vec<Row>, session: &SessionInfo) {
     if let Some(text) = detail_text(session) {
         rows.push(Row::new(RowKind::Detail { session: session.id.clone(), text }));
         if matches!(session.state, SessionState::External { pid: Some(_) }) && session.cwd_exists {
-            rows.push(Row::new(RowKind::TakeOver { session: session.id.clone(), cwd: session.cwd.clone() }));
+            rows.push(Row::new(RowKind::TakeOver {
+                session: session.id.clone(),
+                cwd: session.cwd.clone(),
+                host: session.host.clone(),
+            }));
         }
     }
 }
@@ -1196,7 +1206,10 @@ mod tests {
         let rows = fixture.rows();
         let index = find(&rows, &RowKey::TakeOver("e".into())).unwrap();
         assert!(rows[index].selectable());
-        assert_eq!(rows[index].activation(), Activation::TakeOver { session: "e".into(), cwd: "/p".into() });
+        assert_eq!(
+            rows[index].activation(),
+            Activation::TakeOver { session: "e".into(), cwd: "/p".into(), host: HostId::local() }
+        );
     }
 
     #[test]
