@@ -4,12 +4,13 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use app_core::dir_complete::{self, Completion, TabAction};
 use app_core::host_state::HostDot;
+use app_core::host_state::not_connected_notice;
 use app_core::launcher::{self, LauncherItem, OpenFolder};
 use app_core::session_tree::display_path;
 use app_core::text_field::TextField;
@@ -186,14 +187,26 @@ impl LauncherView {
     pub fn set_hosts(&mut self, hosts: Vec<LauncherHost>, cx: &mut Context<Self>) {
         let was_away = self.host_disconnected();
         self.hosts = hosts;
+        let kept = (self.items.len(), self.selected);
+        let mut same_list = true;
         if !self.host.is_local() && !self.hosts.iter().any(|host| host.id == self.host) {
             self.choose_host(HostId::local());
+            same_list = false;
         } else if was_away && !self.host_disconnected() {
             self.completion = Completion::default();
             self.typed_changed(cx);
+            same_list = false;
         }
         self.refresh();
+        if same_list && self.items.len() == kept.0 {
+            self.selected = kept.1; // only a host's state changed: the highlight stays
+        }
         cx.notify();
+    }
+
+    /// The home folder the rows abbreviate to `~`: this machine's, and none on an SSH host (matching uses the same).
+    fn shown_home(&self) -> Option<&Path> {
+        if self.host.is_local() { self.home.as_deref() } else { None }
     }
 
     /// The chosen host is an SSH host whose daemon is not connected.
@@ -422,7 +435,7 @@ impl LauncherView {
         }
         let (label, lead, note, muted, folder_open) = match &self.items[index] {
             LauncherItem::Dir { path, favorite, exists } => {
-                let shown = display_path(path, self.home.as_deref());
+                let shown = display_path(path, self.shown_home());
                 let note = match (favorite, exists) {
                     (true, true) => "favorite",
                     (true, false) => "not found",
@@ -436,7 +449,7 @@ impl LauncherView {
                     Some(tone) => dot.bg(rgb(theme.tone(tone).dot)),
                     None => dot.border_1().border_color(rgb(theme.tokens.muted)),
                 });
-                (display_path(&folder.path, self.home.as_deref()), dot, folder.note(), false, true)
+                (display_path(&folder.path, self.shown_home()), dot, folder.note(), false, true)
             }
             LauncherItem::Header { .. } => unreachable!("headers return above"),
         };
@@ -473,8 +486,7 @@ impl LauncherView {
         if let Some(reason) = self.listing_error() {
             return Some((reason.to_string(), true));
         }
-        self.host_disconnected()
-            .then(|| (format!("{} is {}: Open connects it", self.host.name(), self.host_state()), false))
+        self.host_disconnected().then(|| (not_connected_notice(self.host.name(), self.host_state()), false))
     }
 
     /// One folder of the typed path's parent.

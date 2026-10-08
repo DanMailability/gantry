@@ -302,11 +302,37 @@ pub fn prompt_title(host: &str, prompt: &str) -> String {
     }
 }
 
+/// The launcher's line about a host whose daemon is not connected, from the host's name and its state `label`.
+/// "Open connects it" is added only where opening a session can start a connection.
+pub fn not_connected_notice(host: &str, label: &str) -> String {
+    let (sentence, open_connects) = match label {
+        "needs sign-in" => (format!("{host} needs sign-in"), true),
+        "not connected" => (format!("{host} is not connected"), true),
+        "update needed" => (format!("{host} must be updated"), false),
+        "not installed" => (format!("{host} has no Gantry installed"), false),
+        "opened elsewhere" => (format!("{host} was opened elsewhere"), true),
+        "failed" => (format!("{host} failed to connect"), true),
+        "disconnected" => (format!("{host} is disconnected"), true),
+        other => (format!("{host} is {other}"), false),
+    };
+    if open_connects { format!("{sentence}: Open connects it") } else { sentence }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn the_not_connected_notice_reads_as_a_sentence() {
+        assert_eq!(not_connected_notice("devbox", "needs sign-in"), "devbox needs sign-in: Open connects it");
+        assert_eq!(not_connected_notice("devbox", "not connected"), "devbox is not connected: Open connects it");
+        assert_eq!(not_connected_notice("devbox", "update needed"), "devbox must be updated");
+        assert_eq!(not_connected_notice("devbox", "opened elsewhere"), "devbox was opened elsewhere: Open connects it");
+        assert_eq!(not_connected_notice("devbox", "failed"), "devbox failed to connect: Open connects it");
+        assert_eq!(not_connected_notice("devbox", "reconnecting 2/4"), "devbox is reconnecting 2/4");
+    }
 
     fn other(reason: &str) -> HostEvent {
         HostEvent::AttemptFailed(FailKind::Other { reason: reason.into() })
