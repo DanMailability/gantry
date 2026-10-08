@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod client;
 pub mod containers;
 pub mod launch;
+pub mod list_dir;
 pub mod outbox;
 pub mod paths;
 pub mod pty;

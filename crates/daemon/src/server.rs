@@ -677,6 +677,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         ClientMessage::SearchConversations { request, query, limit } => {
             search_conversations(shared, request, query, limit)
         }
+        ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             let inside = state
@@ -811,6 +812,18 @@ fn search_conversations(shared: &Arc<Shared>, request: u64, query: String, limit
         if let Some((done, total)) = search.indexing() {
             state.control(&DaemonMessage::SearchIndexing { done, total });
         }
+    });
+}
+
+/// Answer `ListDir` off the async threads.
+fn list_dir_request(shared: &Arc<Shared>, request: u64, path: String) {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let reply = match crate::list_dir::list_dir(&path, std::env::home_dir().as_deref()) {
+            Ok((path, dirs)) => DaemonMessage::DirListing { request, path: path.to_string_lossy().into_owned(), dirs },
+            Err(reason) => DaemonMessage::DirListingFailed { request, reason },
+        };
+        shared.lock().control(&reply);
     });
 }
 

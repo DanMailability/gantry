@@ -136,6 +136,30 @@ fn a_pane_works_through_the_bridge_and_survives_the_connection() {
 }
 
 #[test]
+fn a_remote_daemon_lists_folders() {
+    let env = setup("sshbridgelist", Fake::default());
+    let tree = env.path("tree");
+    std::fs::create_dir_all(tree.join("alpha")).unwrap();
+    let connection = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).unwrap();
+    connection.client.list_dir(1, tree.to_str().unwrap());
+    connection.client.list_dir(2, "relative");
+    let (mut listing, mut failure) = (None, None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while listing.is_none() || failure.is_none() {
+        assert!(Instant::now() < deadline, "timed out waiting for the listings");
+        match connection.events.recv_blocking() {
+            Ok(ClientEvent::DirListing { request: 1, path, dirs }) => listing = Some((path, dirs)),
+            Ok(ClientEvent::DirListingFailed { request: 2, reason }) => failure = Some(reason),
+            _ => {}
+        }
+    }
+    let (path, dirs) = listing.unwrap();
+    assert_eq!((path, dirs.len(), dirs[0].name.as_str()), (tree, 1, "alpha"));
+    assert!(failure.unwrap().contains("absolute"));
+    stop_daemon(&connection);
+}
+
+#[test]
 fn an_interactive_attempt_asks_through_askpass_and_gets_the_answer() {
     let env = setup("sshbridge2", Fake { ask: Some("me@devbox's password: "), ..Fake::default() });
     let (prompts_tx, prompts_rx) = async_channel::unbounded::<AskPrompt>();

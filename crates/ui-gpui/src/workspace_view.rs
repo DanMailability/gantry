@@ -1151,6 +1151,7 @@ impl WorkspaceView {
                     self.search_unavailable = true;
                     self.push_search_state(cx);
                 }
+                ClientEvent::DirListing { .. } | ClientEvent::DirListingFailed { .. } => {}
                 ClientEvent::TakenOver if !host.is_local() => self.host_taken_over(host, cx),
                 ClientEvent::Disconnected if !host.is_local() => self.host_dropped(host, window, cx),
                 ClientEvent::TakenOver | ClientEvent::Disconnected => {

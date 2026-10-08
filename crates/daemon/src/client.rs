@@ -9,8 +9,8 @@ use std::time::Duration;
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaletteColors, PaneId, PaneInfo, SearchHit,
-    SessionInfo, SpawnRequest, TakeOverOutcome,
+    ClientMessage, ContainerChoice, DaemonMessage, DirEntry, PROTOCOL_VERSION, PaletteColors, PaneId, PaneInfo,
+    SearchHit, SessionInfo, SpawnRequest, TakeOverOutcome,
 };
 use tokio::sync::mpsc;
 
@@ -104,6 +104,22 @@ pub enum ClientEvent {
     },
     /// Conversation search does not work in this daemon run.
     SearchUnavailable {
+        /// Why.
+        reason: String,
+    },
+    /// The answer to `list_dir`.
+    DirListing {
+        /// Echoed request id.
+        request: u64,
+        /// The expanded absolute path.
+        path: PathBuf,
+        /// Its folders.
+        dirs: Vec<DirEntry>,
+    },
+    /// `list_dir` failed.
+    DirListingFailed {
+        /// Echoed request id.
+        request: u64,
         /// Why.
         reason: String,
     },
@@ -229,6 +245,11 @@ impl DaemonClient {
         self.send(&ClientMessage::SearchConversations { request, query: query.into(), limit });
     }
 
+    /// List the folders in `path` (absolute or starting with `~`); answered by `DirListing` or `DirListingFailed`.
+    pub fn list_dir(&self, request: u64, path: &str) {
+        self.send(&ClientMessage::ListDir { request, path: path.into() });
+    }
+
     /// Send keyboard/paste input to a pane.
     pub fn input(&self, pane: PaneId, bytes: &[u8]) {
         let _ = self.outgoing.send(Outgoing::Frame(Frame::Data { pane, bytes: bytes.to_vec() }));
@@ -345,6 +366,12 @@ where
                 }
                 Some(Ok(DaemonMessage::SearchIndexing { done, total })) => ClientEvent::SearchIndexing { done, total },
                 Some(Ok(DaemonMessage::SearchUnavailable { reason })) => ClientEvent::SearchUnavailable { reason },
+                Some(Ok(DaemonMessage::DirListing { request, path, dirs })) => {
+                    ClientEvent::DirListing { request, path: PathBuf::from(path), dirs }
+                }
+                Some(Ok(DaemonMessage::DirListingFailed { request, reason })) => {
+                    ClientEvent::DirListingFailed { request, reason }
+                }
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {
                     tracing::debug!("ignoring daemon message {other:?}");
