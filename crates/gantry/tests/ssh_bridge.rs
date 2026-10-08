@@ -46,8 +46,9 @@ impl Env {
 
 /// A fake ssh script. The workspace forbids `unsafe`, so the tests cannot set environment variables: the script
 /// exports the isolated environment itself (runtime dir, HOME, profile) before it runs `gantry bridge`. It ignores
-/// ssh's arguments, records whether it was given `SSH_ASKPASS`, and runs `gantry askpass` itself (the transport sets
-/// `SSH_ASKPASS` to the test binary, which is not `gantry`).
+/// ssh's arguments, records whether it was given `SSH_ASKPASS`, and calls `gantry` the way real ssh calls
+/// `SSH_ASKPASS` (the prompt as the only argument; the transport sets `SSH_ASKPASS` to the test binary, which is not
+/// `gantry`, so the script names `gantry` itself).
 fn setup(profile: &str, fake: Fake) -> Env {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("run")).unwrap();
@@ -60,19 +61,22 @@ fn setup(profile: &str, fake: Fake) -> Env {
     if let Some(prompt) = fake.ask {
         let prompt = prompt.replace('\'', "'\\''");
         script.push_str(&format!(
-            "if [ -n \"$SSH_ASKPASS\" ]; then\n  answer=$('{GANTRY}' askpass '{prompt}') || \
+            "if [ -n \"$SSH_ASKPASS\" ]; then\n  answer=$('{GANTRY}' '{prompt}') || \
              {{ echo 'Permission denied (publickey,password).' >&2; exit 255; }}\n  printf '%s' \"$answer\" > '{root}/answer'\nfi\n"
         ));
     }
     if fake.run_remote {
         // Like sshd: the remote command runs in a child of its own that outlives a killed ssh, with the same stdin pipe.
-        script.push_str("for last; do :; done\nsh -c \"$last\" <&0 &\npid=$!\nwait $pid\nexit $?\n");
+        script.push_str(
+            "unset GANTRY_ASKPASS_SOCKET\nfor last; do :; done\nsh -c \"$last\" <&0 &\npid=$!\nwait $pid\nexit $?\n",
+        );
     } else if let Some(body) = fake.body {
         script.push_str(&format!("GANTRY='{GANTRY}'\n{body}\n"));
     } else if let Some((code, message)) = fake.fail {
         script.push_str(&format!("echo '{message}' >&2\nexit {code}\n"));
     } else {
-        script.push_str(&format!("exec '{GANTRY}' bridge\n"));
+        // The remote side never sees the local sign-in socket.
+        script.push_str(&format!("unset GANTRY_ASKPASS_SOCKET\nexec '{GANTRY}' bridge\n"));
     }
     let path = dir.path().join("fake-ssh");
     std::fs::write(&path, script).unwrap();

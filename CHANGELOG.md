@@ -8,6 +8,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - SSH hosts have a sign-in method: Automatic, Password (only a password, keys are not tried) or SSH key (no password). Pick it in the Add SSH host wizard or from the host's row in Settings > SSH hosts. A server that hangs up after too many failed tries now says so and points at this setting.
 
+### Fixed
+- SSH hosts that need a password: the sign-in dialog now appears. Real ssh calls the helper with just the prompt, which Gantry did not recognise, so ssh gave up with "Permission denied" and no question.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

@@ -11,6 +11,10 @@ use daemon::paths::{Paths, current_profile};
 
 fn main() -> ExitCode {
     let mut argv = std::env::args().skip(1).peekable();
+    // ssh runs `$SSH_ASKPASS "<prompt>"`: only an attempt started by Gantry sets the socket, and then this is the helper.
+    if std::env::var_os("GANTRY_ASKPASS_SOCKET").is_some() && argv.peek().map(String::as_str) != Some("askpass") {
+        return askpass_main(std::iter::once(String::new()).chain(argv));
+    }
     match argv.peek().map(String::as_str) {
         Some("--version") => {
             println!("{}", protocol::build::version_line());
@@ -67,7 +71,7 @@ fn bridge_main() -> ExitCode {
     }
 }
 
-/// `gantry askpass <prompt>`: ssh's `SSH_ASKPASS` helper. Asks the GUI that started this attempt and prints the
+/// `gantry <prompt>` with `GANTRY_ASKPASS_SOCKET` set (or `gantry askpass <prompt>`): ssh's `SSH_ASKPASS` helper. Asks the GUI that started this attempt and prints the
 /// answer; the answer is never logged.
 fn askpass_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
     let _ = argv.next();
