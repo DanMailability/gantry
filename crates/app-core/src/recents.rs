@@ -17,8 +17,8 @@ use crate::session_tree::{age, display_path, keep, keep_text, labels, newest_fir
 pub struct RecentsInput<'a> {
     /// Claude sessions.
     pub sessions: &'a [&'a SessionInfo],
-    /// Sessions a leaf of the layout shows (they are in the Active list, not here).
-    pub open: &'a HashSet<String>,
+    /// Sessions a leaf of the layout shows, as (host, session id) (they are in the Active list, not here).
+    pub open: &'a HashSet<(HostId, String)>,
     /// Home directory, shown as `~`.
     pub home: Option<&'a Path>,
     /// Search text (blank = none).
@@ -183,7 +183,7 @@ pub struct ProjectItem {
 fn grouped<'a>(input: &RecentsInput<'a>) -> Vec<(PathBuf, Vec<&'a SessionInfo>)> {
     let mut by_project: HashMap<PathBuf, Vec<&'a SessionInfo>> = HashMap::new();
     for session in input.sessions.iter().copied() {
-        if session.state == SessionState::Closed && !input.open.contains(&session.id) {
+        if session.state == SessionState::Closed && !is_open(input, session) {
             by_project.entry((input.project_of)(&session.host, &session.cwd)).or_default().push(session);
         }
     }
@@ -268,15 +268,16 @@ type Order = (u8, usize, Reverse<u64>);
 fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
     let content = searches_content(input.query);
     let hits: &[SearchHit] = if content { input.hits } else { &[] };
-    let mut hit_of: HashMap<&str, (usize, &SearchHit)> = HashMap::new();
+    let mut hit_of: HashMap<(&HostId, &str), (usize, &SearchHit)> = HashMap::new();
     for (rank, hit) in hits.iter().enumerate() {
-        hit_of.entry(hit.session_id.as_str()).or_insert((rank, hit));
+        hit_of.entry((&hit.host, hit.session_id.as_str())).or_insert((rank, hit));
     }
     let mut candidates: Vec<&SessionInfo> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
-    let open_hits = input.sessions.iter().filter(|s| hit_of.contains_key(s.id.as_str()) && input.open.contains(&s.id));
+    let mut seen: HashSet<(&HostId, &str)> = HashSet::new();
+    let open_hits =
+        input.sessions.iter().filter(|s| hit_of.contains_key(&(&s.host, s.id.as_str())) && is_open(input, s));
     for session in grouped(input).into_iter().flat_map(|(_, sessions)| sessions).chain(open_hits.copied()) {
-        if seen.insert(session.id.as_str()) {
+        if seen.insert((&session.host, session.id.as_str())) {
             candidates.push(session);
         }
     }
@@ -286,7 +287,7 @@ fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
         if !in_scope(input, &project) {
             continue;
         }
-        let hit = hit_of.get(session.id.as_str());
+        let hit = hit_of.get(&(&session.host, session.id.as_str()));
         let (by_title, marks) = match title_match(input, words, session) {
             Some(found) => found,
             None if hit.is_some() => (false, Vec::new()),
@@ -307,7 +308,7 @@ fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
                 project,
                 marks,
                 snippet: hit.map(|&(_, hit)| Snippet::from_hit(hit)),
-                open: input.open.contains(&session.id),
+                open: is_open(input, session),
             },
         ));
     }
@@ -322,6 +323,10 @@ fn matches(input: &RecentsInput<'_>, words: &[String]) -> Vec<RecentItem> {
     };
     items.extend(note.map(|text| RecentItem::Note { text }));
     items
+}
+
+fn is_open(input: &RecentsInput<'_>, session: &SessionInfo) -> bool {
+    input.open.contains(&(session.host.clone(), session.id.clone()))
 }
 
 fn item_id(item: &RecentItem) -> &str {
@@ -452,7 +457,7 @@ mod tests {
 
     struct Fixture {
         sessions: Vec<SessionInfo>,
-        open: HashSet<String>,
+        open: HashSet<(HostId, String)>,
         query: String,
         project: Option<PathBuf>,
         expanded: HashSet<PathBuf>,
@@ -537,7 +542,7 @@ mod tests {
             closed("tab", "/r/b", 0),
             live,
         ]);
-        fixture.open.insert("tab".into());
+        fixture.open.insert((HostId::local(), "tab".into()));
         assert_eq!(fixture.outline(), vec!["# b", "b", "# a", "a-new", "a-old"]);
         assert_eq!(fixture.with(counts), (3, 3));
     }
@@ -759,7 +764,7 @@ mod tests {
         let mut elsewhere = closed("elsewhere", "/r/a", 1);
         elsewhere.state = SessionState::External { pid: Some(9) };
         let mut fixture = Fixture::of(vec![tab, elsewhere, closed("unknown-to-hits", "/r/a", 1)]);
-        fixture.open.insert("tab".into());
+        fixture.open.insert((HostId::local(), "tab".into()));
         fixture.query = "zzz".into();
         fixture.hits = vec![hit("tab", "x", vec![]), hit("elsewhere", "y", vec![]), hit("not-listed", "z", vec![])];
         fixture.content = ContentState::Ready;
@@ -833,5 +838,26 @@ mod tests {
         let fixture = Fixture::of(vec![closed("l", "/r/app", 1), remote]);
         assert_eq!(fixture.outline(), vec!["# app", "l", "# devbox - app", "r"]);
         assert_eq!(fixture.chip_labels()[1..3], ["app 1", "devbox - app 1"]);
+    }
+
+    #[test]
+    fn a_hit_belongs_to_its_host_and_an_open_remote_session_is_marked() {
+        let remote = SessionInfo { host: HostId::named("devbox"), ..closed("same", "/r/app", 2) };
+        let mut fixture = Fixture::of(vec![closed("same", "/r/app", 1), remote]);
+        fixture.query = "zzz".into();
+        fixture.hits = vec![SearchHit { host: HostId::named("devbox"), ..hit("same", "x", vec![]) }];
+        fixture.content = ContentState::Ready;
+        fixture.open.insert((HostId::named("devbox"), "same".into()));
+        let items = fixture.with(items);
+        let found: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                RecentItem::Session { session, snippet, open, .. } => {
+                    Some((session.host.name().to_string(), snippet.is_some(), *open))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found, [("devbox".to_string(), true, true)]);
     }
 }

@@ -325,6 +325,8 @@ pub enum Activation {
         session: String,
         /// Its directory.
         cwd: PathBuf,
+        /// The host it ran on.
+        host: HostId,
     },
     /// Show or hide an external session's details.
     ToggleDetails(String),
@@ -378,9 +380,11 @@ impl Row {
                 (SessionState::Managed { pane }, None) => {
                     Activation::FocusPane(PaneKey::new(session.host.clone(), pane))
                 }
-                (SessionState::Closed, None) if session.cwd_exists => {
-                    Activation::Resume { session: session.id.clone(), cwd: session.cwd.clone() }
-                }
+                (SessionState::Closed, None) if session.cwd_exists => Activation::Resume {
+                    session: session.id.clone(),
+                    cwd: session.cwd.clone(),
+                    host: session.host.clone(),
+                },
                 (SessionState::Closed, None) => Activation::Nothing,
             },
             RowKind::TakeOver { session, cwd, host } => {
