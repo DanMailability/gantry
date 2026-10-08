@@ -425,6 +425,26 @@ pub fn counts(input: &RecentsInput<'_>) -> (usize, usize) {
     (matching, scoped.len())
 }
 
+/// The sessions the pop-up lists: those of this machine and of the hosts `connected` says are.
+pub fn listed_sessions<'a>(
+    sessions: impl Iterator<Item = &'a SessionInfo>,
+    connected: impl Fn(&HostId) -> bool,
+) -> Vec<SessionInfo> {
+    sessions.filter(|session| session.host.is_local() || connected(&session.host)).cloned().collect()
+}
+
+/// The configured SSH hosts that are not connected, in settings order. This machine is never one of them.
+pub fn offline_hosts(configured: &[String], connected: impl Fn(&HostId) -> bool) -> Vec<String> {
+    configured
+        .iter()
+        .filter(|name| {
+            let host = HostId::named(name);
+            !host.is_local() && !connected(&host)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,5 +879,19 @@ mod tests {
             })
             .collect();
         assert_eq!(found, [("devbox".to_string(), true, true)]);
+    }
+
+    #[test]
+    fn only_connected_hosts_sessions_are_listed_and_the_others_are_offline() {
+        let session = |host: HostId, id: &str| SessionInfo { host, ..closed(id, "/r", 1) };
+        let all =
+            [session(HostId::local(), "l"), session(HostId::named("up"), "u"), session(HostId::named("down"), "d")];
+        let up = |host: &HostId| host.name() == "up";
+        let listed = listed_sessions(all.iter(), up);
+        assert_eq!(listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["l", "u"]);
+        let configured = ["down".to_string(), "up".to_string(), "lab".to_string()];
+        assert_eq!(offline_hosts(&configured, up), ["down", "lab"]);
+        // This machine is never offline, even when it is configured or nothing is connected.
+        assert_eq!(offline_hosts(&["local".to_string(), "".to_string()], |_| false), Vec::<String>::new());
     }
 }

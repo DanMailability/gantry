@@ -217,13 +217,14 @@ impl RecentsView {
         cx.emit(RecentsEvent::Search { request: self.request, query });
     }
 
-    /// Hits for `request`; replies to older requests are ignored.
-    pub fn set_hits(&mut self, request: u64, hits: Vec<SearchHit>, cx: &mut Context<Self>) {
+    /// Hits for `request`; replies to older requests are ignored. `pending`: a queried host has not answered yet, so
+    /// an empty list does not mean "no conversations" yet.
+    pub fn set_hits(&mut self, request: u64, hits: Vec<SearchHit>, pending: bool, cx: &mut Context<Self>) {
         if request == 0 || request != self.request {
             return;
         }
         self.hits = hits;
-        self.answered = true;
+        self.answered = !pending;
         self.refresh_keeping_selection();
         cx.notify();
     }

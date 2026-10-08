@@ -14,6 +14,8 @@ pub struct HostSearch {
     pub progress: Option<u8>,
     /// The host's search does not work (`SearchUnavailable`).
     pub unavailable: bool,
+    /// The host has answered the current query (`SearchResults`).
+    pub answered: bool,
 }
 
 /// The pop-up's view of all hosts.
@@ -25,6 +27,8 @@ pub struct Merged {
     pub progress: Option<u8>,
     /// Hosts whose search is unavailable, in `order`.
     pub unavailable: Vec<HostId>,
+    /// A queried host has neither answered the current query nor reported its search unavailable.
+    pub pending: bool,
 }
 
 /// The hosts to ask: this machine first, then the configured hosts that are connected, in settings order.
@@ -34,12 +38,16 @@ pub fn query_order(configured: &[String], connected: impl Fn(&HostId) -> bool) -
     order
 }
 
-/// Merge the answers: hits of `order`'s hosts one after another (each list keeps its order), the lowest progress and
-/// the unavailable hosts. A host without an answer contributes nothing.
+/// Merge the answers: hits of `order`'s hosts one after another (each list keeps its order), the lowest progress, the
+/// unavailable hosts and whether any host still has to answer. A host without an answer contributes nothing.
 pub fn merge(order: &[HostId], answers: &HashMap<HostId, HostSearch>) -> Merged {
     let mut merged = Merged::default();
     for host in order {
-        let Some(answer) = answers.get(host) else { continue };
+        let Some(answer) = answers.get(host) else {
+            merged.pending = true;
+            continue;
+        };
+        merged.pending |= !answer.answered && !answer.unavailable;
         if answer.unavailable {
             merged.unavailable.push(host.clone());
             continue;
@@ -69,7 +77,7 @@ mod tests {
     }
 
     fn answer(ids: &[&str], progress: Option<u8>, unavailable: bool) -> HostSearch {
-        HostSearch { hits: ids.iter().map(|id| hit(id)).collect(), progress, unavailable }
+        HostSearch { hits: ids.iter().map(|id| hit(id)).collect(), progress, unavailable, answered: true }
     }
 
     fn ids(merged: &Merged) -> Vec<(String, String)> {
@@ -149,5 +157,22 @@ mod tests {
         let configured = ["lab".to_string(), "devbox".to_string()];
         let order = query_order(&configured, |host| host.name() == "devbox");
         assert_eq!(order, [HostId::local(), HostId::named("devbox")]);
+    }
+
+    #[test]
+    fn the_merge_is_pending_until_every_queried_host_answered() {
+        let (order, a, b) = two_hosts();
+        let mut answers = HashMap::new();
+        assert!(merge(&order, &answers).pending, "nobody answered");
+        answers.insert(HostId::local(), answer(&[], None, false));
+        answers.insert(a.clone(), answer(&[], None, false));
+        assert!(merge(&order, &answers).pending, "b has not answered");
+        // Indexing progress alone is not an answer.
+        answers.insert(b.clone(), HostSearch { progress: Some(30), ..HostSearch::default() });
+        assert!(merge(&order, &answers).pending);
+        answers.insert(b.clone(), answer(&[], None, true));
+        assert!(!merge(&order, &answers).pending, "an unavailable host will not answer");
+        answers.insert(b, answer(&[], None, false));
+        assert!(!merge(&order, &answers).pending);
     }
 }

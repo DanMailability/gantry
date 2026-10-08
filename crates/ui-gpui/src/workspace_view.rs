@@ -10,6 +10,7 @@ use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, de
 use app_core::host_state::{FailKind, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
+use app_core::recents;
 use app_core::search_merge::{self, HostSearch};
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
@@ -1154,7 +1155,8 @@ impl WorkspaceView {
                 }
                 ClientEvent::SearchResults { request, hits } => {
                     if *request == self.search_request {
-                        self.search_answers.entry(host.clone()).or_default().hits = hits.clone();
+                        let answer = self.search_answers.entry(host.clone()).or_default();
+                        (answer.hits, answer.answered) = (hits.clone(), true);
                         self.push_search_hits(cx);
                     }
                 }
@@ -2303,13 +2305,20 @@ impl WorkspaceView {
 
     /// This machine and the SSH hosts as the launcher's host chip lists them.
     fn launcher_hosts(&self) -> Vec<LauncherHost> {
-        let local = LauncherHost { id: HostId::local(), label: "Local".into(), dot: HostDot::Ok, connected: true };
+        let local = LauncherHost {
+            id: HostId::local(),
+            label: "Local".into(),
+            dot: HostDot::Ok,
+            connected: true,
+            state: "connected".into(),
+        };
         let hosts = self.ssh_hosts.iter().map(|entry| {
             let (id, state) = (HostId::named(&entry.name), self.host_state(&HostId::named(&entry.name)));
             LauncherHost {
                 label: format!("{} · {}", entry.name, state.label()),
                 dot: state.dot(),
                 connected: self.client(&id).is_some(),
+                state: state.label(),
                 id,
             }
         });
@@ -2457,18 +2466,13 @@ impl WorkspaceView {
 
     /// The sessions of this machine and of the connected hosts.
     fn recents_sessions(&self, cx: &Context<Self>) -> Vec<SessionInfo> {
-        let sessions = self.sidebar.read(cx).sessions();
-        sessions
-            .all()
-            .filter(|session| session.host.is_local() || self.client(&session.host).is_some())
-            .cloned()
-            .collect()
+        recents::listed_sessions(self.sidebar.read(cx).sessions().all(), |host| self.client(host).is_some())
     }
 
     /// Names of the SSH hosts that are not connected.
     fn offline_hosts(&self) -> Vec<String> {
-        let away = |entry: &&SshHost| self.client(&HostId::named(&entry.name)).is_none();
-        self.ssh_hosts.iter().filter(away).map(|entry| entry.name.clone()).collect()
+        let configured: Vec<String> = self.ssh_hosts.iter().map(|entry| entry.name.clone()).collect();
+        recents::offline_hosts(&configured, |host| self.client(host).is_some())
     }
 
     /// Give an open recent sessions pop-up the sessions of the hosts that are connected now.
@@ -2490,7 +2494,7 @@ impl WorkspaceView {
         if let Some((view, _)) = &self.recents {
             let merged = search_merge::merge(&self.search_order(), &self.search_answers);
             let request = self.search_request;
-            view.update(cx, |view, cx| view.set_hits(request, merged.hits, cx));
+            view.update(cx, |view, cx| view.set_hits(request, merged.hits, merged.pending, cx));
         }
     }
 
@@ -2513,6 +2517,7 @@ impl WorkspaceView {
                 self.search_answers.retain(|host, _| order.contains(host));
                 for answer in self.search_answers.values_mut() {
                     answer.hits.clear();
+                    answer.answered = false;
                 }
                 for host in &order {
                     if let Some(client) = self.client(host) {
