@@ -10,9 +10,13 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Add SSH host wizard: pick a host from your ssh config or type one, and Gantry installs itself there (Linux x86_64 hosts, from a Linux x86_64 Gantry), checks it, offers to turn on lingering, then saves and connects the host. The upload checks its size (and hash) before it replaces anything, so a dropped connection never leaves a broken Gantry; if turning lingering on fails the wizard shows the command to run and lets you save anyway.
 - Update and restart for remote hosts, and Install on a host without Gantry, from the host's card.
 - Settings > SSH hosts: see each host's state, rename it, edit its target, remove it, or add one.
+- Launcher host chip with remote folders and path completion: pick an SSH host in Ctrl+Shift+O, see its open folders, favorites and recent folders, and type a path that completes from the host.
+- Remote sessions in recent sessions and conversation search; hosts that are not connected get a line with a Connect button.
+- Take over works on SSH hosts.
 
 ### Changed
-- Needs a daemon restart: new panes starting in `~` now open in the home folder.
+- Remote sessions no longer offer menu actions that only work on this machine (open folder, VS Code, project pin and color, Claude config dir choice).
+- Needs a daemon restart (protocol 8, also needed on every SSH host): new panes starting in `~` now open in the home folder.
 
 ## [0.3.0] - 2026-10-07
 
