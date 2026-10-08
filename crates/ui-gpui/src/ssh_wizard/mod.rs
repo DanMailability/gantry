@@ -9,7 +9,7 @@ use std::path::Path;
 
 use app_core::host_install::{CheckResult, GantryOnRemote, Linger, Probe, Step, check, next_step, upload_path};
 use app_core::host_state::FailKind;
-use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshHost};
+use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshAuth, SshHost};
 use app_core::ssh_config::{aliases, validate_name, validate_target, wildcard_match};
 use app_core::text_field::TextField;
 use daemon::askpass::AskPrompt;
@@ -80,6 +80,8 @@ pub(crate) struct SshWizard {
     /// The user typed in the name field, so it is no longer filled from the target.
     name_edited: bool,
     advanced: bool,
+    /// How to sign in to the host.
+    auth: SshAuth,
     active: Field,
     check: Option<CheckResult>,
     /// Bytes of the upload sent, and its size.
@@ -191,10 +193,12 @@ impl SshWizard {
         runtime_dir: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (target, name, command, step) = match &start {
-            WizardStart::Add => (String::new(), String::new(), DEFAULT_REMOTE_COMMAND.to_string(), Step::Host),
+        let (target, name, command, auth, step) = match &start {
+            WizardStart::Add => {
+                (String::new(), String::new(), DEFAULT_REMOTE_COMMAND.to_string(), SshAuth::Automatic, Step::Host)
+            }
             WizardStart::Install(host) | WizardStart::Update(host) => {
-                (host.target.clone(), host.name.clone(), host.command.clone(), Step::Check)
+                (host.target.clone(), host.name.clone(), host.command.clone(), host.auth, Step::Check)
             }
         };
         let mut wizard = SshWizard {
@@ -210,6 +214,7 @@ impl SshWizard {
             command: text(&command),
             name_edited: false,
             advanced: false,
+            auth,
             active: Field::Target,
             check: None,
             sent: 0,
@@ -241,6 +246,7 @@ impl SshWizard {
             name: self.draft_name(),
             target: self.target.text().trim().to_string(),
             command: self.command.text().trim().to_string(),
+            auth: self.auth,
             share: self.share.clone(),
         }
     }
@@ -388,7 +394,7 @@ impl SshWizard {
         let spec = self.spec();
         let restarted = matches!(self.start, WizardStart::Update(_));
         cx.emit(WizardEvent::Finished {
-            host: SshHost { name: spec.name, target: spec.target, command: spec.command },
+            host: SshHost { name: spec.name, target: spec.target, command: spec.command, auth: spec.auth },
             add,
             restarted,
         });
@@ -696,6 +702,8 @@ impl SshWizard {
             .child(label("NAME"))
             .child(text_box(&theme, name))
             .children(problem(name_problem))
+            .child(label("SIGN IN"))
+            .child(self.auth_choice(&theme, cx))
             .child(
                 div()
                     .id("ssh-wizard-advanced")
@@ -716,6 +724,41 @@ impl SshWizard {
                         .child("Only a plain path (~/… or /…) can be installed to."),
                 )
             })
+    }
+
+    /// The sign-in method chips: Automatic, Password, SSH key.
+    fn auth_choice(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let options = [(SshAuth::Automatic, "Automatic"), (SshAuth::Password, "Password"), (SshAuth::Key, "SSH key")];
+        let hint = match self.auth {
+            SshAuth::Automatic => "ssh decides: keys first, then a password.",
+            SshAuth::Password => "Only a password. Keys are not tried.",
+            SshAuth::Key => "Only keys (the agent and your default keys). No password.",
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.ui(6.))
+            .child(div().flex().gap(theme.ui(6.)).children(options.into_iter().enumerate().map(
+                |(index, (auth, name))| {
+                    let on = self.auth == auth;
+                    div()
+                        .id(("ssh-wizard-auth", index))
+                        .cursor_pointer()
+                        .px(theme.ui(10.))
+                        .py(theme.ui(3.))
+                        .rounded(px(RADIUS_SMALL))
+                        .text_sm()
+                        .border_1()
+                        .border_color(rgb(if on { theme.tokens.accent } else { theme.tokens.line }))
+                        .text_color(rgb(if on { theme.tokens.accent } else { theme.tokens.muted }))
+                        .child(name)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.auth = auth;
+                            cx.notify();
+                        }))
+                },
+            )))
+            .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(hint))
     }
 
     fn line(&self, theme: &Theme, ok: bool, text: String) -> Div {

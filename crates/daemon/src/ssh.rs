@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_core::host_state::{FailKind, classify_failure};
+use app_core::settings::SshAuth;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Notify;
 
@@ -21,6 +22,8 @@ pub struct SshHostSpec {
     pub target: String,
     /// The remote Gantry binary, as the remote shell will run it.
     pub command: String,
+    /// How to sign in (adds ssh's options).
+    pub auth: SshAuth,
     /// A shared ssh connection (ControlMaster) to run through, so one sign-in serves several commands.
     pub share: Option<Share>,
 }
@@ -132,6 +135,7 @@ pub fn ssh_args_for(spec: &SshHostSpec, background: bool, remote_command: &str) 
     if background {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
     }
+    args.extend(spec.auth.ssh_options().iter().map(|option| option.to_string()));
     if let Some(share) = &spec.share {
         args.extend([
             "-o".into(),
@@ -341,11 +345,29 @@ async fn run(
 mod tests {
     use super::*;
 
+    #[test]
+    fn sign_in_methods_add_their_options_before_the_target() {
+        let with = |auth| ssh_args(&SshHostSpec { auth, ..spec() }, false);
+        assert_eq!(with(SshAuth::Automatic), ssh_args(&spec(), false));
+        assert!(!with(SshAuth::Automatic).iter().any(|arg| arg.contains("PreferredAuthentications")));
+        let password = with(SshAuth::Password);
+        assert!(password.contains(&"PreferredAuthentications=password,keyboard-interactive".to_string()));
+        assert!(password.contains(&"IdentitiesOnly=yes".to_string()));
+        let key = with(SshAuth::Key);
+        assert!(key.contains(&"PreferredAuthentications=publickey".to_string()));
+        assert!(!key.contains(&"IdentitiesOnly=yes".to_string()));
+        for args in [password, key] {
+            let dashes = args.iter().position(|arg| arg == "--").unwrap();
+            assert!(args.iter().position(|arg| arg.starts_with("PreferredAuthentications")).unwrap() < dashes);
+        }
+    }
+
     fn spec() -> SshHostSpec {
         SshHostSpec {
             name: "devbox".into(),
             target: "me@devbox".into(),
             command: "~/.local/bin/gantry".into(),
+            auth: SshAuth::Automatic,
             share: None,
         }
     }

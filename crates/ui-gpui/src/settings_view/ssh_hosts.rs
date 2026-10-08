@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use app_core::host_state::HostDot;
-use app_core::settings::{Settings, SshHost, replace_ssh_host};
+use app_core::settings::{Settings, SshAuth, SshHost, replace_ssh_host};
 use gpui::{Context, Div, Global, Window, div, px, rgb};
 
 use super::*;
@@ -91,6 +91,24 @@ pub(super) fn edit_ssh_host(
     })
 }
 
+/// The sign-in method after `auth` when its link is clicked.
+fn next_auth(auth: SshAuth) -> SshAuth {
+    match auth {
+        SshAuth::Automatic => SshAuth::Password,
+        SshAuth::Password => SshAuth::Key,
+        SshAuth::Key => SshAuth::Automatic,
+    }
+}
+
+/// The text of a host's sign-in link.
+fn auth_label(auth: SshAuth) -> &'static str {
+    match auth {
+        SshAuth::Automatic => "Sign in: automatic",
+        SshAuth::Password => "Sign in: password",
+        SshAuth::Key => "Sign in: SSH key",
+    }
+}
+
 /// The question before a host is removed.
 pub(super) fn remove_text(name: &str, panes: usize) -> String {
     let panes = match panes {
@@ -140,7 +158,26 @@ impl SettingsView {
                 window,
                 cx,
             );
-            let mut trailing = actions_slot(theme).child(remove);
+            let (name_for_auth, next_auth) = (host.name.clone(), next_auth(host.auth));
+            let auth = self.link(
+                "ssh-auth",
+                index,
+                auth_label(host.auth),
+                true,
+                handler(move |this, _, cx| {
+                    let name = name_for_auth.clone();
+                    SettingsStore::update(cx, |settings| {
+                        if let Some(host) = settings.ssh_hosts.iter_mut().find(|host| host.name == name) {
+                            host.auth = next_auth;
+                        }
+                    });
+                    this.edited_targets.insert(name);
+                    cx.notify();
+                }),
+                window,
+                cx,
+            );
+            let mut trailing = actions_slot(theme).child(auth).child(remove);
             if self.edited_targets.contains(&host.name) && dot == HostDot::Ok {
                 let name_for_reconnect = host.name.clone();
                 trailing = trailing.child(self.link(
@@ -242,8 +279,24 @@ impl SettingsView {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_sign_in_link_cycles_through_every_method() {
+        let mut auth = SshAuth::Automatic;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            auth = next_auth(auth);
+            seen.push(auth);
+        }
+        assert_eq!(seen, [SshAuth::Password, SshAuth::Key, SshAuth::Automatic]);
+    }
+
     fn host(name: &str, target: &str) -> SshHost {
-        SshHost { name: name.into(), target: target.into(), command: "~/.local/bin/gantry".into() }
+        SshHost {
+            name: name.into(),
+            target: target.into(),
+            command: "~/.local/bin/gantry".into(),
+            auth: Default::default(),
+        }
     }
 
     #[test]

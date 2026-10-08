@@ -886,8 +886,10 @@ impl WorkspaceView {
         self.next_attempt += 1;
         let number = self.next_attempt;
         self.attempts.insert(host.clone(), (number, handle.clone()));
-        let (host, spec) =
-            (host.clone(), SshHostSpec { name: entry.name, target: entry.target, command: entry.command, share });
+        let (host, spec) = (
+            host.clone(),
+            SshHostSpec { name: entry.name, target: entry.target, command: entry.command, auth: entry.auth, share },
+        );
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()

@@ -2339,7 +2339,12 @@ mod tests {
         use crate::settings::{SshHost, add_ssh_host, remove_ssh_host};
         let dev = HostId::named("dev");
         let mut hosts = Vec::new();
-        let entry = SshHost { name: "dev".into(), target: "me@dev".into(), command: "~/.local/bin/gantry".into() };
+        let entry = SshHost {
+            name: "dev".into(),
+            target: "me@dev".into(),
+            command: "~/.local/bin/gantry".into(),
+            auth: Default::default(),
+        };
         add_ssh_host(&mut hosts, entry).unwrap();
         let mut ws = Workspace::default();
         ws.set_instance(&dev, "r1");

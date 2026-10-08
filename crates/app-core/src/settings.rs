@@ -261,6 +261,50 @@ pub fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
 /// The remote Gantry command when a host does not name one: where the tarball installer puts it.
 pub const DEFAULT_REMOTE_COMMAND: &str = "~/.local/bin/gantry";
 
+/// How Gantry signs in to an SSH host. It only picks ssh's options; nothing is stored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SshAuth {
+    /// ssh decides (agent, keys, then a password), as `~/.ssh/config` says.
+    #[default]
+    Automatic,
+    /// Only a password: keys and the agent are not tried.
+    Password,
+    /// Only keys (the agent and the default keys): no password fallback.
+    Key,
+}
+
+impl SshAuth {
+    /// The value in settings.json.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SshAuth::Automatic => "automatic",
+            SshAuth::Password => "password",
+            SshAuth::Key => "key",
+        }
+    }
+
+    /// Parse a settings.json value.
+    pub fn parse(text: &str) -> Option<SshAuth> {
+        match text {
+            "automatic" => Some(SshAuth::Automatic),
+            "password" => Some(SshAuth::Password),
+            "key" => Some(SshAuth::Key),
+            _ => None,
+        }
+    }
+
+    /// The `-o` options ssh needs for this method (empty for `Automatic`).
+    pub fn ssh_options(self) -> &'static [&'static str] {
+        match self {
+            SshAuth::Automatic => &[],
+            SshAuth::Password => {
+                &["-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "IdentitiesOnly=yes"]
+            }
+            SshAuth::Key => &["-o", "PreferredAuthentications=publickey"],
+        }
+    }
+}
+
 /// One SSH host the user listed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SshHost {
@@ -270,6 +314,8 @@ pub struct SshHost {
     pub target: String,
     /// The remote Gantry binary.
     pub command: String,
+    /// How to sign in.
+    pub auth: SshAuth,
 }
 
 /// Add `host` to the list; its name must be valid and unused, its target valid.
@@ -626,6 +672,17 @@ impl Reader {
                 None => DEFAULT_REMOTE_COMMAND.to_string(),
                 Some(_) => self.string(map, &format!("{key}."), "command"),
             };
+            let auth = match map.get("auth") {
+                None => SshAuth::Automatic,
+                Some(Value::String(text)) => SshAuth::parse(text).unwrap_or_else(|| {
+                    self.problem(&format!("{key}.auth"), "expected automatic, password or key".into());
+                    SshAuth::Automatic
+                }),
+                Some(_) => {
+                    self.problem(&format!("{key}.auth"), "expected automatic, password or key".into());
+                    SshAuth::Automatic
+                }
+            };
             if name.is_empty() || target.is_empty() || command.is_empty() {
                 self.problem(&key, "needs a name, a target and a command; dropped".into());
             } else if name.contains('/') {
@@ -635,7 +692,7 @@ impl Reader {
             } else if hosts.iter().any(|host| host.name == name) {
                 self.problem(&key, format!("the name \"{name}\" is used twice; dropped"));
             } else {
-                hosts.push(SshHost { name, target, command });
+                hosts.push(SshHost { name, target, command, auth });
             }
         }
         hosts
@@ -954,7 +1011,13 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
     let ssh_hosts: Vec<Value> = settings
         .ssh_hosts
         .iter()
-        .map(|host| serde_json::json!({"name": host.name, "target": host.target, "command": host.command}))
+        .map(|host| {
+            let mut value = serde_json::json!({"name": host.name, "target": host.target, "command": host.command});
+            if host.auth != SshAuth::Automatic {
+                value["auth"] = host.auth.as_str().into();
+            }
+            value
+        })
         .collect();
     add(&["sshHosts"], Value::Array(ssh_hosts), !settings.ssh_hosts.is_empty());
     add(
@@ -1585,8 +1648,18 @@ mod tests {
         assert_eq!(
             hosts,
             vec![
-                SshHost { name: "devbox".into(), target: "me@devbox".into(), command: DEFAULT_REMOTE_COMMAND.into() },
-                SshHost { name: "lab".into(), target: "lab".into(), command: "/opt/gantry/bin/gantry".into() },
+                SshHost {
+                    name: "devbox".into(),
+                    target: "me@devbox".into(),
+                    command: DEFAULT_REMOTE_COMMAND.into(),
+                    auth: SshAuth::Automatic,
+                },
+                SshHost {
+                    name: "lab".into(),
+                    target: "lab".into(),
+                    command: "/opt/gantry/bin/gantry".into(),
+                    auth: SshAuth::Automatic,
+                },
             ]
         );
     }
@@ -1618,6 +1691,26 @@ mod tests {
     }
 
     #[test]
+    fn ssh_host_auth_loads_and_a_bad_value_falls_back_with_a_problem() {
+        let loaded = parse(
+            r#"{"sshHosts": [
+                {"name": "a", "target": "a"},
+                {"name": "b", "target": "b", "auth": "password"},
+                {"name": "c", "target": "c", "auth": "key"},
+                {"name": "d", "target": "d", "auth": "fingerprint"},
+                {"name": "e", "target": "e", "auth": 3}
+            ]}"#,
+        );
+        let auths: Vec<SshAuth> = loaded.settings.unwrap().ssh_hosts.iter().map(|host| host.auth).collect();
+        assert_eq!(
+            auths,
+            [SshAuth::Automatic, SshAuth::Password, SshAuth::Key, SshAuth::Automatic, SshAuth::Automatic]
+        );
+        let keys: Vec<&str> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["sshHosts[3].auth", "sshHosts[4].auth"]);
+    }
+
+    #[test]
     fn hand_written_ssh_hosts_survive_a_save_of_something_else() {
         let text =
             r#"{"theme": "Mist", "sshHosts": [{"name": "devbox", "target": "me@devbox", "note": 1}, {"name": ""}]}"#;
@@ -1639,6 +1732,7 @@ mod tests {
             name: "devbox".into(),
             target: "me@devbox".into(),
             command: DEFAULT_REMOTE_COMMAND.into(),
+            auth: SshAuth::Password,
         });
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -1646,10 +1740,16 @@ mod tests {
         let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["sshHosts"][0]["name"], "devbox");
         assert_eq!(written["sshHosts"][0]["command"], DEFAULT_REMOTE_COMMAND);
+        assert_eq!(written["sshHosts"][0]["auth"], "password");
     }
 
     fn host(name: &str, target: &str) -> SshHost {
-        SshHost { name: name.into(), target: target.into(), command: DEFAULT_REMOTE_COMMAND.into() }
+        SshHost {
+            name: name.into(),
+            target: target.into(),
+            command: DEFAULT_REMOTE_COMMAND.into(),
+            auth: SshAuth::Automatic,
+        }
     }
 
     #[test]

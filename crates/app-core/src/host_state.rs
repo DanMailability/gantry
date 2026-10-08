@@ -248,6 +248,12 @@ pub fn classify_failure(
     if lower.contains("remote host identification has changed") {
         return FailKind::Other { reason: "The host key of the host changed. Check ~/.ssh/known_hosts.".into() };
     }
+    if lower.contains("too many authentication failures") {
+        return FailKind::Other {
+            reason: "The server stopped after too many failed sign-in tries. Set this host's sign-in to Password or SSH key."
+                .into(),
+        };
+    }
     let last_line = stderr.lines().rev().find(|line| !line.trim().is_empty()).map(|line| line.trim().to_string());
     let wants_input = ["permission denied", "host key verification failed", "passphrase", "authentication failed"];
     if exit_code == Some(255) && wants_input.iter().any(|needle| lower.contains(needle)) {
@@ -463,6 +469,20 @@ mod tests {
             classify_failure(Some(255), stderr, None, false, None),
             FailKind::Other { reason: "The host key of the host changed. Check ~/.ssh/known_hosts.".into() }
         );
+    }
+
+    #[test]
+    fn too_many_authentication_failures_points_at_the_sign_in_setting() {
+        let stderr = "Received disconnect from 192.168.31.7 port 9162:2: Too many authentication failures\nDisconnected from 192.168.31.7 port 9162";
+        for unasked in [true, false] {
+            let FailKind::Other { reason } = classify_failure(Some(255), stderr, None, unasked, None) else {
+                panic!("expected Other");
+            };
+            assert!(
+                reason.contains("too many failed sign-in tries") && reason.contains("Password or SSH key"),
+                "{reason}"
+            );
+        }
     }
 
     #[test]

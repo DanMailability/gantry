@@ -81,7 +81,13 @@ fn setup(profile: &str, fake: Fake) -> Env {
 }
 
 fn spec() -> SshHostSpec {
-    SshHostSpec { name: "devbox-name".into(), target: "devbox".into(), command: "gantry".into(), share: None }
+    SshHostSpec {
+        name: "devbox-name".into(),
+        target: "devbox".into(),
+        command: "gantry".into(),
+        auth: Default::default(),
+        share: None,
+    }
 }
 
 fn sh(script: &str) -> SpawnRequest {
@@ -367,6 +373,7 @@ fn remote_spec(env: &Env, command: &str) -> SshHostSpec {
         name: "devbox-name".into(),
         target: "devbox".into(),
         command: env.path(command).display().to_string(),
+        auth: Default::default(),
         share: None,
     }
 }
