@@ -227,6 +227,24 @@ impl HostState {
     }
 }
 
+/// The loader's "error while loading shared libraries" line in `stderr`, with the Ubuntu/Debian package for the
+/// libraries Gantry links. Gantry is there but cannot start (the loader exits 127 too).
+fn missing_library(stderr: &str) -> Option<String> {
+    let line = stderr.lines().find(|line| line.contains("error while loading shared libraries"))?;
+    let library = line.split("shared libraries:").nth(1)?.trim().split(':').next()?.trim();
+    let package = match library {
+        "libasound.so.2" => Some("libasound2 (libasound2t64 on Ubuntu 24.04)"),
+        "libxkbcommon-x11.so.0" => Some("libxkbcommon-x11-0"),
+        "libxkbcommon.so.0" => Some("libxkbcommon0"),
+        "libxcb.so.1" => Some("libxcb1"),
+        _ => None,
+    };
+    Some(match package {
+        Some(package) => format!("Gantry cannot start on the host: {library} is missing. Install {package} there."),
+        None => format!("Gantry cannot start on the host: {library} is missing."),
+    })
+}
+
 /// Read a failed attempt. `exit_code`: ssh's exit status when it ended by itself; `stderr`: what it printed;
 /// `version_mismatch`: the remote daemon's protocol version when the handshake said it differs;
 /// `interactive_unasked`: the attempt was interactive and ssh never asked a question (so "Permission denied" is not
@@ -243,6 +261,9 @@ pub fn classify_failure(
     }
     let lower = stderr.to_lowercase();
     if exit_code == Some(127) {
+        if let Some(reason) = missing_library(stderr) {
+            return FailKind::Other { reason };
+        }
         return FailKind::NotInstalled;
     }
     if lower.contains("remote host identification has changed") {
@@ -469,6 +490,27 @@ mod tests {
             classify_failure(Some(255), stderr, None, false, None),
             FailKind::Other { reason: "The host key of the host changed. Check ~/.ssh/known_hosts.".into() }
         );
+    }
+
+    #[test]
+    fn a_missing_shared_library_is_named_with_its_package_not_called_not_installed() {
+        let stderr = "/home/me/.local/bin/gantry: error while loading shared libraries: libxkbcommon-x11.so.0: cannot open shared object file: No such file or directory";
+        let FailKind::Other { reason } = classify_failure(Some(127), stderr, None, false, None) else {
+            panic!("expected Other");
+        };
+        assert!(reason.contains("libxkbcommon-x11.so.0"), "{reason}");
+        assert!(reason.contains("libxkbcommon-x11-0"), "{reason}");
+        let alsa = stderr.replace("libxkbcommon-x11.so.0", "libasound.so.2");
+        let FailKind::Other { reason } = classify_failure(Some(127), &alsa, None, false, None) else {
+            panic!("expected Other");
+        };
+        assert!(reason.contains("libasound2"), "{reason}");
+        let unknown = stderr.replace("libxkbcommon-x11.so.0", "libfoo.so.1");
+        let FailKind::Other { reason } = classify_failure(Some(127), &unknown, None, false, None) else {
+            panic!("expected Other");
+        };
+        assert!(reason.contains("libfoo.so.1") && !reason.contains("install "), "{reason}");
+        assert_eq!(classify_failure(Some(127), "sh: gantry: not found", None, false, None), FailKind::NotInstalled);
     }
 
     #[test]

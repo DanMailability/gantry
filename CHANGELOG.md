@@ -10,6 +10,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 - SSH hosts that need a password: the sign-in dialog now appears. Real ssh calls the helper with just the prompt, which Gantry did not recognise, so ssh gave up with "Permission denied" and no question.
+- A host where Gantry is installed but cannot start because a system library is missing (for example `libasound2` or `libxkbcommon-x11-0`) now says which library and package, instead of "A command was not found on the host".
 
 ## [0.4.0] - 2026-10-08
 
