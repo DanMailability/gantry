@@ -717,6 +717,7 @@ mod tests {
             speaker: Speaker::You,
             snippet: text.into(),
             highlights,
+            host: HostId::local(),
         }
     }
 

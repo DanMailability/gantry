@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::host::HostId;
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -270,8 +270,24 @@ pub enum ClientMessage {
         /// Most sessions to return.
         limit: u32,
     },
+    /// List the folders in `path` (absolute, or starting with `~`); answered by `DirListing` or `DirListingFailed`.
+    ListDir {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// The folder to list.
+        path: String,
+    },
     /// Terminate every pane and stop the daemon (frozen).
     StopAll,
+}
+
+/// One folder in a `DirListing`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    /// The folder's name (no path).
+    pub name: String,
+    /// It is a symlink to a folder.
+    pub symlink: bool,
 }
 
 /// Who wrote the message a search hit shows.
@@ -297,6 +313,9 @@ pub struct SearchHit {
     pub snippet: String,
     /// Byte ranges of `snippet` that matched (start inclusive, end exclusive), in order.
     pub highlights: Vec<(u32, u32)>,
+    /// The host whose daemon found it. The GUI sets this; it never travels on the wire.
+    #[serde(skip)]
+    pub host: HostId,
 }
 
 /// Daemon → GUI.
@@ -405,6 +424,22 @@ pub enum DaemonMessage {
     /// Conversation search does not work in this daemon run.
     SearchUnavailable {
         /// Why (also in the daemon log).
+        reason: String,
+    },
+    /// The answer to `ListDir`: the folders in the expanded path.
+    DirListing {
+        /// Echoed request id.
+        request: u64,
+        /// The expanded absolute path.
+        path: String,
+        /// Its folders, sorted, at most 500.
+        dirs: Vec<DirEntry>,
+    },
+    /// `ListDir` failed.
+    DirListingFailed {
+        /// Echoed request id.
+        request: u64,
+        /// Why, readable.
         reason: String,
     },
     /// Another GUI connected; this connection is closed next.
@@ -649,7 +684,27 @@ mod tests {
         assert_eq!((spec.claude, spec.env.len(), spec.scrollback), (false, 0, None));
         let pane = r#"{"pane":1,"program":"sh","args":[],"cwd":"/","last_focused":0}"#;
         assert!(!serde_json::from_str::<PaneInfo>(pane).unwrap().claude);
-        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(PROTOCOL_VERSION, 8);
+    }
+
+    #[test]
+    fn list_dir_messages_round_trip() {
+        let request = ClientMessage::ListDir { request: 7, path: "~/projects".into() };
+        assert_eq!(serde_json::from_str::<ClientMessage>(&serde_json::to_string(&request).unwrap()).unwrap(), request);
+        let replies = [
+            DaemonMessage::DirListing {
+                request: 7,
+                path: "/home/me/projects".into(),
+                dirs: vec![
+                    DirEntry { name: "app".into(), symlink: false },
+                    DirEntry { name: "link".into(), symlink: true },
+                ],
+            },
+            DaemonMessage::DirListingFailed { request: 7, reason: "No such file or directory".into() },
+        ];
+        for reply in replies {
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&serde_json::to_string(&reply).unwrap()).unwrap(), reply);
+        }
     }
 
     #[test]
@@ -664,6 +719,7 @@ mod tests {
             speaker: Speaker::Claude,
             snippet: "the font fallback".into(),
             highlights: vec![(4, 8), (9, 17)],
+            host: HostId::local(),
         };
         for reply in [
             DaemonMessage::SearchResults { request: 4, hits: vec![hit] },
