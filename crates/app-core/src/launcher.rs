@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use protocol::host::{HostId, project_key, split_project_key};
 use protocol::message::SessionInfo;
 
 use crate::fuzzy::Fuzzy;
@@ -12,6 +13,8 @@ use crate::session_tree::{Tone, display_path};
 /// A pane of the workspace, as the launcher sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenPane {
+    /// The host it runs on.
+    pub host: HostId,
     /// Directory it was started in.
     pub cwd: PathBuf,
     /// It runs Claude Code (else a shell).
@@ -23,6 +26,8 @@ pub struct OpenPane {
 /// A folder with live panes in the workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenFolder {
+    /// The host it is on.
+    pub host: HostId,
     /// The folder.
     pub path: PathBuf,
     /// The most urgent tone among its Claude panes; `None` when it has only shells.
@@ -55,14 +60,20 @@ fn urgency(tone: Tone) -> u8 {
     }
 }
 
-/// One entry per folder, in the order the folders first appear in `panes`.
+/// One entry per folder on a host, in the order they first appear in `panes`.
 pub fn open_folders(panes: &[OpenPane]) -> Vec<OpenFolder> {
     let mut folders: Vec<OpenFolder> = Vec::new();
     for pane in panes {
-        let at = match folders.iter().position(|folder| folder.path == pane.cwd) {
+        let at = match folders.iter().position(|folder| folder.host == pane.host && folder.path == pane.cwd) {
             Some(at) => at,
             None => {
-                folders.push(OpenFolder { path: pane.cwd.clone(), tone: None, claude_panes: 0, shell_panes: 0 });
+                folders.push(OpenFolder {
+                    host: pane.host.clone(),
+                    path: pane.cwd.clone(),
+                    tone: None,
+                    claude_panes: 0,
+                    shell_panes: 0,
+                });
                 folders.len() - 1
             }
         };
@@ -133,16 +144,47 @@ pub fn step(items: &[LauncherItem], from: usize, down: bool) -> usize {
     found.map_or(from, |(index, _)| index)
 }
 
+/// The key a favorite on `host` is saved under in the settings: the folder itself for this machine,
+/// `ssh://<host>/<folder>` otherwise.
+pub fn favorite_key(host: &HostId, dir: &Path) -> PathBuf {
+    project_key(host, dir)
+}
+
+/// The favorites that can be shown: those of this machine and of hosts in `known_hosts`.
+pub fn visible_favorites(favorites: &[PathBuf], known_hosts: &[HostId]) -> Vec<PathBuf> {
+    favorites
+        .iter()
+        .filter(|favorite| {
+            let (host, _) = split_project_key(favorite);
+            host.is_local() || known_hosts.contains(&host)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Open folders (under "Open now", filtered by the query, in the given order), then favorites (settings order,
 /// filtered), then existing session directories (each once, by match score then recency), none of them an open
 /// folder. The "Favorites and recent" header appears only when "Open now" is shown and other directories follow.
+/// Only what belongs to `host` is listed: its open folders, its sessions' directories and the favorites saved for it
+/// (see [`favorite_key`]); a remote host's folders are not checked on this machine.
 pub fn items(
     open: &[OpenFolder],
     sessions: &[&SessionInfo],
     query: &str,
     home: Option<&Path>,
     favorites: &[PathBuf],
+    host: &HostId,
 ) -> Vec<LauncherItem> {
+    let remote = !host.is_local();
+    let open: Vec<&OpenFolder> = open.iter().filter(|folder| folder.host == *host).collect();
+    let sessions: Vec<&&SessionInfo> = sessions.iter().filter(|session| session.host == *host).collect();
+    let favorites: Vec<PathBuf> = favorites
+        .iter()
+        .filter_map(|favorite| {
+            let (favorite_host, path) = split_project_key(favorite);
+            (favorite_host == *host).then_some(path)
+        })
+        .collect();
     let is_open = |path: &Path| open.iter().any(|folder| folder.path == path);
     let mut latest: HashMap<&Path, u64> = HashMap::new();
     for session in sessions.iter().filter(|s| s.cwd_exists) {
@@ -159,10 +201,10 @@ pub fn items(
     let open_items: Vec<LauncherItem> = open
         .iter()
         .filter(|folder| fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&display_path(&folder.path, home)).is_some()))
-        .map(|folder| LauncherItem::Open(folder.clone()))
+        .map(|folder| LauncherItem::Open((*folder).clone()))
         .collect();
     let mut pinned: Vec<LauncherItem> = Vec::new();
-    for path in favorites {
+    for path in &favorites {
         if is_open(path) {
             continue;
         }
@@ -172,7 +214,7 @@ pub fn items(
         if fuzzy.as_mut().is_some_and(|fuzzy| fuzzy.score(&display_path(path, home)).is_none()) {
             continue;
         }
-        pinned.push(LauncherItem::Dir { path: path.clone(), favorite: true, exists: path.is_dir() });
+        pinned.push(LauncherItem::Dir { path: path.clone(), favorite: true, exists: remote || path.is_dir() });
     }
     let mut ranked: Vec<(&Path, u64, u32)> = latest
         .into_iter()
@@ -224,7 +266,7 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
-            host: protocol::host::HostId::local(),
+            host: HostId::local(),
         }
     }
 
@@ -243,7 +285,7 @@ mod tests {
     fn recent_directories_come_first_once_each() {
         let sessions = [info("/a", 10, true), info("/b", 30, true), info("/a", 50, true), info("/gone", 99, false)];
         let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        assert_eq!(dirs(&items(&[], &refs, "", None, &[])), vec!["/a", "/b"]);
+        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &HostId::local())), vec!["/a", "/b"]);
     }
 
     // Unix-style paths: Windows joins them with `\`.
@@ -253,10 +295,13 @@ mod tests {
         let sessions = [info("/home/me/code/devops", 50, true), info("/home/me/Private/rust_terminal", 10, true)];
         let refs: Vec<&SessionInfo> = sessions.iter().collect();
         let home = Some(Path::new("/home/me"));
-        assert_eq!(dirs(&items(&[], &refs, "rust", home, &[])), vec!["/home/me/Private/rust_terminal"]);
-        assert_eq!(dirs(&items(&[], &refs, "~/code", home, &[])), vec!["/home/me/code/devops"]);
-        assert_eq!(dirs(&items(&[], &refs, "zzz", home, &[])), Vec::<&str>::new());
-        assert_eq!(dirs(&items(&[], &[], "", home, &[])), Vec::<&str>::new());
+        assert_eq!(
+            dirs(&items(&[], &refs, "rust", home, &[], &HostId::local())),
+            vec!["/home/me/Private/rust_terminal"]
+        );
+        assert_eq!(dirs(&items(&[], &refs, "~/code", home, &[], &HostId::local())), vec!["/home/me/code/devops"]);
+        assert_eq!(dirs(&items(&[], &refs, "zzz", home, &[], &HostId::local())), Vec::<&str>::new());
+        assert_eq!(dirs(&items(&[], &[], "", home, &[], &HostId::local())), Vec::<&str>::new());
     }
 
     fn favs(items: &[LauncherItem]) -> Vec<(String, bool, bool)> {
@@ -275,7 +320,7 @@ mod tests {
         let sessions = [info("/a", 10, true), info("/b", 30, true), info(here.to_str().unwrap(), 5, true)];
         let refs: Vec<&SessionInfo> = sessions.iter().collect();
         let favorites = [PathBuf::from("/b"), here.clone(), PathBuf::from("/b")];
-        let list = items(&[], &refs, "", None, &favorites);
+        let list = items(&[], &refs, "", None, &favorites, &HostId::local());
         assert_eq!(
             favs(&list),
             vec![
@@ -293,19 +338,19 @@ mod tests {
         let home = Some(Path::new("/home/me"));
         let favorites = [PathBuf::from("/home/me/Private/rust_terminal"), PathBuf::from("/home/me/work/ops")];
         assert_eq!(
-            favs(&items(&[], &refs, "rust", home, &favorites)),
+            favs(&items(&[], &refs, "rust", home, &favorites, &HostId::local())),
             vec![("/home/me/Private/rust_terminal".to_string(), true, false)]
         );
-        assert_eq!(favs(&items(&[], &refs, "", home, &favorites)).len(), 3);
-        assert_eq!(favs(&items(&[], &refs, "zzz", home, &favorites)), vec![]);
+        assert_eq!(favs(&items(&[], &refs, "", home, &favorites, &HostId::local())).len(), 3);
+        assert_eq!(favs(&items(&[], &refs, "zzz", home, &favorites, &HostId::local())), vec![]);
     }
 
     fn open(path: &str, tone: Option<Tone>, claude: usize, shell: usize) -> OpenFolder {
-        OpenFolder { path: path.into(), tone, claude_panes: claude, shell_panes: shell }
+        OpenFolder { host: HostId::local(), path: path.into(), tone, claude_panes: claude, shell_panes: shell }
     }
 
     fn pane(cwd: &str, claude: bool, tone: Tone) -> OpenPane {
-        OpenPane { cwd: cwd.into(), claude, tone }
+        OpenPane { host: HostId::local(), cwd: cwd.into(), claude, tone }
     }
 
     #[test]
@@ -341,7 +386,7 @@ mod tests {
         let sessions = [info("/a", 10, true), info("/b", 30, true)];
         let refs: Vec<&SessionInfo> = sessions.iter().collect();
         let open = [open("/b", Some(Tone::Working), 1, 0)];
-        let list = items(&open, &refs, "", None, &[PathBuf::from("/b")]);
+        let list = items(&open, &refs, "", None, &[PathBuf::from("/b")], &HostId::local());
         assert_eq!(dirs(&list), vec!["# Open now", "open /b", "# Favorites and recent", "/a"]);
         assert_eq!(list[0], LauncherItem::Header { label: "Open now", count: Some(1) });
     }
@@ -349,11 +394,11 @@ mod tests {
     #[test]
     fn headers_appear_only_for_sections_that_exist() {
         let open = [open("/b", None, 0, 1)];
-        assert_eq!(dirs(&items(&open, &[], "", None, &[])), vec!["# Open now", "open /b"]);
+        assert_eq!(dirs(&items(&open, &[], "", None, &[], &HostId::local())), vec!["# Open now", "open /b"]);
         let sessions = [info("/a", 10, true)];
         let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        assert_eq!(dirs(&items(&[], &refs, "", None, &[])), vec!["/a"]);
-        assert!(items(&[], &[], "", None, &[]).is_empty());
+        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &HostId::local())), vec!["/a"]);
+        assert!(items(&[], &[], "", None, &[], &HostId::local()).is_empty());
     }
 
     #[cfg(unix)]
@@ -362,10 +407,10 @@ mod tests {
         let home = Some(Path::new("/home/me"));
         let open = [open("/home/me/code/devops", None, 0, 1), open("/home/me/Private/rust_terminal", None, 0, 1)];
         assert_eq!(
-            dirs(&items(&open, &[], "rust", home, &[])),
+            dirs(&items(&open, &[], "rust", home, &[], &HostId::local())),
             vec!["# Open now", "open /home/me/Private/rust_terminal"]
         );
-        assert!(items(&open, &[], "zzz", home, &[]).is_empty());
+        assert!(items(&open, &[], "zzz", home, &[], &HostId::local()).is_empty());
     }
 
     #[test]
@@ -373,7 +418,7 @@ mod tests {
         let open = [open("/b", None, 0, 1)];
         let sessions = [info("/a", 10, true)];
         let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let list = items(&open, &refs, "", None, &[]); // header, open, header, dir
+        let list = items(&open, &refs, "", None, &[], &HostId::local()); // header, open, header, dir
         assert_eq!(first_selectable(&list), 1);
         assert_eq!(step(&list, 1, true), 3);
         assert_eq!(step(&list, 3, false), 1);
@@ -381,5 +426,52 @@ mod tests {
         assert_eq!(step(&list, 1, false), 1);
         assert_eq!(first_selectable(&[]), 0);
         assert_eq!(step(&[], 0, true), 0);
+    }
+
+    fn remote_info(cwd: &str, last_active_ms: u64) -> SessionInfo {
+        SessionInfo { host: HostId::named("devbox"), ..info(cwd, last_active_ms, true) }
+    }
+
+    #[test]
+    fn a_remote_launcher_lists_only_that_hosts_folders() {
+        let sessions = [remote_info("/r/app", 10), info("/l/app", 20, true)];
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let devbox = HostId::named("devbox");
+        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &devbox)), vec!["/r/app"]);
+        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &HostId::local())), vec!["/l/app"]);
+        let open = [OpenFolder { host: devbox.clone(), ..open("/r/w", None, 0, 1) }, open("/l/w", None, 0, 1)];
+        assert_eq!(dirs(&items(&open, &[], "", None, &[], &devbox)), vec!["# Open now", "open /r/w"]);
+    }
+
+    #[test]
+    fn favorites_are_decoded_per_host() {
+        let favorites = [PathBuf::from("/a"), PathBuf::from("ssh://devbox/work")];
+        assert_eq!(
+            favs(&items(&[], &[], "", None, &favorites, &HostId::local())),
+            vec![("/a".to_string(), true, false)]
+        );
+        assert_eq!(
+            favs(&items(&[], &[], "", None, &favorites, &HostId::named("devbox"))),
+            vec![("/work".to_string(), true, true)]
+        );
+        assert_eq!(favorite_key(&HostId::named("devbox"), Path::new("/work")), PathBuf::from("ssh://devbox/work"));
+        assert_eq!(favorite_key(&HostId::local(), Path::new("/a")), PathBuf::from("/a"));
+    }
+
+    #[test]
+    fn favorites_of_removed_hosts_are_hidden() {
+        let favorites = [PathBuf::from("ssh://gone/x"), PathBuf::from("/a"), PathBuf::from("ssh://devbox/y")];
+        assert_eq!(
+            visible_favorites(&favorites, &[HostId::named("devbox")]),
+            vec![PathBuf::from("/a"), PathBuf::from("ssh://devbox/y")]
+        );
+    }
+
+    #[test]
+    fn open_folders_group_by_host() {
+        let remote = OpenPane { host: HostId::named("devbox"), ..pane("/a", true, Tone::Idle) };
+        let folders = open_folders(&[pane("/a", true, Tone::Idle), remote]);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[1].host, HostId::named("devbox"));
     }
 }

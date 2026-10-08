@@ -2,6 +2,7 @@
 
 pub mod attention;
 pub mod bidi;
+pub mod dir_complete;
 pub mod fuzzy;
 pub mod host_install;
 pub mod host_state;

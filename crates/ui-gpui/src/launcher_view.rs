@@ -13,6 +13,7 @@ use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, Render,
     ScrollStrategy, Stateful, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
 };
+use protocol::host::HostId;
 use protocol::message::SessionInfo;
 
 use crate::field;
@@ -108,7 +109,14 @@ impl LauncherView {
 
     fn refresh(&mut self) {
         let sessions: Vec<&SessionInfo> = self.sessions.iter().collect();
-        self.items = launcher::items(&self.open, &sessions, self.query.text(), self.home.as_deref(), &self.favorites);
+        self.items = launcher::items(
+            &self.open,
+            &sessions,
+            self.query.text(),
+            self.home.as_deref(),
+            &self.favorites,
+            &HostId::local(),
+        );
         self.selected = launcher::first_selectable(&self.items);
     }
 

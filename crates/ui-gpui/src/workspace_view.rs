@@ -2229,6 +2229,7 @@ impl WorkspaceView {
                     .and_then(|session| sessions.get(&leaf.host, session))
                     .and_then(|info| info.status.as_ref());
                 Some(OpenPane {
+                    host: leaf.host.clone(),
                     cwd: leaf.launch.cwd.clone(),
                     claude: leaf.launch.is_claude(),
                     tone: status_tone(status, self.unseen_of(id)),
