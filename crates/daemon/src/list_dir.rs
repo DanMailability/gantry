@@ -7,6 +7,12 @@ use protocol::message::DirEntry;
 /// Most folders one answer holds.
 const MAX_ENTRIES: usize = 500;
 
+/// The error as text without its OS code ("Permission denied", not "Permission denied (os error 13)").
+fn reason(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    text.split(" (os error").next().unwrap_or(&text).to_string()
+}
+
 /// List the folders in `path` (absolute, or starting with `~` which `home` replaces): sorted case-insensitively with
 /// names starting with `.` last, cut at 500. Returns the expanded path too, or why the listing failed.
 pub fn list_dir(path: &str, home: Option<&Path>) -> Result<(PathBuf, Vec<DirEntry>), String> {
@@ -19,7 +25,7 @@ pub fn list_dir(path: &str, home: Option<&Path>) -> Result<(PathBuf, Vec<DirEntr
         return Err(REFUSED.into());
     }
     let mut dirs = Vec::new();
-    for entry in std::fs::read_dir(&expanded).map_err(|error| error.to_string())?.flatten() {
+    for entry in std::fs::read_dir(&expanded).map_err(|error| reason(&error))?.flatten() {
         let Ok(kind) = entry.file_type() else { continue };
         let symlink = kind.is_symlink();
         let is_dir =
@@ -81,11 +87,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("f");
         std::fs::write(&file, "").unwrap();
-        assert!(list_dir(file.to_str().unwrap(), None).is_err());
-        assert!(list_dir(tmp.path().join("missing").to_str().unwrap(), None).is_err());
+        let reason = list_dir(file.to_str().unwrap(), None).unwrap_err();
+        assert!(reason.to_lowercase().contains("not a directory") && !reason.contains("os error"), "{reason}");
+        let reason = list_dir(tmp.path().join("missing").to_str().unwrap(), None).unwrap_err();
+        assert!(reason.to_lowercase().contains("no such file") && !reason.contains("os error"), "{reason}");
         let refused = Err("give an absolute path or start with ~".to_string());
         assert_eq!(list_dir("relative/dir", None), refused);
         assert_eq!(list_dir("", None), refused);
+    }
+
+    // Unix permissions; a root user can read the folder anyway, so the test then has nothing to check.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_without_permission_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = list_dir(locked.to_str().unwrap(), None);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Err(reason) = result else { return };
+        assert!(reason.to_lowercase().contains("permission denied") && !reason.contains("os error"), "{reason}");
     }
 
     #[test]
