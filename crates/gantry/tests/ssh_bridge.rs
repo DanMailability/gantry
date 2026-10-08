@@ -8,7 +8,9 @@ use app_core::host_state::FailKind;
 use daemon::askpass::{AskAnswer, AskPrompt};
 use daemon::client::ClientEvent;
 use daemon::remote_install::{self, Timeouts};
-use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, SshHostSpec, connect as connect_with};
+use daemon::ssh::{
+    Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, Share, SshHostSpec, connect as connect_with, ssh_args_for,
+};
 use protocol::message::SpawnRequest;
 
 const GANTRY: &str = env!("CARGO_BIN_EXE_gantry");
@@ -79,7 +81,7 @@ fn setup(profile: &str, fake: Fake) -> Env {
 }
 
 fn spec() -> SshHostSpec {
-    SshHostSpec { name: "devbox-name".into(), target: "devbox".into(), command: "gantry".into() }
+    SshHostSpec { name: "devbox-name".into(), target: "devbox".into(), command: "gantry".into(), share: None }
 }
 
 fn sh(script: &str) -> SpawnRequest {
@@ -341,6 +343,7 @@ fn remote_spec(env: &Env, command: &str) -> SshHostSpec {
         name: "devbox-name".into(),
         target: "devbox".into(),
         command: env.path(command).display().to_string(),
+        share: None,
     }
 }
 
@@ -595,4 +598,51 @@ fn stop_remote_daemon_works_when_the_daemon_answers_version_mismatch() {
     )
     .expect("a daemon of another protocol still stops");
     assert_eq!(std::fs::read(env.path("received.bin")).unwrap(), expected, "Hello, then the frozen StopAll");
+}
+
+#[test]
+fn a_share_adds_exactly_the_control_master_options_before_the_target() {
+    let share = Share::at("/run/user/1000/gantry-default/cm-0a1b2c3d".into());
+    let mut spec = spec();
+    let plain = ssh_args_for(&spec, false, "true");
+    assert!(!plain.iter().any(|arg| arg.contains("Control")), "{plain:?}");
+    spec.share = Some(share);
+    let shared = ssh_args_for(&spec, false, "true");
+    let dash = shared.iter().position(|arg| arg == "--").unwrap();
+    let expected: Vec<String> = [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=/run/user/1000/gantry-default/cm-0a1b2c3d",
+        "-o",
+        "ControlPersist=60",
+    ]
+    .map(String::from)
+    .into();
+    let at = shared.windows(6).position(|window| window == expected.as_slice()).expect("the three options together");
+    assert!(at + 6 <= dash, "before the target: {shared:?}");
+    assert_eq!(shared.iter().filter(|arg| arg.starts_with("Control")).count(), 3);
+    assert!(!shared.iter().any(|arg| arg == "BatchMode=yes"), "the first connection of a share may ask");
+    let background = ssh_args_for(&spec, true, "true");
+    assert!(background.iter().any(|arg| arg == "BatchMode=yes"), "a retry never prompts, shared or not");
+}
+
+#[test]
+fn closing_a_share_asks_the_master_to_exit_or_stop_and_removes_the_socket_only_on_exit() {
+    let env = setup("sshshare1", Fake::default());
+    let recorder = env.path("record-ssh");
+    write_script(&recorder, &format!("#!/bin/sh\necho \"$@\" >> '{}'\n", env.path("calls").display()));
+    let socket = env.path("run/cm-test");
+    std::fs::write(&socket, "").unwrap();
+    let share = Share::at(socket.clone());
+    share.close(recorder.to_str().unwrap(), "me@devbox", true);
+    assert!(socket.exists(), "a stop leaves the socket to the master");
+    share.close(recorder.to_str().unwrap(), "me@devbox", false);
+    assert!(!socket.exists(), "an exit removes it");
+    let calls = std::fs::read_to_string(env.path("calls")).unwrap();
+    let path = socket.display();
+    assert_eq!(
+        calls,
+        format!("-O stop -o ControlPath={path} -- me@devbox\n-O exit -o ControlPath={path} -- me@devbox\n")
+    );
 }

@@ -13,7 +13,7 @@ use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshHost};
 use app_core::ssh_config::{aliases, validate_name, validate_target, wildcard_match};
 use app_core::text_field::TextField;
 use daemon::askpass::AskPrompt;
-use daemon::ssh::{AttemptHandle, SshHostSpec};
+use daemon::ssh::{AttemptHandle, Share, SshHostSpec};
 use gpui::{
     App, ClickEvent, Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement,
     KeyDownEvent, Render, SharedString, Stateful, Task, Window, div, prelude::*, px, rgb,
@@ -69,6 +69,8 @@ pub(crate) struct SshWizard {
     start: WizardStart,
     step: Step,
     questions: Questions,
+    /// The ssh connection every step of this run shares, so a password is asked once.
+    share: Option<Share>,
     /// The names of the saved hosts (a new name must differ).
     existing: Vec<String>,
     aliases: Vec<String>,
@@ -108,6 +110,7 @@ impl Drop for SshWizard {
         if let Some((handle, _)) = &self.job {
             handle.cancel();
         }
+        self.close_share();
     }
 }
 
@@ -199,6 +202,7 @@ impl SshWizard {
             aliases: if start == WizardStart::Add { ssh_config_aliases() } else { Vec::new() },
             start,
             step,
+            share: Share::new(&runtime_dir),
             questions: Questions { prompts, runtime_dir },
             existing,
             target: text(&target),
@@ -237,6 +241,20 @@ impl SshWizard {
             name: self.draft_name(),
             target: self.target.text().trim().to_string(),
             command: self.command.text().trim().to_string(),
+            share: self.share.clone(),
+        }
+    }
+
+    /// Hand the shared connection over (to the final connect); the wizard no longer closes it.
+    pub(crate) fn take_share(&mut self) -> Option<Share> {
+        self.share.take()
+    }
+
+    /// Close the shared connection's master (best effort, off the UI thread).
+    fn close_share(&mut self) {
+        if let Some(share) = self.share.take() {
+            let target = self.target.text().trim().to_string();
+            std::thread::spawn(move || share.close("ssh", &target, false));
         }
     }
 
@@ -386,6 +404,7 @@ impl SshWizard {
         if let Some((handle, _)) = self.job.take() {
             handle.cancel();
         }
+        self.close_share();
         cx.emit(WizardEvent::Closed { draft: self.draft_name() });
     }
 

@@ -22,7 +22,7 @@ use daemon::askpass::AskPrompt;
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
 use daemon::paths::{Paths, current_profile};
-use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, SshHostSpec, connect as ssh_connect};
+use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, Share, SshHostSpec, connect as ssh_connect};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
@@ -244,6 +244,8 @@ pub struct WorkspaceView {
     recents: Option<(Entity<RecentsView>, Subscription)>,
     /// The open setup wizard overlay.
     setup: Option<(Entity<SetupView>, Subscription)>,
+    /// The shared ssh connection a wizard handed to a host's next interactive connect (closed after it).
+    shares: HashMap<HostId, Share>,
     /// Hosts whose daemon was just stopped for an update: how many more times a connect that meets the old daemon
     /// (VersionMismatch) is tried again before the card is shown.
     restart_retries: HashMap<HostId, u8>,
@@ -444,6 +446,7 @@ impl WorkspaceView {
             launcher: None,
             recents: None,
             setup: None,
+            shares: HashMap::new(),
             restart_retries: HashMap::new(),
             ssh_wizard: None,
             settings: None,
@@ -611,6 +614,18 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Close the shared ssh connection kept for `host`'s connect, if any: `keep_sessions` after a good connect (the
+    /// daemon connection runs through it and keeps it), else it exits now.
+    fn close_share(&mut self, host: &HostId, keep_sessions: bool) {
+        let Some(share) = self.shares.remove(host) else { return };
+        let Some(entry) = self.ssh_hosts.iter().find(|entry| entry.name == host.name()) else {
+            std::thread::spawn(move || share.close("ssh", "", keep_sessions));
+            return;
+        };
+        let target = entry.target.clone();
+        std::thread::spawn(move || share.close("ssh", &target, keep_sessions));
+    }
+
     /// Take down `host`'s open sign-in dialog and drop its queued questions (each is answered Cancel).
     fn withdraw_questions(&mut self, host: &HostId, cx: &mut Context<Self>) {
         self.askpass_queue.retain(|prompt| prompt.host != host.name());
@@ -628,6 +643,7 @@ impl WorkspaceView {
         if let Some((_, handle)) = self.attempts.remove(host) {
             handle.cancel();
         }
+        self.close_share(host, false);
         self.withdraw_questions(host, cx);
         self.hosts.remove(host);
         for (id, leaf) in &self.workspace.leaves {
@@ -849,12 +865,14 @@ impl WorkspaceView {
             }
             Attempt::Background
         };
+        // Only a user's connect rides on a wizard's shared connection.
+        let share = if matches!(attempt, Attempt::Interactive { .. }) { self.shares.get(host).cloned() } else { None };
         let handle = AttemptHandle::default();
         self.next_attempt += 1;
         let number = self.next_attempt;
         self.attempts.insert(host.clone(), (number, handle.clone()));
         let (host, spec) =
-            (host.clone(), SshHostSpec { name: entry.name, target: entry.target, command: entry.command });
+            (host.clone(), SshHostSpec { name: entry.name, target: entry.target, command: entry.command, share });
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -877,6 +895,7 @@ impl WorkspaceView {
         }
         self.retries.remove(host);
         self.restart_retries.remove(host);
+        self.close_share(host, false);
         self.withdraw_questions(host, cx);
         self.set_host_state(host, state.next(HostEvent::Cancel), cx);
     }
@@ -896,7 +915,10 @@ impl WorkspaceView {
         }
         self.attempts.remove(host);
         match result {
-            Ok(connection) => self.host_connected(host, connection, window, cx),
+            Ok(connection) => {
+                self.close_share(host, true);
+                self.host_connected(host, connection, window, cx)
+            }
             Err(kind) => {
                 // Whatever ended it, a question of this attempt still on screen is stale.
                 self.withdraw_questions(host, cx);
@@ -918,6 +940,7 @@ impl WorkspaceView {
                     return;
                 }
                 self.restart_retries.remove(host);
+                self.close_share(host, false);
                 let next = self.host_state(host).next(HostEvent::AttemptFailed(kind));
                 self.set_host_state(host, next.clone(), cx);
                 if let HostState::Reconnecting { attempt } = next {
@@ -2303,6 +2326,11 @@ impl WorkspaceView {
                         return;
                     }
                     this.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
+                }
+                let share =
+                    this.ssh_wizard.as_ref().and_then(|(wizard, _)| wizard.update(cx, |wizard, _| wizard.take_share()));
+                if let Some(share) = share {
+                    this.shares.insert(HostId::named(&host.name), share);
                 }
                 this.ssh_wizard = None;
                 if *restarted {

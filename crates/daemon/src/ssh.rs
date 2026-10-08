@@ -1,6 +1,6 @@
 //! The SSH transport: `ssh -T … -- <target> <command> bridge` as the stream of a daemon connection.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,71 @@ pub struct SshHostSpec {
     pub target: String,
     /// The remote Gantry binary, as the remote shell will run it.
     pub command: String,
+    /// A shared ssh connection (ControlMaster) to run through, so one sign-in serves several commands.
+    pub share: Option<Share>,
 }
+
+/// One ssh connection shared by the commands of a wizard run: the first command opens the master (and may ask),
+/// the others ride on it. Unix only (elsewhere there is no `Share`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Share {
+    path: PathBuf,
+}
+
+impl Share {
+    /// A share at control socket `path`.
+    pub fn at(path: PathBuf) -> Share {
+        Share { path }
+    }
+
+    /// A fresh share with a short control socket path in `runtime_dir` (the profile's 0700 dir); `None` where ssh
+    /// cannot multiplex (Windows).
+    pub fn new(runtime_dir: &Path) -> Option<Share> {
+        if !cfg!(unix) {
+            return None;
+        }
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+        let id =
+            nanos ^ std::process::id().rotate_left(16) ^ NEXT_SHARE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(Share { path: runtime_dir.join(format!("cm-{id:08x}")) })
+    }
+
+    /// The control socket.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Ask the master of `target` to stop (`keep_sessions`: it takes no new commands and goes when the running ones,
+    /// such as a daemon connection made through it, end) or to exit now (and remove the socket). Best effort: errors
+    /// are ignored, and it gives up on ssh after 5 s. Blocks.
+    pub fn close(&self, program: &str, target: &str, keep_sessions: bool) {
+        let action = if keep_sessions { "stop" } else { "exit" };
+        let child = std::process::Command::new(program)
+            .args(["-O", action, "-o"])
+            .arg(format!("ControlPath={}", self.path.display()))
+            .args(["--", target])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while matches!(child.try_wait(), Ok(None)) {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if !keep_sessions {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+static NEXT_SHARE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// How long the handshake (`Welcome` and `Panes`) may take once ssh runs.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -67,6 +131,16 @@ pub fn ssh_args_for(spec: &SshHostSpec, background: bool, remote_command: &str) 
             .collect();
     if background {
         args.extend(["-o".into(), "BatchMode=yes".into()]);
+    }
+    if let Some(share) = &spec.share {
+        args.extend([
+            "-o".into(),
+            "ControlMaster=auto".into(),
+            "-o".into(),
+            format!("ControlPath={}", share.path.display()),
+            "-o".into(),
+            "ControlPersist=60".into(),
+        ]);
     }
     args.extend(["--".into(), spec.target.clone(), remote_command.to_string()]);
     args
@@ -268,7 +342,12 @@ mod tests {
     use super::*;
 
     fn spec() -> SshHostSpec {
-        SshHostSpec { name: "devbox".into(), target: "me@devbox".into(), command: "~/.local/bin/gantry".into() }
+        SshHostSpec {
+            name: "devbox".into(),
+            target: "me@devbox".into(),
+            command: "~/.local/bin/gantry".into(),
+            share: None,
+        }
     }
 
     #[test]
