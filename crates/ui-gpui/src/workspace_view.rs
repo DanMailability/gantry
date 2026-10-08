@@ -809,6 +809,7 @@ impl WorkspaceView {
     fn set_host_state(&mut self, host: &HostId, state: HostState, cx: &mut Context<Self>) {
         self.host_states.insert(host.clone(), state);
         self.push_launcher_hosts(cx);
+        self.push_recents(cx);
         self.refresh_host_cards(host, cx);
         self.sync_panes(cx);
         cx.notify();
@@ -1132,6 +1133,7 @@ impl WorkspaceView {
                     self.attention.reset(host, sessions);
                     let sessions = sessions.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
+                    self.push_recents(cx);
                     self.resume_finished(window, cx);
                 }
                 ClientEvent::SessionsChanged { upserted, removed } => {
@@ -2435,21 +2437,15 @@ impl WorkspaceView {
             return;
         }
         self.launcher = None;
-        let sessions: Vec<SessionInfo> = self
-            .sidebar
-            .read(cx)
-            .sessions()
-            .all()
-            .filter(|session| session.host.is_local() || self.client(&session.host).is_some())
-            .cloned()
-            .collect();
+        let sessions = self.recents_sessions(cx);
+        let offline = self.offline_hosts();
         let open: HashSet<(HostId, String)> = self
             .workspace
             .leaves
             .values()
             .filter_map(|leaf| Some((leaf.host.clone(), leaf.session.clone()?)))
             .collect();
-        let view = cx.new(|cx| RecentsView::new(sessions, open, project, cx));
+        let view = cx.new(|cx| RecentsView::new(sessions, open, project, offline, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &RecentsEvent, window, cx| {
             this.on_recents_event(event.clone(), window, cx)
         });
@@ -2457,6 +2453,30 @@ impl WorkspaceView {
         self.recents = Some((view, subscription));
         self.push_search_state(cx);
         cx.notify();
+    }
+
+    /// The sessions of this machine and of the connected hosts.
+    fn recents_sessions(&self, cx: &Context<Self>) -> Vec<SessionInfo> {
+        let sessions = self.sidebar.read(cx).sessions();
+        sessions
+            .all()
+            .filter(|session| session.host.is_local() || self.client(&session.host).is_some())
+            .cloned()
+            .collect()
+    }
+
+    /// Names of the SSH hosts that are not connected.
+    fn offline_hosts(&self) -> Vec<String> {
+        let away = |entry: &&SshHost| self.client(&HostId::named(&entry.name)).is_none();
+        self.ssh_hosts.iter().filter(away).map(|entry| entry.name.clone()).collect()
+    }
+
+    /// Give an open recent sessions pop-up the sessions of the hosts that are connected now.
+    fn push_recents(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.recents {
+            let (sessions, offline) = (self.recents_sessions(cx), self.offline_hosts());
+            view.update(cx, |view, cx| view.set_sessions(sessions, offline, cx));
+        }
     }
 
     /// The hosts conversation search asks: this machine, then the connected SSH hosts in settings order.
@@ -2478,7 +2498,10 @@ impl WorkspaceView {
     fn push_search_state(&self, cx: &mut Context<Self>) {
         if let Some((view, _)) = &self.recents {
             let merged = search_merge::merge(&self.search_order(), &self.search_answers);
-            view.update(cx, |view, cx| view.set_index_state(merged.progress, !merged.unavailable.is_empty(), cx));
+            view.update(cx, |view, cx| {
+                view.set_index_state(merged.progress, cx);
+                view.set_search_unavailable(merged.unavailable, cx);
+            });
         }
     }
 
@@ -2496,6 +2519,10 @@ impl WorkspaceView {
                         client.search(request, &query, SEARCH_LIMIT);
                     }
                 }
+                return;
+            }
+            RecentsEvent::Connect(host) => {
+                self.connect_host(&host, true, window, cx);
                 return;
             }
             RecentsEvent::Resume { host, session, cwd, split } => {
