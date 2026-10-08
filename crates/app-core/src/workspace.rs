@@ -1,7 +1,7 @@
 //! The GUI's workspace: tabs of split panes, what each pane runs, and reconciling a saved layout
 //! with the daemon's live panes at startup.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use protocol::host::{HostId, PaneKey};
@@ -512,14 +512,19 @@ impl Workspace {
         leaf
     }
 
+    /// Every host that has a leaf (live or parked aside at startup) or a daemon instance in this workspace.
+    pub fn host_names(&self) -> BTreeSet<HostId> {
+        let parked = self.dropped.iter().flat_map(|(_, leaves)| leaves.iter().map(|(_, leaf)| &leaf.host));
+        self.leaves.values().map(|leaf| &leaf.host).chain(parked).chain(self.instances.keys()).cloned().collect()
+    }
+
     /// Move `from`'s leaves and its daemon instance to the name `to` (a rename of an SSH host). Refused, changing
     /// nothing, when `to` still has leaves or an instance here (their panes would be mixed up with `from`'s).
     pub fn rename_host(&mut self, from: &HostId, to: &HostId) -> Result<(), String> {
         if from == to {
             return Ok(());
         }
-        let in_dropped = self.dropped.iter().any(|(_, leaves)| leaves.iter().any(|(_, leaf)| leaf.host == *to));
-        if self.instances.contains_key(to) || in_dropped || self.leaves.values().any(|leaf| leaf.host == *to) {
+        if self.host_names().contains(to) {
             return Err(format!("{} still has panes in the layout", to.name()));
         }
         let dropped = self.dropped.iter_mut().flat_map(|(_, leaves)| leaves.iter_mut().map(|(_, leaf)| leaf));
@@ -2327,5 +2332,18 @@ mod tests {
         assert!(ws.rename_host(&dev, &dev).is_ok(), "the same name is a no-op");
         assert_eq!(ws.instances[&dev], "r1");
         assert!(ws.leaves.values().any(|leaf| leaf.host == dev));
+    }
+
+    #[test]
+    fn a_host_only_in_the_parked_leaves_is_listed_and_blocks_a_rename() {
+        let (dev, old) = (HostId::named("dev"), HostId::named("old"));
+        let mut ws = Workspace::default();
+        ws.new_tab_on(shell("/a"), dev.clone());
+        let parked = Leaf { host: old.clone(), ..Leaf::new(shell("/b")) };
+        let tab = Tab { root: Node::Leaf(99), focused: 99, settings: false, name: None };
+        ws.dropped.push((tab, vec![(99, parked)]));
+        assert!(ws.host_names().contains(&old), "parked leaves count");
+        assert!(ws.rename_host(&dev, &old).is_err());
+        assert!(ws.leaves.values().all(|leaf| leaf.host == dev));
     }
 }

@@ -652,10 +652,19 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.ssh_hosts = cx.global::<SettingsStore>().settings().ssh_hosts.clone();
-        self.forget_host(from, cx);
+        // Refused before anything is touched: the old host stays connected.
         if let Err(error) = self.workspace.rename_host(from, to) {
             tracing::warn!("host rename refused: {error}");
             return;
+        }
+        self.forget_host(from, cx);
+        // The leaves already carry the new name: they lose the old connection too.
+        for (id, leaf) in &self.workspace.leaves {
+            if leaf.host == *to
+                && let Some(slot) = self.slots.get(id)
+            {
+                slot.view.update(cx, |view, _| view.set_client(None));
+            }
         }
         self.host_states.remove(from);
         if let Some(waiting) = self.queued.remove(from) {
@@ -721,10 +730,8 @@ impl WorkspaceView {
         let listed: HashSet<&str> = self.ssh_hosts.iter().map(|entry| entry.name.as_str()).collect();
         let taken: HashSet<String> = self
             .workspace
-            .leaves
-            .values()
-            .map(|leaf| &leaf.host)
-            .chain(self.workspace.instances.keys())
+            .host_names()
+            .into_iter()
             .filter(|host| !host.is_local() && !listed.contains(host.name()))
             .map(|host| host.name().to_string())
             .collect();
@@ -869,6 +876,7 @@ impl WorkspaceView {
             handle.cancel();
         }
         self.retries.remove(host);
+        self.restart_retries.remove(host);
         self.withdraw_questions(host, cx);
         self.set_host_state(host, state.next(HostEvent::Cancel), cx);
     }
