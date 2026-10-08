@@ -45,7 +45,7 @@ use crate::askpass_view::{AskpassEvent, AskpassView};
 use crate::assets::{CLOSE_ICON, LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
-use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherView};
+use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherHost, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
@@ -808,9 +808,18 @@ impl WorkspaceView {
     /// Record `host`'s state and show it on the host's panes.
     fn set_host_state(&mut self, host: &HostId, state: HostState, cx: &mut Context<Self>) {
         self.host_states.insert(host.clone(), state);
+        self.push_launcher_hosts(cx);
         self.refresh_host_cards(host, cx);
         self.sync_panes(cx);
         cx.notify();
+    }
+
+    /// Tell an open launcher where the hosts' connections stand.
+    fn push_launcher_hosts(&self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.launcher {
+            let hosts = self.launcher_hosts();
+            view.update(cx, |view, cx| view.set_hosts(hosts, cx));
+        }
     }
 
     /// Put the card of `host`'s state on every pane of the host (or take it off when connected).
@@ -1156,7 +1165,18 @@ impl WorkspaceView {
                     self.search_answers.entry(host.clone()).or_default().unavailable = true;
                     self.push_search_state(cx);
                 }
-                ClientEvent::DirListing { .. } | ClientEvent::DirListingFailed { .. } => {}
+                ClientEvent::DirListing { request, dirs, .. } => {
+                    if let Some((view, _)) = &self.launcher {
+                        let dirs = dirs.clone();
+                        view.update(cx, |view, cx| view.set_listing(*request, dirs, cx));
+                    }
+                }
+                ClientEvent::DirListingFailed { request, reason } => {
+                    if let Some((view, _)) = &self.launcher {
+                        let reason = reason.clone();
+                        view.update(cx, |view, cx| view.set_listing_failed(*request, reason, cx));
+                    }
+                }
                 ClientEvent::TakenOver if !host.is_local() => self.host_taken_over(host, cx),
                 ClientEvent::Disconnected if !host.is_local() => self.host_dropped(host, window, cx),
                 ClientEvent::TakenOver | ClientEvent::Disconnected => {
@@ -1833,7 +1853,7 @@ impl WorkspaceView {
                     self.open(claude, Some(axis));
                 }
             }
-            MenuAction::NewLocal { claude } => self.show_launcher(claude, window, cx),
+            MenuAction::NewLocal { claude } => self.show_launcher(claude, HostId::local(), window, cx),
             MenuAction::NewOnHost { host, claude } => {
                 self.new_session_on_host(&HostId::named(&host), claude, window, cx)
             }
@@ -2073,7 +2093,7 @@ impl WorkspaceView {
     /// A New button was pressed: the launcher, or first a list of `Local` and the SSH hosts.
     fn new_pressed(&mut self, claude: bool, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if self.ssh_hosts.is_empty() {
-            self.show_launcher(claude, window, cx);
+            self.show_launcher(claude, HostId::local(), window, cx);
             return;
         }
         let hosts: Vec<(String, String, HostDot)> = self
@@ -2249,7 +2269,7 @@ impl WorkspaceView {
     }
 
     fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_launcher(true, window, cx);
+        self.show_launcher(true, HostId::local(), window, cx);
     }
 
     /// The folders with live panes, in sidebar order, for the launcher's "Open now".
@@ -2279,15 +2299,31 @@ impl WorkspaceView {
         launcher::open_folders(&panes)
     }
 
-    /// Open the launcher; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
-    fn show_launcher(&mut self, claude_first: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// This machine and the SSH hosts as the launcher's host chip lists them.
+    fn launcher_hosts(&self) -> Vec<LauncherHost> {
+        let local = LauncherHost { id: HostId::local(), label: "Local".into(), dot: HostDot::Ok, connected: true };
+        let hosts = self.ssh_hosts.iter().map(|entry| {
+            let (id, state) = (HostId::named(&entry.name), self.host_state(&HostId::named(&entry.name)));
+            LauncherHost {
+                label: format!("{} · {}", entry.name, state.label()),
+                dot: state.dot(),
+                connected: self.client(&id).is_some(),
+                id,
+            }
+        });
+        if self.ssh_hosts.is_empty() { vec![local] } else { std::iter::once(local).chain(hosts).collect() }
+    }
+
+    /// Open the launcher on `host`; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
+    fn show_launcher(&mut self, claude_first: bool, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         if self.setup.is_some() || self.ssh_wizard.is_some() {
             return;
         }
         self.recents = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
         let open = self.open_folders(cx);
-        let view = cx.new(|cx| LauncherView::new(open, sessions, claude_first, cx));
+        let hosts = self.launcher_hosts();
+        let view = cx.new(|cx| LauncherView::new(open, sessions, claude_first, hosts, host, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &LauncherEvent, window, cx| {
             this.on_launcher_event(event.clone(), window, cx)
         });
@@ -2475,9 +2511,19 @@ impl WorkspaceView {
     }
 
     fn on_launcher_event(&mut self, event: LauncherEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let LauncherEvent::ListDir { host, request, path } = &event {
+            if let Some(client) = self.client(host) {
+                client.list_dir(*request, path);
+            }
+            return;
+        }
         self.launcher = None;
         match event {
-            LauncherEvent::Open { dir, claude, dir_pick } => self.open_launcher_pick(claude, dir, dir_pick, cx),
+            LauncherEvent::Open { host, dir, claude, .. } if !host.is_local() => {
+                self.open_on_host(&host, claude, dir, window, cx)
+            }
+            LauncherEvent::Open { dir, claude, dir_pick, .. } => self.open_launcher_pick(claude, dir, dir_pick, cx),
+            LauncherEvent::ListDir { .. } => {}
             LauncherEvent::Browse { claude, dir_pick } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions {
                     files: false,
