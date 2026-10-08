@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use app_core::dir_complete::{self, Completion};
+use app_core::dir_complete::{self, Completion, TabAction};
 use app_core::host_state::HostDot;
 use app_core::launcher::{self, LauncherItem, OpenFolder};
 use app_core::session_tree::display_path;
@@ -42,6 +42,8 @@ pub struct LauncherHost {
     pub dot: HostDot,
     /// The host's daemon is connected (always true for this machine).
     pub connected: bool,
+    /// Where its connection stands in a few words ("not connected", "disconnected", "needs sign-in", …).
+    pub state: String,
 }
 
 #[allow(missing_docs)]
@@ -106,8 +108,6 @@ pub struct LauncherView {
     host_chip_open: bool,
     /// The newest folder listing of the chosen host.
     completion: Completion,
-    /// The folder (as typed, with its trailing `/`) the newest listing request asked for.
-    requested_parent: String,
     /// The highlighted completion row; `None` = the typed path itself.
     completion_selected: Option<usize>,
     /// The pause before a listing request.
@@ -160,7 +160,6 @@ impl LauncherView {
             host: start,
             host_chip_open: false,
             completion: Completion::default(),
-            requested_parent: String::new(),
             completion_selected: None,
             list_task: None,
             scroll_completions: UniformListScrollHandle::new(),
@@ -182,15 +181,29 @@ impl LauncherView {
         self.selected = launcher::first_selectable(&self.items);
     }
 
-    /// Update the host chip's list (a connection changed).
+    /// Update the host chip's list (a connection changed). A chosen host that left the settings gives way to this
+    /// machine; one that just connected lists the typed path's parent again.
     pub fn set_hosts(&mut self, hosts: Vec<LauncherHost>, cx: &mut Context<Self>) {
+        let was_away = self.host_disconnected();
         self.hosts = hosts;
+        if !self.host.is_local() && !self.hosts.iter().any(|host| host.id == self.host) {
+            self.choose_host(HostId::local());
+        } else if was_away && !self.host_disconnected() {
+            self.completion = Completion::default();
+            self.typed_changed(cx);
+        }
+        self.refresh();
         cx.notify();
     }
 
     /// The chosen host is an SSH host whose daemon is not connected.
     fn host_disconnected(&self) -> bool {
         self.hosts.iter().any(|host| host.id == self.host && !host.connected)
+    }
+
+    /// Where the chosen host's connection stands, in a few words.
+    fn host_state(&self) -> &str {
+        self.hosts.iter().find(|host| host.id == self.host).map_or("not connected", |host| host.state.as_str())
     }
 
     /// A typed path on an SSH host (it starts with `/` or `~`) completes from the host; anything else filters the list.
@@ -210,7 +223,7 @@ impl LauncherView {
     /// Why the typed path's parent could not be listed, while it is the typed one.
     fn listing_error(&self) -> Option<&str> {
         let (parent, _) = dir_complete::split_typed(self.query.text());
-        self.completion.error.as_deref().filter(|_| self.path_mode() && self.requested_parent == parent)
+        self.completion.error.as_deref().filter(|_| self.path_mode() && self.completion.requested == parent)
     }
 
     /// Choose `host`: the query, the pick, the list and the completion start over.
@@ -220,7 +233,6 @@ impl LauncherView {
         self.query = TextField::default();
         self.pick = None;
         self.completion = Completion::default();
-        self.requested_parent.clear();
         self.completion_selected = None;
         self.list_task = None;
         self.refresh();
@@ -231,10 +243,7 @@ impl LauncherView {
         self.completion_selected = None;
         self.list_task = None;
         let (parent, _) = dir_complete::split_typed(self.query.text());
-        if !self.path_mode()
-            || !dir_complete::wants_listing(self.query.text(), &self.requested_parent)
-            || !self.completion.wants(&parent)
-        {
+        if !self.path_mode() || !self.completion.wants_request(self.query.text()) {
             return;
         }
         self.list_task = Some(cx.spawn(async move |this, cx| {
@@ -245,8 +254,7 @@ impl LauncherView {
 
     fn request_listing(&mut self, parent: String, cx: &mut Context<Self>) {
         let request = NEXT_LISTING.fetch_add(1, Ordering::Relaxed);
-        self.completion.request = request;
-        self.requested_parent = parent.clone();
+        self.completion.start_request(request, parent.clone());
         cx.emit(LauncherEvent::ListDir { host: self.host.clone(), request, path: parent });
     }
 
@@ -255,7 +263,7 @@ impl LauncherView {
         if request != self.completion.request {
             return;
         }
-        self.completion.accept_listing(request, self.requested_parent.clone(), dirs);
+        self.completion.accept_listing(request, dirs);
         self.completion_selected = None;
         cx.notify();
     }
@@ -266,7 +274,6 @@ impl LauncherView {
             return;
         }
         self.completion.accept_failure(request, reason);
-        self.completion.parent = self.requested_parent.clone();
         cx.notify();
     }
 
@@ -350,7 +357,22 @@ impl LauncherView {
         let keystroke = &event.keystroke;
         let path_mode = self.path_mode();
         match keystroke.key.as_str() {
-            "tab" if path_mode => self.accept_completion(self.completion_selected.unwrap_or(0), cx),
+            "tab" if path_mode => {
+                let rows = self.completions().len();
+                match dir_complete::tab_action(
+                    self.query.text(),
+                    &self.completion.requested,
+                    rows,
+                    self.completion_selected,
+                ) {
+                    TabAction::Accept(index) => self.accept_completion(index, cx),
+                    TabAction::Request(parent) => {
+                        self.list_task = None;
+                        self.request_listing(parent, cx);
+                    }
+                    TabAction::Nothing => {}
+                }
+            }
             "tab" if self.host.is_local() && self.dirs.dirs.len() > 1 => self.cycle_dir(keystroke.modifiers.shift),
             "tab" => {}
             "up" if path_mode => {
@@ -451,7 +473,8 @@ impl LauncherView {
         if let Some(reason) = self.listing_error() {
             return Some((reason.to_string(), true));
         }
-        self.host_disconnected().then(|| (format!("{} disconnected: Open connects again", self.host.name()), false))
+        self.host_disconnected()
+            .then(|| (format!("{} is {}: Open connects it", self.host.name(), self.host_state()), false))
     }
 
     /// One folder of the typed path's parent.
