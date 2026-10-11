@@ -24,6 +24,8 @@ pub struct SshHostSpec {
     pub command: String,
     /// How to sign in (adds ssh's options).
     pub auth: SshAuth,
+    /// The ssh port (`-p`); `None` = what ssh says.
+    pub port: Option<u16>,
     /// A shared ssh connection (ControlMaster) to run through, so one sign-in serves several commands.
     pub share: Option<Share>,
 }
@@ -136,6 +138,9 @@ pub fn ssh_args_for(spec: &SshHostSpec, background: bool, remote_command: &str) 
         args.extend(["-o".into(), "BatchMode=yes".into()]);
     }
     args.extend(spec.auth.ssh_options().iter().map(|option| option.to_string()));
+    if let Some(port) = spec.port {
+        args.extend(["-p".into(), port.to_string()]);
+    }
     if let Some(share) = &spec.share {
         args.extend([
             "-o".into(),
@@ -346,6 +351,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_port_is_passed_to_ssh_before_the_target() {
+        let args = ssh_args(&SshHostSpec { port: Some(2222), ..spec() }, false);
+        let at = args.iter().position(|arg| arg == "-p").expect("-p");
+        assert_eq!(args[at + 1], "2222");
+        assert!(at < args.iter().position(|arg| arg == "--").unwrap());
+        assert!(!ssh_args(&spec(), false).contains(&"-p".to_string()));
+    }
+
+    #[test]
     fn sign_in_methods_add_their_options_before_the_target() {
         let with = |auth| ssh_args(&SshHostSpec { auth, ..spec() }, false);
         assert_eq!(with(SshAuth::Automatic), ssh_args(&spec(), false));
@@ -368,6 +382,7 @@ mod tests {
             target: "me@devbox".into(),
             command: "~/.local/bin/gantry".into(),
             auth: SshAuth::Automatic,
+            port: None,
             share: None,
         }
     }

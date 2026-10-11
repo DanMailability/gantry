@@ -9,7 +9,7 @@ use std::path::Path;
 
 use app_core::host_install::{CheckResult, GantryOnRemote, Linger, Probe, Step, check, next_step, upload_path};
 use app_core::host_state::FailKind;
-use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshAuth, SshHost};
+use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshAuth, SshHost, parse_port};
 use app_core::ssh_config::{aliases, validate_name, validate_target, wildcard_match};
 use app_core::text_field::TextField;
 use daemon::askpass::AskPrompt;
@@ -60,6 +60,7 @@ pub(crate) enum WizardEvent {
 enum Field {
     Target,
     Name,
+    Port,
     Command,
 }
 
@@ -77,6 +78,7 @@ pub(crate) struct SshWizard {
     target: TextField,
     name: TextField,
     command: TextField,
+    port: TextField,
     /// The user typed in the name field, so it is no longer filled from the target.
     name_edited: bool,
     advanced: bool,
@@ -193,13 +195,23 @@ impl SshWizard {
         runtime_dir: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (target, name, command, auth, step) = match &start {
-            WizardStart::Add => {
-                (String::new(), String::new(), DEFAULT_REMOTE_COMMAND.to_string(), SshAuth::Automatic, Step::Host)
-            }
-            WizardStart::Install(host) | WizardStart::Update(host) => {
-                (host.target.clone(), host.name.clone(), host.command.clone(), host.auth, Step::Check)
-            }
+        let (target, name, command, auth, port, step) = match &start {
+            WizardStart::Add => (
+                String::new(),
+                String::new(),
+                DEFAULT_REMOTE_COMMAND.to_string(),
+                SshAuth::Automatic,
+                String::new(),
+                Step::Host,
+            ),
+            WizardStart::Install(host) | WizardStart::Update(host) => (
+                host.target.clone(),
+                host.name.clone(),
+                host.command.clone(),
+                host.auth,
+                host.port.map(|port| port.to_string()).unwrap_or_default(),
+                Step::Check,
+            ),
         };
         let mut wizard = SshWizard {
             focus_handle: cx.focus_handle(),
@@ -212,6 +224,7 @@ impl SshWizard {
             target: text(&target),
             name: text(&name),
             command: text(&command),
+            port: text(&port),
             name_edited: false,
             advanced: false,
             auth,
@@ -247,6 +260,7 @@ impl SshWizard {
             target: self.target.text().trim().to_string(),
             command: self.command.text().trim().to_string(),
             auth: self.auth,
+            port: parse_port(self.port.text()).ok().flatten(),
             share: self.share.clone(),
         }
     }
@@ -280,8 +294,15 @@ impl SshWizard {
         self.command.text().trim().is_empty().then(|| "Enter the remote command".to_string())
     }
 
+    fn port_error(&self) -> Option<String> {
+        parse_port(self.port.text()).err()
+    }
+
     fn host_ready(&self) -> bool {
-        self.name_error().is_none() && self.target_error().is_none() && self.command_error().is_none()
+        self.name_error().is_none()
+            && self.target_error().is_none()
+            && self.command_error().is_none()
+            && self.port_error().is_none()
     }
 
     fn sync_name(&mut self) {
@@ -394,7 +415,13 @@ impl SshWizard {
         let spec = self.spec();
         let restarted = matches!(self.start, WizardStart::Update(_));
         cx.emit(WizardEvent::Finished {
-            host: SshHost { name: spec.name, target: spec.target, command: spec.command, auth: spec.auth },
+            host: SshHost {
+                name: spec.name,
+                target: spec.target,
+                command: spec.command,
+                auth: spec.auth,
+                port: spec.port,
+            },
             add,
             restarted,
         });
@@ -509,7 +536,7 @@ impl SshWizard {
             "enter" => self.advance(cx),
             "tab" if self.step == Step::Host => {
                 let fields = if self.advanced {
-                    vec![Field::Target, Field::Name, Field::Command]
+                    vec![Field::Target, Field::Name, Field::Port, Field::Command]
                 } else {
                     vec![Field::Target, Field::Name]
                 };
@@ -526,6 +553,7 @@ impl SshWizard {
                 let field = match active {
                     Field::Target => &mut self.target,
                     Field::Name => &mut self.name,
+                    Field::Port => &mut self.port,
                     Field::Command => &mut self.command,
                 };
                 if !field::edit(field, keystroke, cx) {
@@ -534,7 +562,7 @@ impl SshWizard {
                 match active {
                     Field::Target => self.sync_name(),
                     Field::Name => self.name_edited = true,
-                    Field::Command => {}
+                    Field::Port | Field::Command => {}
                 }
             }
             _ => return,
@@ -657,6 +685,17 @@ impl SshWizard {
                 cx.notify();
             }),
         );
+        let port = field::render(
+            &self.port,
+            "default",
+            focused(Field::Port),
+            &theme,
+            field::on_press(cx, |this, offset, clicks, _, cx| {
+                this.active = Field::Port;
+                this.port.press(offset, clicks);
+                cx.notify();
+            }),
+        );
         let command = field::render(
             &self.command,
             DEFAULT_REMOTE_COMMAND,
@@ -717,12 +756,17 @@ impl SshWizard {
                     })),
             )
             .when(self.advanced, |body| {
-                body.child(label("REMOTE COMMAND")).child(text_box(&theme, command)).child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.tokens.muted))
-                        .child("Only a plain path (~/… or /…) can be installed to."),
-                )
+                body.child(label("PORT"))
+                    .child(text_box(&theme, port))
+                    .children(problem(self.port_error()))
+                    .child(label("REMOTE COMMAND"))
+                    .child(text_box(&theme, command))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child("Only a plain path (~/… or /…) can be installed to."),
+                    )
             })
     }
 

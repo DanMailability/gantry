@@ -888,7 +888,14 @@ impl WorkspaceView {
         self.attempts.insert(host.clone(), (number, handle.clone()));
         let (host, spec) = (
             host.clone(),
-            SshHostSpec { name: entry.name, target: entry.target, command: entry.command, auth: entry.auth, share },
+            SshHostSpec {
+                name: entry.name,
+                target: entry.target,
+                command: entry.command,
+                auth: entry.auth,
+                port: entry.port,
+                share,
+            },
         );
         cx.spawn_in(window, async move |this, cx| {
             let result = cx

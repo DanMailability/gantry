@@ -90,6 +90,7 @@ fn spec() -> SshHostSpec {
         target: "devbox".into(),
         command: "gantry".into(),
         auth: Default::default(),
+        port: None,
         share: None,
     }
 }
@@ -378,6 +379,7 @@ fn remote_spec(env: &Env, command: &str) -> SshHostSpec {
         target: "devbox".into(),
         command: env.path(command).display().to_string(),
         auth: Default::default(),
+        port: None,
         share: None,
     }
 }

@@ -2344,6 +2344,7 @@ mod tests {
             target: "me@dev".into(),
             command: "~/.local/bin/gantry".into(),
             auth: Default::default(),
+            port: None,
         };
         add_ssh_host(&mut hosts, entry).unwrap();
         let mut ws = Workspace::default();
