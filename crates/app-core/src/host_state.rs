@@ -227,22 +227,56 @@ impl HostState {
     }
 }
 
-/// The loader's "error while loading shared libraries" line in `stderr`, with the Ubuntu/Debian package for the
-/// libraries Gantry links. Gantry is there but cannot start (the loader exits 127 too).
-fn missing_library(stderr: &str) -> Option<String> {
-    let line = stderr.lines().find(|line| line.contains("error while loading shared libraries"))?;
-    let library = line.split("shared libraries:").nth(1)?.trim().split(':').next()?.trim();
-    let package = match library {
-        "libasound.so.2" => Some("libasound2 (libasound2t64 on Ubuntu 24.04)"),
+/// The Ubuntu/Debian package that provides a library Gantry links.
+fn package_for(library: &str) -> Option<&'static str> {
+    match library {
+        "libasound.so.2" => Some("libasound2t64"),
         "libxkbcommon-x11.so.0" => Some("libxkbcommon-x11-0"),
         "libxkbcommon.so.0" => Some("libxkbcommon0"),
         "libxcb.so.1" => Some("libxcb1"),
         _ => None,
-    };
-    Some(match package {
-        Some(package) => format!("Gantry cannot start on the host: {library} is missing. Install {package} there."),
-        None => format!("Gantry cannot start on the host: {library} is missing."),
-    })
+    }
+}
+
+/// What the wizard says when Gantry is on the host but cannot start for want of `libraries`: all of them, with the one
+/// command that installs the packages we know.
+pub fn describe_missing_libraries(libraries: &[String]) -> String {
+    let mut text = format!("Gantry cannot start on the host: {} missing.", libraries.join(", "));
+    let packages: Vec<&str> = libraries.iter().filter_map(|library| package_for(library)).collect();
+    if !packages.is_empty() {
+        text.push_str(&format!(" Install with: sudo apt install -y {}", packages.join(" ")));
+        if packages.contains(&"libasound2t64") {
+            text.push_str(" (libasound2 on Ubuntu 22.04)");
+        }
+        text.push('.');
+    }
+    let unknown: Vec<&str> =
+        libraries.iter().map(String::as_str).filter(|library| package_for(library).is_none()).collect();
+    if !unknown.is_empty() {
+        text.push_str(&format!(" no known package for {}.", unknown.join(", ")));
+    }
+    text
+}
+
+/// The libraries `ldd` reports as `not found`, each once, in the order listed.
+pub fn parse_ldd(stdout: &str) -> Vec<String> {
+    let mut libraries: Vec<String> = Vec::new();
+    for line in stdout.lines().filter(|line| line.contains("=> not found")) {
+        if let Some(library) = line.split_whitespace().next()
+            && !libraries.iter().any(|known| known == library)
+        {
+            libraries.push(library.to_string());
+        }
+    }
+    libraries
+}
+
+/// The loader's "error while loading shared libraries" line in `stderr` (it names only the first missing library):
+/// Gantry is there but cannot start (the loader exits 127 too).
+fn missing_library(stderr: &str) -> Option<String> {
+    let line = stderr.lines().find(|line| line.contains("error while loading shared libraries"))?;
+    let library = line.split("shared libraries:").nth(1)?.trim().split(':').next()?.trim();
+    Some(describe_missing_libraries(&[library.to_string()]))
 }
 
 /// Read a failed attempt. `exit_code`: ssh's exit status when it ended by itself; `stderr`: what it printed;
@@ -511,6 +545,27 @@ mod tests {
         };
         assert!(reason.contains("libfoo.so.1") && !reason.contains("install "), "{reason}");
         assert_eq!(classify_failure(Some(127), "sh: gantry: not found", None, false, None), FailKind::NotInstalled);
+    }
+
+    #[test]
+    fn ldd_output_gives_every_missing_library_once() {
+        let ldd = "\tlinux-vdso.so.1 (0x00007ffd)\n\tlibasound.so.2 => not found\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1)\n\
+                   \tlibxkbcommon-x11.so.0 => not found\n\tlibasound.so.2 => not found\n";
+        assert_eq!(parse_ldd(ldd), ["libasound.so.2", "libxkbcommon-x11.so.0"]);
+        assert!(parse_ldd("\tnot a dynamic executable\n").is_empty());
+    }
+
+    #[test]
+    fn missing_libraries_come_with_one_install_command() {
+        let both = describe_missing_libraries(&["libasound.so.2".into(), "libxkbcommon-x11.so.0".into()]);
+        assert!(both.contains("libasound.so.2") && both.contains("libxkbcommon-x11.so.0"), "{both}");
+        assert!(both.contains("sudo apt install -y libasound2t64 libxkbcommon-x11-0"), "{both}");
+        assert!(both.contains("libasound2 on Ubuntu 22.04"), "{both}");
+        let mixed = describe_missing_libraries(&["libxcb.so.1".into(), "libfoo.so.1".into()]);
+        assert!(mixed.contains("sudo apt install -y libxcb1"), "{mixed}");
+        assert!(mixed.contains("libfoo.so.1") && mixed.contains("no known package"), "{mixed}");
+        let unknown = describe_missing_libraries(&["libfoo.so.1".into()]);
+        assert!(!unknown.contains("sudo"), "{unknown}");
     }
 
     #[test]

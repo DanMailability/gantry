@@ -8,6 +8,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - SSH hosts can have a port: a Port field in the Add SSH host wizard (under Advanced) and in Settings > SSH hosts. Empty uses what ssh and `~/.ssh/config` say.
 
+### Changed
+- When Gantry is installed on a host but cannot start for missing system libraries, the wizard now lists every missing library at once with one install command, instead of one library per try.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

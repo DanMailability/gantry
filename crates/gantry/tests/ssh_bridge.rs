@@ -511,6 +511,37 @@ fn a_refused_command_never_runs() {
 }
 
 #[test]
+fn a_gantry_that_cannot_start_lists_every_missing_library_at_once() {
+    let env = remote_env("sshinst5b", None);
+    let loader = "#!/bin/sh\necho \"$0: error while loading shared libraries: libasound.so.2: cannot open shared object file\" >&2\nexit 127\n";
+    write_script(&env.path("blocked-gantry"), loader);
+    write_script(
+        &env.path("fakebin/ldd"),
+        "#!/bin/sh\nprintf '\\tlibasound.so.2 => not found\\n\\tlibxkbcommon-x11.so.0 => not found\\n'\n",
+    );
+    let spec = remote_spec(&env, "blocked-gantry");
+    match remote_install::verify(env.fake.to_str().unwrap(), &spec, Attempt::Background, &AttemptHandle::default())
+        .unwrap_err()
+    {
+        FailKind::Other { reason } => {
+            assert!(reason.contains("libasound.so.2") && reason.contains("libxkbcommon-x11.so.0"), "{reason}");
+            assert!(reason.contains("sudo apt install -y libasound2t64 libxkbcommon-x11-0"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // ldd finds nothing to name: the first error stays as it was.
+    write_script(&env.path("fakebin/ldd"), "#!/bin/sh\necho 'not a dynamic executable'\n");
+    match remote_install::verify(env.fake.to_str().unwrap(), &spec, Attempt::Background, &AttemptHandle::default())
+        .unwrap_err()
+    {
+        FailKind::Other { reason } => {
+            assert!(reason.contains("libasound.so.2") && !reason.contains("libxkbcommon-x11"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn verify_returns_the_version_line_or_the_failure() {
     let env = remote_env("sshinst5", None);
     write_script(&env.path("stub-gantry"), "#!/bin/sh\necho 'gantry 0.17.0 (test)'\n");
