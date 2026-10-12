@@ -85,7 +85,15 @@ pub enum FailKind {
     },
 }
 
-/// What the X of a host in the sidebar's Connected block does.
+/// With more SSH hosts than this the sidebar's SSH hosts block starts collapsed.
+pub const COLLAPSE_ABOVE: usize = 4;
+
+/// The heading of the sidebar's SSH hosts block: with many hosts it also says how many are connected.
+pub fn hosts_heading(connected: usize, total: usize) -> String {
+    if total > COLLAPSE_ABOVE { format!("SSH hosts · {connected} of {total} connected") } else { "SSH hosts".into() }
+}
+
+/// What the X of a host in the sidebar's SSH hosts block does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisconnectPlan {
     /// Stop trying to connect or reconnect; nothing to ask.
@@ -130,13 +138,13 @@ impl HostState {
         !matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
     }
 
-    /// Whether the host is listed in the sidebar's Connected block: connected, or on its way.
+    /// Whether the host is connected or on its way: the sidebar block gives it an X, and keeps its row when collapsed.
     pub fn in_connected_list(&self) -> bool {
         matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
     }
 
     /// What the X of this host does when `running` of its panes have a live process; `None` when the host is not in
-    /// the Connected block.
+    /// the sidebar block.
     pub fn disconnect_plan(&self, running: usize) -> Option<DisconnectPlan> {
         match self {
             HostState::Connecting | HostState::Reconnecting { .. } => Some(DisconnectPlan::Cancel),
@@ -409,7 +417,14 @@ pub fn not_connected_notice(host: &str, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_connected_block_lists_hosts_that_are_connected_or_on_their_way() {
+    fn the_hosts_heading_counts_connected_hosts_only_above_four_hosts() {
+        assert_eq!(hosts_heading(1, 2), "SSH hosts");
+        assert_eq!(hosts_heading(0, COLLAPSE_ABOVE), "SSH hosts");
+        assert_eq!(hosts_heading(2, 6), "SSH hosts · 2 of 6 connected");
+    }
+
+    #[test]
+    fn only_a_connected_or_connecting_host_has_an_x() {
         assert!(HostState::Connected.in_connected_list());
         assert!(HostState::Connecting.in_connected_list());
         assert!(HostState::Reconnecting { attempt: 2 }.in_connected_list());

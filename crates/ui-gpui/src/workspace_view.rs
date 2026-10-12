@@ -52,7 +52,7 @@ use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
-use crate::sidebar_view::{ConnectedHost, RenameTarget, SidebarEvent, SidebarView};
+use crate::sidebar_view::{HostRow, RenameTarget, SidebarEvent, SidebarView};
 use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
@@ -748,18 +748,17 @@ impl WorkspaceView {
                 (entry.name.clone(), HostStatus { label: state.label(), dot: state.dot(), panes })
             })
             .collect();
-        let connected: Vec<ConnectedHost> = self
+        let rows: Vec<HostRow> = self
             .ssh_hosts
             .iter()
-            .map(|entry| HostId::named(&entry.name))
-            .filter(|host| self.host_state(host).in_connected_list())
-            .map(|host| {
+            .map(|entry| {
+                let host = HostId::named(&entry.name);
                 let state = self.host_state(&host);
                 let label = (state != HostState::Connected).then(|| state.label());
-                ConnectedHost { dot: state.dot(), label, host }
+                HostRow { dot: state.dot(), label, up: state.in_connected_list(), host }
             })
             .collect();
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_connected(connected, cx));
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_hosts(rows, cx));
         let listed: HashSet<&str> = self.ssh_hosts.iter().map(|entry| entry.name.as_str()).collect();
         let taken: HashSet<String> = self
             .workspace
@@ -1545,6 +1544,20 @@ impl WorkspaceView {
         }
     }
 
+    /// The button of `host`'s state card, or a click on its row in the sidebar: cancel the attempt, open the wizard to
+    /// install or update, or connect.
+    fn run_host_action(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let entry = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned();
+        match (self.host_state(host), entry) {
+            (HostState::Connecting, _) => self.cancel_connecting(host, cx),
+            (HostState::NotInstalled, Some(entry)) => self.open_ssh_wizard(WizardStart::Install(entry), window, cx),
+            (HostState::UpdateNeeded { .. }, Some(entry)) => {
+                self.open_ssh_wizard(WizardStart::Update(entry), window, cx)
+            }
+            _ => self.connect_host(host, true, window, cx),
+        }
+    }
+
     fn on_pane_event(&mut self, leaf: NodeId, event: PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Focused => self.focus_leaf(leaf, window, cx),
@@ -1552,17 +1565,7 @@ impl WorkspaceView {
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
             PaneEvent::HostAction => {
                 if let Some(host) = self.workspace.leaves.get(&leaf).map(|leaf| leaf.host.clone()) {
-                    let entry = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned();
-                    match (self.host_state(&host), entry) {
-                        (HostState::Connecting, _) => self.cancel_connecting(&host, cx),
-                        (HostState::NotInstalled, Some(entry)) => {
-                            self.open_ssh_wizard(WizardStart::Install(entry), window, cx)
-                        }
-                        (HostState::UpdateNeeded { .. }, Some(entry)) => {
-                            self.open_ssh_wizard(WizardStart::Update(entry), window, cx)
-                        }
-                        _ => self.connect_host(&host, true, window, cx),
-                    }
+                    self.run_host_action(&host, window, cx);
                 }
             }
             PaneEvent::TitleChanged => {
@@ -2237,6 +2240,8 @@ impl WorkspaceView {
             SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
             SidebarEvent::CloseSettings => self.close_settings(window, cx),
             SidebarEvent::DisconnectHost(host) => self.disconnect_host(&host, window, cx),
+            SidebarEvent::ConnectHost(host) => self.run_host_action(&host, window, cx),
+            SidebarEvent::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
         }
     }
 
