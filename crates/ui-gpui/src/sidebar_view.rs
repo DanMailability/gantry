@@ -93,6 +93,17 @@ pub enum SidebarEvent {
     ShowSettings,
     /// The × of the Settings row was clicked: close Settings.
     CloseSettings,
+    /// The × of an SSH host in the Connected block was clicked.
+    DisconnectHost(HostId),
+}
+
+/// An SSH host in the Connected block: connected, or connecting or reconnecting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectedHost {
+    /// The host.
+    pub host: HostId,
+    /// Its short state ("connected", "connecting…", "reconnecting 2/4").
+    pub label: String,
 }
 
 /// The session sidebar.
@@ -128,6 +139,8 @@ pub struct SidebarView {
     /// The Settings tab is open (a row above the list), and is the visible tab.
     settings_open: bool,
     settings_active: bool,
+    /// The SSH hosts in the Connected block above Recent sessions.
+    connected: Vec<ConnectedHost>,
     /// What a middle press started on, until the button is released: a row, or the Settings row (`None`).
     middle_pressed: Option<Option<RowKey>>,
     _refresh: Task<()>,
@@ -181,6 +194,7 @@ impl SidebarView {
             roots: ProjectRoots::new(std::env::home_dir()),
             settings_open: false,
             settings_active: false,
+            connected: Vec::new(),
             middle_pressed: None,
             _refresh: refresh,
         };
@@ -236,6 +250,14 @@ impl SidebarView {
     pub fn set_sessions(&mut self, host: &HostId, sessions: Vec<SessionInfo>, cx: &mut Context<Self>) {
         self.sessions.replace(host, sessions);
         self.rebuild(cx);
+    }
+
+    /// The hosts the Connected block lists.
+    pub fn set_connected(&mut self, connected: Vec<ConnectedHost>, cx: &mut Context<Self>) {
+        if self.connected != connected {
+            self.connected = connected;
+            cx.notify();
+        }
     }
 
     /// Apply a session change of `host`.
@@ -1038,6 +1060,56 @@ impl Render for SidebarView {
                         .flex_1(),
                     ),
             )
+            .children((!self.connected.is_empty()).then(|| {
+                div()
+                    .flex_none()
+                    .mx_3()
+                    .mt_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().px_1().text_xs().text_color(rgb(theme.tokens.muted)).child("Connected"))
+                    .children(self.connected.iter().enumerate().map(|(index, entry)| {
+                        let host = entry.host.clone();
+                        div()
+                            .id(("connected-host", index))
+                            .h(theme.ui(28.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded(px(RADIUS))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .text_xs()
+                            .child(crate::theme::ssh_icon(theme.tokens.muted, &theme))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(rgb(theme.tokens.text))
+                                    .child(host.name().to_string()),
+                            )
+                            .child(div().text_color(rgb(theme.tokens.muted)).child(entry.label.clone()))
+                            .child(
+                                div()
+                                    .id(("disconnect-host", index))
+                                    .size(theme.ui(18.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .text_color(rgb(theme.tokens.muted))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgba(0x00000026)).text_color(rgb(theme.tokens.text)))
+                                    .child("×")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::DisconnectHost(host.clone()));
+                                    })),
+                            )
+                    }))
+            }))
             .child(
                 div()
                     .id("recent-sessions")

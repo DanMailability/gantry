@@ -8,6 +8,8 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - SSH hosts can have a port: a Port field in the Add SSH host wizard (under Advanced) and in Settings > SSH hosts. Empty uses what ssh and `~/.ssh/config` say.
 
+- A Connected block in the sidebar, above Recent sessions, lists the SSH hosts that are connected (or connecting) with an ×. On a host with running sessions it asks Detach (leave them running) or Close all sessions (ends them and stops the host's Gantry); on an idle host it stops the host's Gantry and disconnects at once; on a connecting host it cancels.
+
 ### Changed
 - When Gantry is installed on a host but cannot start for missing system libraries, the wizard now lists every missing library at once with one install command, instead of one library per try.
 

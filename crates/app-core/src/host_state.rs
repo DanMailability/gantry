@@ -85,6 +85,17 @@ pub enum FailKind {
     },
 }
 
+/// What the X of a host in the sidebar's Connected block does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisconnectPlan {
+    /// Stop trying to connect or reconnect; nothing to ask.
+    Cancel,
+    /// Nothing runs on the host: stop its daemon and disconnect, without asking.
+    StopNow,
+    /// Sessions run there: ask Detach, Close all sessions or Cancel.
+    Ask,
+}
+
 /// Something that happened to a host's connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
@@ -117,6 +128,22 @@ impl HostState {
     /// Whether a user's Connect starts an attempt from this state.
     pub fn can_connect(&self) -> bool {
         !matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
+    }
+
+    /// Whether the host is listed in the sidebar's Connected block: connected, or on its way.
+    pub fn in_connected_list(&self) -> bool {
+        matches!(self, HostState::Connecting | HostState::Connected | HostState::Reconnecting { .. })
+    }
+
+    /// What the X of this host does when `running` of its panes have a live process; `None` when the host is not in
+    /// the Connected block.
+    pub fn disconnect_plan(&self, running: usize) -> Option<DisconnectPlan> {
+        match self {
+            HostState::Connecting | HostState::Reconnecting { .. } => Some(DisconnectPlan::Cancel),
+            HostState::Connected if running == 0 => Some(DisconnectPlan::StopNow),
+            HostState::Connected => Some(DisconnectPlan::Ask),
+            _ => None,
+        }
     }
 
     /// The state after `event`; an event that does not apply leaves the state as it is.
@@ -381,6 +408,25 @@ pub fn not_connected_notice(host: &str, label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_connected_block_lists_hosts_that_are_connected_or_on_their_way() {
+        assert!(HostState::Connected.in_connected_list());
+        assert!(HostState::Connecting.in_connected_list());
+        assert!(HostState::Reconnecting { attempt: 2 }.in_connected_list());
+        assert!(!HostState::NotConnected.in_connected_list());
+        assert!(!HostState::NeedsSignIn.in_connected_list());
+        assert!(!HostState::Disconnected.in_connected_list());
+    }
+
+    #[test]
+    fn the_x_cancels_a_pending_host_stops_an_idle_one_and_asks_when_sessions_run() {
+        assert_eq!(HostState::Connecting.disconnect_plan(0), Some(DisconnectPlan::Cancel));
+        assert_eq!(HostState::Reconnecting { attempt: 1 }.disconnect_plan(3), Some(DisconnectPlan::Cancel));
+        assert_eq!(HostState::Connected.disconnect_plan(0), Some(DisconnectPlan::StopNow));
+        assert_eq!(HostState::Connected.disconnect_plan(2), Some(DisconnectPlan::Ask));
+        assert_eq!(HostState::NotConnected.disconnect_plan(0), None);
+    }
+
     use std::time::Duration;
 
     use super::*;

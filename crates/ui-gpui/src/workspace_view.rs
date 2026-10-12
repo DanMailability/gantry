@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, describe, without_claude_glyph};
-use app_core::host_state::{FailKind, HostDot, HostEvent, HostState, reconnect_delay};
+use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
 use app_core::recents;
@@ -52,7 +52,7 @@ use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
-use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
+use crate::sidebar_view::{ConnectedHost, RenameTarget, SidebarEvent, SidebarView};
 use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
@@ -748,6 +748,14 @@ impl WorkspaceView {
                 (entry.name.clone(), HostStatus { label: state.label(), dot: state.dot(), panes })
             })
             .collect();
+        let connected: Vec<ConnectedHost> = self
+            .ssh_hosts
+            .iter()
+            .map(|entry| HostId::named(&entry.name))
+            .filter(|host| self.host_state(host).in_connected_list())
+            .map(|host| ConnectedHost { label: self.host_state(&host).label(), host })
+            .collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_connected(connected, cx));
         let listed: HashSet<&str> = self.ssh_hosts.iter().map(|entry| entry.name.as_str()).collect();
         let taken: HashSet<String> = self
             .workspace
@@ -2224,7 +2232,75 @@ impl WorkspaceView {
             SidebarEvent::Dismiss => self.focus_current(window, cx),
             SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
             SidebarEvent::CloseSettings => self.close_settings(window, cx),
+            SidebarEvent::DisconnectHost(host) => self.disconnect_host(&host, window, cx),
         }
+    }
+
+    /// The × of `host` in the sidebar's Connected block: cancels a connection that is not up, stops an idle host's
+    /// daemon, and asks Detach / Close all sessions / Cancel when sessions run there.
+    fn disconnect_host(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let leaves: Vec<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| leaf.host == *host).map(|(id, _)| *id).collect();
+        let running = self.running_panes(&leaves, cx);
+        match self.host_state(host).disconnect_plan(running) {
+            None => {}
+            Some(DisconnectPlan::Cancel) => {
+                if self.host_state(host) == HostState::Connecting {
+                    self.cancel_connecting(host, cx);
+                } else {
+                    self.forget_host(host, cx);
+                }
+            }
+            Some(DisconnectPlan::StopNow) => self.leave_host(host, true, cx),
+            Some(DisconnectPlan::Ask) => {
+                if self.prompting.replace(true) {
+                    return;
+                }
+                let detail = format!(
+                    "{running} running session(s) on {name}. Detach leaves them running there. Close all sessions ends them and stops {name}'s Gantry.",
+                    name = host.name()
+                );
+                let answer = window.prompt(
+                    PromptLevel::Info,
+                    &format!("Disconnect from {}?", host.name()),
+                    Some(&detail),
+                    &["Detach", "Close all sessions", "Cancel"],
+                    cx,
+                );
+                let host = host.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let choice = answer.await;
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.prompting.set(false);
+                        // The host may have changed while the prompt was up.
+                        if this.host_state(&host) != HostState::Connected {
+                            return;
+                        }
+                        match choice {
+                            Ok(0) => this.leave_host(&host, false, cx),
+                            Ok(1) => this.leave_host(&host, true, cx),
+                            _ => {}
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Disconnect from connected SSH host `host`, first asking its daemon to stop (which ends its sessions) when
+    /// `stop`. Nothing reconnects by itself; its panes show Not connected.
+    fn leave_host(&mut self, host: &HostId, stop: bool, cx: &mut Context<Self>) {
+        if stop && let Some(client) = self.client(host).cloned() {
+            // The thread's clone keeps the connection open until the request is written.
+            std::thread::spawn(move || client.stop_all_and_wait(Duration::from_secs(2)));
+        }
+        self.take_overs.retain(|(taking, _), _| taking != host);
+        if self.search_answers.remove(host).is_some() {
+            self.push_search_hits(cx);
+            self.push_search_state(cx);
+        }
+        self.forget_host(host, cx);
     }
 
     /// Resume `session`: show the leaf that already has it (starting it again if it finished), else open it in a
