@@ -2302,6 +2302,10 @@ impl WorkspaceView {
             self.push_search_state(cx);
         }
         self.forget_host(host, cx);
+        // Its sessions are not known any more; they are listed again when it connects.
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+        self.attention.reset(host, &[]);
+        self.sync_unseen(cx);
     }
 
     /// Resume `session`: show the leaf that already has it (starting it again if it finished), else open it in a
