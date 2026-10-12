@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- After the daemon restarted, sessions of a Claude folder other than the daemon's own came back with "Session ID … is already in use" instead of resuming. Resuming now waits until the daemon has read every configured Claude folder. Needs a daemon restart.
+
 ## [0.6.1] - 2026-10-12
 
 ### Changed

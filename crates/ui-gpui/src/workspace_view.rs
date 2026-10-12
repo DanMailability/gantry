@@ -187,6 +187,9 @@ pub struct WorkspaceView {
     workspace: Workspace,
     /// Finished leaves waiting for the session list, to resume on start.
     to_resume: Vec<NodeId>,
+    /// This machine's daemon has sent the sessions of every configured Claude dir (`ClaudeDirsIndexed`): before that
+    /// its list may miss the sessions of dirs it has not scanned, and resuming one of those would start it afresh.
+    local_dirs_indexed: bool,
     slots: HashMap<NodeId, Slot>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
@@ -412,6 +415,7 @@ impl WorkspaceView {
         let mut this = WorkspaceView {
             workspace: restored.workspace,
             to_resume: Vec::new(),
+            local_dirs_indexed: false,
             slots: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
@@ -1179,6 +1183,12 @@ impl WorkspaceView {
                     self.push_recents(cx);
                     self.resume_finished(window, cx);
                 }
+                ClientEvent::ClaudeDirsIndexed => {
+                    if host.is_local() {
+                        self.local_dirs_indexed = true;
+                        self.resume_finished(window, cx);
+                    }
+                }
                 ClientEvent::SessionsChanged { upserted, removed } => {
                     self.track_sessions(host, upserted, cx);
                     self.drop_marks_of_changed(host, upserted, cx);
@@ -1399,8 +1409,8 @@ impl WorkspaceView {
             if !entry.host.is_local() {
                 continue;
             }
-            // Each leaf waits for the session list of its own host.
-            if !self.sidebar.read(cx).sessions().loaded(&entry.host) {
+            // Each leaf waits for the session list of its own host (this machine's: with every configured dir).
+            if !self.sidebar.read(cx).sessions().loaded(&entry.host) || !self.local_dirs_indexed {
                 waiting.push(leaf);
                 continue;
             }

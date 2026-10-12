@@ -67,6 +67,8 @@ pub enum ClientEvent {
         /// Sessions, most recently active first.
         sessions: Vec<SessionInfo>,
     },
+    /// The daemon has sent the sessions of every dir given in the last `SetClaudeDirs`.
+    ClaudeDirsIndexed,
     /// Sessions that appeared or changed, and ids that disappeared.
     SessionsChanged {
         /// New or changed sessions.
@@ -352,6 +354,7 @@ where
                 Some(Ok(DaemonMessage::Spawned { request, pane, cwd })) => ClientEvent::Spawned { request, pane, cwd },
                 Some(Ok(DaemonMessage::SpawnFailed { request, error })) => ClientEvent::SpawnFailed { request, error },
                 Some(Ok(DaemonMessage::Sessions { sessions })) => ClientEvent::Sessions { sessions },
+                Some(Ok(DaemonMessage::ClaudeDirsIndexed)) => ClientEvent::ClaudeDirsIndexed,
                 Some(Ok(DaemonMessage::SessionsChanged { upserted, removed })) => {
                     ClientEvent::SessionsChanged { upserted, removed }
                 }
