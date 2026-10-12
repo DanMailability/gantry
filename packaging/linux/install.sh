@@ -10,13 +10,15 @@ icon=$data/icons/hicolor/scalable/apps/$id.svg
 case "${1:-}" in
   "")
     install -Dm0755 "$here/gantry" "$bin_dir/gantry"
+    # Beside gantry: the SSH wizard uploads it to remote hosts.
+    install -Dm0755 "$here/gantryd" "$bin_dir/gantryd"
     mkdir -p "$(dirname "$desktop")"
     # Absolute path: ~/.local/bin is not always on the desktop session's PATH.
     sed "s|^Exec=gantry|Exec=$bin_dir/gantry|" "$here/$id.desktop" > "$desktop"
     install -Dm0644 "$here/$id.svg" "$icon"
     echo "Installed Gantry: $bin_dir/gantry" ;;
   --uninstall)
-    rm -f "$bin_dir/gantry" "$desktop" "$icon"
+    rm -f "$bin_dir/gantry" "$bin_dir/gantryd" "$desktop" "$icon"
     echo "Removed Gantry" ;;
   *)
     echo "usage: install.sh [--uninstall]" >&2

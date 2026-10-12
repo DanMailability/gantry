@@ -12,6 +12,7 @@ use app_core::host_state::FailKind;
 use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshAuth, SshHost, parse_port};
 use app_core::ssh_config::{aliases, validate_name, validate_target, wildcard_match};
 use app_core::text_field::TextField;
+use app_core::version::parse_version_output;
 use daemon::askpass::AskPrompt;
 use daemon::ssh::{AttemptHandle, Share, SshHostSpec};
 use gpui::{
@@ -166,14 +167,35 @@ fn suggested_name(target: &str) -> String {
     }
 }
 
-/// The file to upload: this process's own image, which stays readable after a reinstall replaced (and so unlinked)
-/// the file it started from; the path it started from where `/proc` does not offer it.
-fn own_binary() -> Option<std::path::PathBuf> {
-    let proc = std::path::PathBuf::from("/proc/self/exe");
-    if std::fs::File::open(&proc).is_ok() {
-        return Some(proc);
+/// Where `gantryd`, the window-less Gantry the wizard uploads, sits: beside the file this Gantry started from (which a
+/// reinstall may have replaced: the path then ends in " (deleted)").
+fn headless_beside(exe: &std::path::Path) -> std::path::PathBuf {
+    let name = exe.to_string_lossy();
+    let exe = std::path::PathBuf::from(name.strip_suffix(" (deleted)").unwrap_or(&name));
+    exe.with_file_name("gantryd")
+}
+
+/// The file to upload: `gantryd` beside this Gantry, provided it is this Gantry's version (after a reinstall the file
+/// beside the running one may be newer).
+fn headless_binary() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|_| "Could not find this Gantry's own file.".to_string())?;
+    let path = headless_beside(&exe);
+    if !path.is_file() {
+        return Err(format!("{} is missing: install Gantry again.", path.display()));
     }
-    std::env::current_exe().ok()
+    let output = std::process::Command::new(&path).arg("--version").output().ok();
+    let found = output
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| parse_version_output(text.trim()))
+        .map(|version| version.to_string());
+    match found {
+        Some(version) if version == protocol::build::VERSION => Ok(path),
+        Some(version) => Err(format!(
+            "The installed gantryd is {version}, this Gantry is {}: restart Gantry, then try again.",
+            protocol::build::VERSION
+        )),
+        None => Err(format!("{} does not run: install Gantry again.", path.display())),
+    }
 }
 
 /// What a failed step says.
@@ -349,9 +371,12 @@ impl SshWizard {
         if self.install_block().is_some() {
             return;
         }
-        let Some(local) = own_binary() else {
-            self.error = Some("Could not find this Gantry's own file.".into());
-            return;
+        let local = match headless_binary() {
+            Ok(local) => local,
+            Err(message) => {
+                self.error = Some(message);
+                return;
+            }
         };
         self.step = Step::Install;
         self.sent = 0;
@@ -1078,9 +1103,10 @@ mod tests {
     }
 
     #[test]
-    fn the_own_binary_can_be_opened() {
-        let path = own_binary().expect("a path");
-        assert!(std::fs::metadata(path).unwrap().len() > 0);
+    fn gantryd_is_looked_for_beside_the_file_gantry_started_from() {
+        let beside = |exe: &str| headless_beside(std::path::Path::new(exe));
+        assert_eq!(beside("/home/me/.local/bin/gantry"), std::path::Path::new("/home/me/.local/bin/gantryd"));
+        assert_eq!(beside("/home/me/.local/bin/gantry (deleted)"), std::path::Path::new("/home/me/.local/bin/gantryd"));
     }
 
     #[test]

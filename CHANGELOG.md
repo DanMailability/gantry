@@ -11,6 +11,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - An SSH hosts block in the sidebar, above Recent sessions: a card with every configured host and its state (green dot = connected). Click a host that is not connected to connect it (or to open Install or Update when it needs one); "Add SSH host…" sits at its end, so it is there even before any host exists. The × on a connected host asks Detach (leave its sessions running) or Close all sessions (ends them and stops the host's Gantry) when sessions run there, stops an idle host's Gantry at once, and cancels a connection that is still starting. With more than 4 hosts the card starts collapsed to its heading and the connected hosts; click the heading to expand it.
 
 ### Changed
+- The Add SSH host wizard now installs `gantryd`, Gantry without its window, instead of the full app: it is smaller, uploads faster and needs no system libraries on the host. New hosts default to `~/.local/bin/gantryd`; hosts you added before keep their own command (an Update there replaces that file with `gantryd`). `install.sh` and the RPM install `gantryd` beside `gantry`.
 - When Gantry is installed on a host but cannot start for missing system libraries, the wizard now lists every missing library at once with one install command, instead of one library per try.
 
 ## [0.5.0] - 2026-10-08

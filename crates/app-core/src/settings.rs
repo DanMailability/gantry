@@ -258,8 +258,9 @@ pub fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// The remote Gantry command when a host does not name one: where the tarball installer puts it.
-pub const DEFAULT_REMOTE_COMMAND: &str = "~/.local/bin/gantry";
+/// The remote Gantry command when a host does not name one: where the SSH wizard puts `gantryd`, Gantry without its
+/// window.
+pub const DEFAULT_REMOTE_COMMAND: &str = "~/.local/bin/gantryd";
 
 /// How Gantry signs in to an SSH host. It only picks ssh's options; nothing is stored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
