@@ -1,6 +1,8 @@
 name: CI
 on:
   push:
+    # A release tag points at a commit CI has already checked.
+    tags-ignore: ['v*']
   pull_request:
   # macOS and Windows run only from here (Actions → CI → Run workflow): their minutes cost 10× and 2×.
   workflow_dispatch:
