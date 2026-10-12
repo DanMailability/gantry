@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-version = "0.6.1"
+version = "0.6.2"
 publish = false
 license = "MIT OR Apache-2.0"
 
