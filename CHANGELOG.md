@@ -5,9 +5,10 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-12
+
 ### Added
 - SSH hosts can have a port: a Port field in the Add SSH host wizard (under Advanced) and in Settings > SSH hosts. Empty uses what ssh and `~/.ssh/config` say.
-
 - An SSH hosts block in the sidebar, above Recent sessions: a card with every configured host and its state (green dot = connected). Click a host that is not connected to connect it (or to open Install or Update when it needs one); "Add SSH host…" sits at its end, so it is there even before any host exists. The × on a connected host asks Detach (leave its sessions running) or Close all sessions (ends them and stops the host's Gantry) when sessions run there, stops an idle host's Gantry at once, and cancels a connection that is still starting. With more than 4 hosts the card starts collapsed to its heading and the connected hosts; click the heading to expand it.
 
 ### Changed
