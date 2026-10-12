@@ -5,6 +5,8 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-12
+
 ### Changed
 - A listed SSH host that is not connected no longer shows its panes or sessions in the sidebar (only what is live is listed); they come back when the host connects. A host that is connecting or reconnecting keeps its rows.
 
