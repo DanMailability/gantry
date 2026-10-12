@@ -823,6 +823,12 @@ impl WorkspaceView {
     /// Record `host`'s state and show it on the host's panes.
     fn set_host_state(&mut self, host: &HostId, state: HostState, cx: &mut Context<Self>) {
         self.host_states.insert(host.clone(), state);
+        if self.is_away(host) {
+            // Its sessions are not known any more; they are listed again when it connects.
+            self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+            self.attention.reset(host, &[]);
+            self.sync_unseen(cx);
+        }
         self.push_launcher_hosts(cx);
         self.push_recents(cx);
         self.refresh_host_cards(host, cx);
@@ -1843,12 +1849,19 @@ impl WorkspaceView {
         }
     }
 
+    /// Whether `host` is a listed SSH host that is not connected (nor on its way): the sidebar shows nothing of it, its
+    /// panes and sessions come back when it connects. A host that is not listed keeps its rows, so they can be closed.
+    fn is_away(&self, host: &HostId) -> bool {
+        self.ssh_hosts.iter().any(|entry| entry.name == host.name()) && !self.host_state(host).in_connected_list()
+    }
+
     fn sync_panes(&self, cx: &mut Context<Self>) {
         self.publish_hosts(cx);
         let panes: Vec<PaneEntry> = self
             .workspace
             .leaves
             .iter()
+            .filter(|(_, leaf)| !self.is_away(&leaf.host))
             .map(|(id, leaf)| {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
                 PaneEntry {
@@ -1877,6 +1890,10 @@ impl WorkspaceView {
             .iter()
             .enumerate()
             .filter(|(_, tab)| !tab.settings)
+            // A tab is one host's (splitting keeps the host): it is listed only while its host is live.
+            .filter(|(_, tab)| {
+                tab.root.leaves().first().is_none_or(|leaf| !self.is_away(&self.workspace.leaves[leaf].host))
+            })
             .map(|(index, tab)| TabEntry {
                 index,
                 name: tab.name.clone(),
@@ -2307,10 +2324,6 @@ impl WorkspaceView {
             self.push_search_state(cx);
         }
         self.forget_host(host, cx);
-        // Its sessions are not known any more; they are listed again when it connects.
-        self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
-        self.attention.reset(host, &[]);
-        self.sync_unseen(cx);
     }
 
     /// Resume `session`: show the leaf that already has it (starting it again if it finished), else open it in a
