@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_core::host_install::{Probe, UploadPath, parse_probe, probe_command, upload_path};
-use app_core::host_state::{FailKind, classify_failure};
+use app_core::host_state::{FailKind, classify_failure, describe_missing_libraries, parse_ldd};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{ClientMessage, PROTOCOL_VERSION};
 use sha2::{Digest, Sha256};
@@ -286,8 +286,24 @@ pub fn upload(
 
 /// Run `<command> --version` on the host: its first line, or why it failed.
 pub fn verify(program: &str, spec: &SshHostSpec, attempt: Attempt, handle: &AttemptHandle) -> Result<String, FailKind> {
-    let stdout = run_short(program, spec, attempt, handle, &format!("{} --version", spec.command))?;
-    Ok(stdout.lines().next().unwrap_or_default().trim().to_string())
+    match run_short(program, spec, attempt, handle, &format!("{} --version", spec.command)) {
+        Ok(stdout) => Ok(stdout.lines().next().unwrap_or_default().trim().to_string()),
+        Err(error) => Err(with_every_missing_library(program, spec, handle, error)),
+    }
+}
+
+/// The loader names only the first missing library: when `error` is a Gantry that cannot start, ask `ldd` (over the
+/// shared connection, never prompting) for all of them. Anything `ldd` does not name leaves `error` as it was.
+fn with_every_missing_library(program: &str, spec: &SshHostSpec, handle: &AttemptHandle, error: FailKind) -> FailKind {
+    let FailKind::Other { reason } = &error else { return error };
+    if !reason.starts_with("Gantry cannot start on the host") {
+        return error;
+    }
+    let listed = run_short(program, spec, Attempt::Background, handle, &format!("ldd {} 2>&1; true", spec.command));
+    match listed.map(|stdout| parse_ldd(&stdout)) {
+        Ok(libraries) if !libraries.is_empty() => other(describe_missing_libraries(&libraries)),
+        _ => error,
+    }
 }
 
 /// Turn lingering on for the remote user; the error is what the remote said.

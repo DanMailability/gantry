@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use app_core::host_state::HostDot;
-use app_core::settings::{Settings, SshAuth, SshHost, replace_ssh_host};
+use app_core::settings::{Settings, SshAuth, SshHost, parse_port, replace_ssh_host};
 use gpui::{Context, Div, Global, Window, div, px, rgb};
 
 use super::*;
@@ -15,6 +15,8 @@ use crate::theme::Theme;
 pub(super) const HOST_NAME: &str = "ssh-name";
 /// A host's target field.
 pub(super) const HOST_TARGET: &str = "ssh-target";
+/// A host's port field.
+pub(super) const HOST_PORT: &str = "ssh-port";
 
 /// What the page shows of one host's connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +46,7 @@ impl Global for HostStatuses {}
 pub(super) enum HostField {
     Name,
     Target,
+    Port,
 }
 
 /// What an edit of a host's row did.
@@ -77,6 +80,7 @@ pub(super) fn edit_ssh_host(
     match field {
         HostField::Name => new.name = text.to_string(),
         HostField::Target => new.target = text.to_string(),
+        HostField::Port => new.port = parse_port(text)?,
     }
     if new == old {
         return Ok(HostEdit::Unchanged);
@@ -87,7 +91,7 @@ pub(super) fn edit_ssh_host(
     replace_ssh_host(hosts, &old.name, new.clone())?;
     Ok(match field {
         HostField::Name => HostEdit::Renamed { from: old.name, to: new.name },
-        HostField::Target => HostEdit::Retargeted(new.name),
+        HostField::Target | HostField::Port => HostEdit::Retargeted(new.name),
     })
 }
 
@@ -137,6 +141,17 @@ impl SettingsView {
             let target = self
                 .text_field((HOST_TARGET, index), &host.target, "user@host", true, theme, window, cx)
                 .w(theme.ui(260.));
+            let port = self
+                .text_field(
+                    (HOST_PORT, index),
+                    &host.port.map(|port| port.to_string()).unwrap_or_default(),
+                    "port",
+                    true,
+                    theme,
+                    window,
+                    cx,
+                )
+                .w(theme.ui(80.));
             let (dot, label) =
                 status.map_or((HostDot::None, "not connected".to_string()), |s| (s.dot, s.label.clone()));
             let state = div()
@@ -196,7 +211,12 @@ impl SettingsView {
             }
             rows.push(row_shell(
                 theme,
-                div().flex().flex_col().gap(theme.ui(6.)).child(name).child(target),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.ui(6.))
+                    .child(name)
+                    .child(div().flex().gap(theme.ui(6.)).child(target).child(port)),
                 state,
                 trailing.justify_end(),
             ));
@@ -280,6 +300,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_port_edit_sets_or_clears_the_port_and_refuses_a_bad_one() {
+        let mut hosts = vec![host("lab", "lab")];
+        let taken = HashSet::new();
+        assert_eq!(
+            edit_ssh_host(&mut hosts, 0, HostField::Port, " 2222 ", &taken),
+            Ok(HostEdit::Retargeted("lab".into()))
+        );
+        assert_eq!(hosts[0].port, Some(2222));
+        assert_eq!(edit_ssh_host(&mut hosts, 0, HostField::Port, "2222", &taken), Ok(HostEdit::Unchanged));
+        assert!(edit_ssh_host(&mut hosts, 0, HostField::Port, "99999", &taken).is_err());
+        assert_eq!(hosts[0].port, Some(2222));
+        assert_eq!(edit_ssh_host(&mut hosts, 0, HostField::Port, "", &taken), Ok(HostEdit::Retargeted("lab".into())));
+        assert_eq!(hosts[0].port, None);
+    }
+
+    #[test]
     fn the_sign_in_link_cycles_through_every_method() {
         let mut auth = SshAuth::Automatic;
         let mut seen = Vec::new();
@@ -296,6 +332,7 @@ mod tests {
             target: target.into(),
             command: "~/.local/bin/gantry".into(),
             auth: Default::default(),
+            port: None,
         }
     }
 

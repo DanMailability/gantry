@@ -9,9 +9,10 @@ use std::path::Path;
 
 use app_core::host_install::{CheckResult, GantryOnRemote, Linger, Probe, Step, check, next_step, upload_path};
 use app_core::host_state::FailKind;
-use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshAuth, SshHost};
+use app_core::settings::{DEFAULT_REMOTE_COMMAND, SshAuth, SshHost, parse_port};
 use app_core::ssh_config::{aliases, validate_name, validate_target, wildcard_match};
 use app_core::text_field::TextField;
+use app_core::version::parse_version_output;
 use daemon::askpass::AskPrompt;
 use daemon::ssh::{AttemptHandle, Share, SshHostSpec};
 use gpui::{
@@ -60,6 +61,7 @@ pub(crate) enum WizardEvent {
 enum Field {
     Target,
     Name,
+    Port,
     Command,
 }
 
@@ -77,6 +79,7 @@ pub(crate) struct SshWizard {
     target: TextField,
     name: TextField,
     command: TextField,
+    port: TextField,
     /// The user typed in the name field, so it is no longer filled from the target.
     name_edited: bool,
     advanced: bool,
@@ -164,14 +167,35 @@ fn suggested_name(target: &str) -> String {
     }
 }
 
-/// The file to upload: this process's own image, which stays readable after a reinstall replaced (and so unlinked)
-/// the file it started from; the path it started from where `/proc` does not offer it.
-fn own_binary() -> Option<std::path::PathBuf> {
-    let proc = std::path::PathBuf::from("/proc/self/exe");
-    if std::fs::File::open(&proc).is_ok() {
-        return Some(proc);
+/// Where `gantryd`, the window-less Gantry the wizard uploads, sits: beside the file this Gantry started from (which a
+/// reinstall may have replaced: the path then ends in " (deleted)").
+fn headless_beside(exe: &std::path::Path) -> std::path::PathBuf {
+    let name = exe.to_string_lossy();
+    let exe = std::path::PathBuf::from(name.strip_suffix(" (deleted)").unwrap_or(&name));
+    exe.with_file_name("gantryd")
+}
+
+/// The file to upload: `gantryd` beside this Gantry, provided it is this Gantry's version (after a reinstall the file
+/// beside the running one may be newer).
+fn headless_binary() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|_| "Could not find this Gantry's own file.".to_string())?;
+    let path = headless_beside(&exe);
+    if !path.is_file() {
+        return Err(format!("{} is missing: install Gantry again.", path.display()));
     }
-    std::env::current_exe().ok()
+    let output = std::process::Command::new(&path).arg("--version").output().ok();
+    let found = output
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| parse_version_output(text.trim()))
+        .map(|version| version.to_string());
+    match found {
+        Some(version) if version == protocol::build::VERSION => Ok(path),
+        Some(version) => Err(format!(
+            "The installed gantryd is {version}, this Gantry is {}: restart Gantry, then try again.",
+            protocol::build::VERSION
+        )),
+        None => Err(format!("{} does not run: install Gantry again.", path.display())),
+    }
 }
 
 /// What a failed step says.
@@ -193,13 +217,23 @@ impl SshWizard {
         runtime_dir: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (target, name, command, auth, step) = match &start {
-            WizardStart::Add => {
-                (String::new(), String::new(), DEFAULT_REMOTE_COMMAND.to_string(), SshAuth::Automatic, Step::Host)
-            }
-            WizardStart::Install(host) | WizardStart::Update(host) => {
-                (host.target.clone(), host.name.clone(), host.command.clone(), host.auth, Step::Check)
-            }
+        let (target, name, command, auth, port, step) = match &start {
+            WizardStart::Add => (
+                String::new(),
+                String::new(),
+                DEFAULT_REMOTE_COMMAND.to_string(),
+                SshAuth::Automatic,
+                String::new(),
+                Step::Host,
+            ),
+            WizardStart::Install(host) | WizardStart::Update(host) => (
+                host.target.clone(),
+                host.name.clone(),
+                host.command.clone(),
+                host.auth,
+                host.port.map(|port| port.to_string()).unwrap_or_default(),
+                Step::Check,
+            ),
         };
         let mut wizard = SshWizard {
             focus_handle: cx.focus_handle(),
@@ -212,6 +246,7 @@ impl SshWizard {
             target: text(&target),
             name: text(&name),
             command: text(&command),
+            port: text(&port),
             name_edited: false,
             advanced: false,
             auth,
@@ -247,6 +282,7 @@ impl SshWizard {
             target: self.target.text().trim().to_string(),
             command: self.command.text().trim().to_string(),
             auth: self.auth,
+            port: parse_port(self.port.text()).ok().flatten(),
             share: self.share.clone(),
         }
     }
@@ -280,8 +316,15 @@ impl SshWizard {
         self.command.text().trim().is_empty().then(|| "Enter the remote command".to_string())
     }
 
+    fn port_error(&self) -> Option<String> {
+        parse_port(self.port.text()).err()
+    }
+
     fn host_ready(&self) -> bool {
-        self.name_error().is_none() && self.target_error().is_none() && self.command_error().is_none()
+        self.name_error().is_none()
+            && self.target_error().is_none()
+            && self.command_error().is_none()
+            && self.port_error().is_none()
     }
 
     fn sync_name(&mut self) {
@@ -328,9 +371,12 @@ impl SshWizard {
         if self.install_block().is_some() {
             return;
         }
-        let Some(local) = own_binary() else {
-            self.error = Some("Could not find this Gantry's own file.".into());
-            return;
+        let local = match headless_binary() {
+            Ok(local) => local,
+            Err(message) => {
+                self.error = Some(message);
+                return;
+            }
         };
         self.step = Step::Install;
         self.sent = 0;
@@ -394,7 +440,13 @@ impl SshWizard {
         let spec = self.spec();
         let restarted = matches!(self.start, WizardStart::Update(_));
         cx.emit(WizardEvent::Finished {
-            host: SshHost { name: spec.name, target: spec.target, command: spec.command, auth: spec.auth },
+            host: SshHost {
+                name: spec.name,
+                target: spec.target,
+                command: spec.command,
+                auth: spec.auth,
+                port: spec.port,
+            },
             add,
             restarted,
         });
@@ -509,7 +561,7 @@ impl SshWizard {
             "enter" => self.advance(cx),
             "tab" if self.step == Step::Host => {
                 let fields = if self.advanced {
-                    vec![Field::Target, Field::Name, Field::Command]
+                    vec![Field::Target, Field::Name, Field::Port, Field::Command]
                 } else {
                     vec![Field::Target, Field::Name]
                 };
@@ -526,6 +578,7 @@ impl SshWizard {
                 let field = match active {
                     Field::Target => &mut self.target,
                     Field::Name => &mut self.name,
+                    Field::Port => &mut self.port,
                     Field::Command => &mut self.command,
                 };
                 if !field::edit(field, keystroke, cx) {
@@ -534,7 +587,7 @@ impl SshWizard {
                 match active {
                     Field::Target => self.sync_name(),
                     Field::Name => self.name_edited = true,
-                    Field::Command => {}
+                    Field::Port | Field::Command => {}
                 }
             }
             _ => return,
@@ -657,6 +710,17 @@ impl SshWizard {
                 cx.notify();
             }),
         );
+        let port = field::render(
+            &self.port,
+            "default",
+            focused(Field::Port),
+            &theme,
+            field::on_press(cx, |this, offset, clicks, _, cx| {
+                this.active = Field::Port;
+                this.port.press(offset, clicks);
+                cx.notify();
+            }),
+        );
         let command = field::render(
             &self.command,
             DEFAULT_REMOTE_COMMAND,
@@ -717,12 +781,17 @@ impl SshWizard {
                     })),
             )
             .when(self.advanced, |body| {
-                body.child(label("REMOTE COMMAND")).child(text_box(&theme, command)).child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.tokens.muted))
-                        .child("Only a plain path (~/… or /…) can be installed to."),
-                )
+                body.child(label("PORT"))
+                    .child(text_box(&theme, port))
+                    .children(problem(self.port_error()))
+                    .child(label("REMOTE COMMAND"))
+                    .child(text_box(&theme, command))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child("Only a plain path (~/… or /…) can be installed to."),
+                    )
             })
     }
 
@@ -1034,9 +1103,10 @@ mod tests {
     }
 
     #[test]
-    fn the_own_binary_can_be_opened() {
-        let path = own_binary().expect("a path");
-        assert!(std::fs::metadata(path).unwrap().len() > 0);
+    fn gantryd_is_looked_for_beside_the_file_gantry_started_from() {
+        let beside = |exe: &str| headless_beside(std::path::Path::new(exe));
+        assert_eq!(beside("/home/me/.local/bin/gantry"), std::path::Path::new("/home/me/.local/bin/gantryd"));
+        assert_eq!(beside("/home/me/.local/bin/gantry (deleted)"), std::path::Path::new("/home/me/.local/bin/gantryd"));
     }
 
     #[test]

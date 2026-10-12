@@ -20,6 +20,7 @@ that survive closing the window.
 
 %install
 install -Dm0755 gantry %{buildroot}%{_bindir}/gantry
+install -Dm0755 gantryd %{buildroot}%{_bindir}/gantryd
 install -Dm0644 io.github.idogrf.Gantry.desktop %{buildroot}%{_datadir}/applications/io.github.idogrf.Gantry.desktop
 install -Dm0644 io.github.idogrf.Gantry.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github.idogrf.Gantry.svg
 
@@ -29,6 +30,7 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.idogrf.Gant
 %files
 %license LICENSE-MIT LICENSE-APACHE LICENSE-FONT-FIGTREE
 %{_bindir}/gantry
+%{_bindir}/gantryd
 %{_datadir}/applications/io.github.idogrf.Gantry.desktop
 %{_datadir}/icons/hicolor/scalable/apps/io.github.idogrf.Gantry.svg
 

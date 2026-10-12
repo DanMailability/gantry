@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, describe, without_claude_glyph};
-use app_core::host_state::{FailKind, HostDot, HostEvent, HostState, reconnect_delay};
+use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
 use app_core::recents;
@@ -52,7 +52,7 @@ use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::setup_view::{Mode as SetupMode, SetupEvent, SetupView, opens_by_itself};
-use crate::sidebar_view::{RenameTarget, SidebarEvent, SidebarView};
+use crate::sidebar_view::{HostRow, RenameTarget, SidebarEvent, SidebarView};
 use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
@@ -187,6 +187,9 @@ pub struct WorkspaceView {
     workspace: Workspace,
     /// Finished leaves waiting for the session list, to resume on start.
     to_resume: Vec<NodeId>,
+    /// This machine's daemon has sent the sessions of every configured Claude dir (`ClaudeDirsIndexed`): before that
+    /// its list may miss the sessions of dirs it has not scanned, and resuming one of those would start it afresh.
+    local_dirs_indexed: bool,
     slots: HashMap<NodeId, Slot>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
@@ -412,6 +415,7 @@ impl WorkspaceView {
         let mut this = WorkspaceView {
             workspace: restored.workspace,
             to_resume: Vec::new(),
+            local_dirs_indexed: false,
             slots: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
@@ -748,6 +752,17 @@ impl WorkspaceView {
                 (entry.name.clone(), HostStatus { label: state.label(), dot: state.dot(), panes })
             })
             .collect();
+        let rows: Vec<HostRow> = self
+            .ssh_hosts
+            .iter()
+            .map(|entry| {
+                let host = HostId::named(&entry.name);
+                let state = self.host_state(&host);
+                let label = (state != HostState::Connected).then(|| state.label());
+                HostRow { dot: state.dot(), label, up: state.in_connected_list(), host }
+            })
+            .collect();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_hosts(rows, cx));
         let listed: HashSet<&str> = self.ssh_hosts.iter().map(|entry| entry.name.as_str()).collect();
         let taken: HashSet<String> = self
             .workspace
@@ -812,6 +827,12 @@ impl WorkspaceView {
     /// Record `host`'s state and show it on the host's panes.
     fn set_host_state(&mut self, host: &HostId, state: HostState, cx: &mut Context<Self>) {
         self.host_states.insert(host.clone(), state);
+        if self.is_away(host) {
+            // Its sessions are not known any more; they are listed again when it connects.
+            self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+            self.attention.reset(host, &[]);
+            self.sync_unseen(cx);
+        }
         self.push_launcher_hosts(cx);
         self.push_recents(cx);
         self.refresh_host_cards(host, cx);
@@ -888,7 +909,14 @@ impl WorkspaceView {
         self.attempts.insert(host.clone(), (number, handle.clone()));
         let (host, spec) = (
             host.clone(),
-            SshHostSpec { name: entry.name, target: entry.target, command: entry.command, auth: entry.auth, share },
+            SshHostSpec {
+                name: entry.name,
+                target: entry.target,
+                command: entry.command,
+                auth: entry.auth,
+                port: entry.port,
+                share,
+            },
         );
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -1155,6 +1183,12 @@ impl WorkspaceView {
                     self.push_recents(cx);
                     self.resume_finished(window, cx);
                 }
+                ClientEvent::ClaudeDirsIndexed => {
+                    if host.is_local() {
+                        self.local_dirs_indexed = true;
+                        self.resume_finished(window, cx);
+                    }
+                }
                 ClientEvent::SessionsChanged { upserted, removed } => {
                     self.track_sessions(host, upserted, cx);
                     self.drop_marks_of_changed(host, upserted, cx);
@@ -1375,8 +1409,8 @@ impl WorkspaceView {
             if !entry.host.is_local() {
                 continue;
             }
-            // Each leaf waits for the session list of its own host.
-            if !self.sidebar.read(cx).sessions().loaded(&entry.host) {
+            // Each leaf waits for the session list of its own host (this machine's: with every configured dir).
+            if !self.sidebar.read(cx).sessions().loaded(&entry.host) || !self.local_dirs_indexed {
                 waiting.push(leaf);
                 continue;
             }
@@ -1526,6 +1560,20 @@ impl WorkspaceView {
         }
     }
 
+    /// The button of `host`'s state card, or a click on its row in the sidebar: cancel the attempt, open the wizard to
+    /// install or update, or connect.
+    fn run_host_action(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let entry = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned();
+        match (self.host_state(host), entry) {
+            (HostState::Connecting, _) => self.cancel_connecting(host, cx),
+            (HostState::NotInstalled, Some(entry)) => self.open_ssh_wizard(WizardStart::Install(entry), window, cx),
+            (HostState::UpdateNeeded { .. }, Some(entry)) => {
+                self.open_ssh_wizard(WizardStart::Update(entry), window, cx)
+            }
+            _ => self.connect_host(host, true, window, cx),
+        }
+    }
+
     fn on_pane_event(&mut self, leaf: NodeId, event: PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Focused => self.focus_leaf(leaf, window, cx),
@@ -1533,17 +1581,7 @@ impl WorkspaceView {
             PaneEvent::Close => self.close_leaf(leaf, window, cx),
             PaneEvent::HostAction => {
                 if let Some(host) = self.workspace.leaves.get(&leaf).map(|leaf| leaf.host.clone()) {
-                    let entry = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned();
-                    match (self.host_state(&host), entry) {
-                        (HostState::Connecting, _) => self.cancel_connecting(&host, cx),
-                        (HostState::NotInstalled, Some(entry)) => {
-                            self.open_ssh_wizard(WizardStart::Install(entry), window, cx)
-                        }
-                        (HostState::UpdateNeeded { .. }, Some(entry)) => {
-                            self.open_ssh_wizard(WizardStart::Update(entry), window, cx)
-                        }
-                        _ => self.connect_host(&host, true, window, cx),
-                    }
+                    self.run_host_action(&host, window, cx);
                 }
             }
             PaneEvent::TitleChanged => {
@@ -1821,12 +1859,19 @@ impl WorkspaceView {
         }
     }
 
+    /// Whether `host` is a listed SSH host that is not connected (nor on its way): the sidebar shows nothing of it, its
+    /// panes and sessions come back when it connects. A host that is not listed keeps its rows, so they can be closed.
+    fn is_away(&self, host: &HostId) -> bool {
+        self.ssh_hosts.iter().any(|entry| entry.name == host.name()) && !self.host_state(host).in_connected_list()
+    }
+
     fn sync_panes(&self, cx: &mut Context<Self>) {
         self.publish_hosts(cx);
         let panes: Vec<PaneEntry> = self
             .workspace
             .leaves
             .iter()
+            .filter(|(_, leaf)| !self.is_away(&leaf.host))
             .map(|(id, leaf)| {
                 let view = self.slots.get(id).map(|slot| slot.view.read(cx));
                 PaneEntry {
@@ -1855,6 +1900,10 @@ impl WorkspaceView {
             .iter()
             .enumerate()
             .filter(|(_, tab)| !tab.settings)
+            // A tab is one host's (splitting keeps the host): it is listed only while its host is live.
+            .filter(|(_, tab)| {
+                tab.root.leaves().first().is_none_or(|leaf| !self.is_away(&self.workspace.leaves[leaf].host))
+            })
             .map(|(index, tab)| TabEntry {
                 index,
                 name: tab.name.clone(),
@@ -2217,7 +2266,74 @@ impl WorkspaceView {
             SidebarEvent::Dismiss => self.focus_current(window, cx),
             SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
             SidebarEvent::CloseSettings => self.close_settings(window, cx),
+            SidebarEvent::DisconnectHost(host) => self.disconnect_host(&host, window, cx),
+            SidebarEvent::ConnectHost(host) => self.run_host_action(&host, window, cx),
+            SidebarEvent::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
         }
+    }
+
+    /// The × of `host` in the sidebar's Connected block: cancels a connection that is not up, stops an idle host's
+    /// daemon, and asks Detach / Close all sessions / Cancel when sessions run there.
+    fn disconnect_host(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let leaves: Vec<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| leaf.host == *host).map(|(id, _)| *id).collect();
+        let running = self.running_panes(&leaves, cx);
+        match self.host_state(host).disconnect_plan(running) {
+            None => {}
+            Some(DisconnectPlan::Cancel) => {
+                if self.host_state(host) == HostState::Connecting {
+                    self.cancel_connecting(host, cx);
+                } else {
+                    self.forget_host(host, cx);
+                }
+            }
+            Some(DisconnectPlan::StopNow) => self.leave_host(host, true, cx),
+            Some(DisconnectPlan::Ask) => {
+                if self.prompting.replace(true) {
+                    return;
+                }
+                let detail = format!("Detach keeps its {running} session(s) running.");
+                let answer = window.prompt(
+                    PromptLevel::Info,
+                    &format!("Disconnect from {}?", host.name()),
+                    Some(&detail),
+                    &["Detach", "Close all sessions", "Cancel"],
+                    cx,
+                );
+                let host = host.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let choice = answer.await;
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.prompting.set(false);
+                        // The host may have changed while the prompt was up.
+                        if this.host_state(&host) != HostState::Connected {
+                            return;
+                        }
+                        match choice {
+                            Ok(0) => this.leave_host(&host, false, cx),
+                            Ok(1) => this.leave_host(&host, true, cx),
+                            _ => {}
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Disconnect from connected SSH host `host`, first asking its daemon to stop (which ends its sessions) when
+    /// `stop`. Nothing reconnects by itself; its panes show Not connected.
+    fn leave_host(&mut self, host: &HostId, stop: bool, cx: &mut Context<Self>) {
+        if stop && let Some(client) = self.client(host).cloned() {
+            // The thread's clone keeps the connection open until the request is written.
+            std::thread::spawn(move || client.stop_all_and_wait(Duration::from_secs(2)));
+        }
+        self.take_overs.retain(|(taking, _), _| taking != host);
+        if self.search_answers.remove(host).is_some() {
+            self.push_search_hits(cx);
+            self.push_search_state(cx);
+        }
+        self.forget_host(host, cx);
     }
 
     /// Resume `session`: show the leaf that already has it (starting it again if it finished), else open it in a

@@ -95,6 +95,8 @@ struct State {
     ever_connected: bool,
     /// Whether session messages are sent (an index runs).
     sessions_enabled: bool,
+    /// A client has sent `SetClaudeDirs` and `ClaudeDirsIndexed` has not been sent for it yet.
+    dirs_pending: bool,
     /// Latest index scans of every indexed dir, merged; `None` until the first scan finishes.
     records: Option<Arc<Vec<SessionRecord>>>,
     /// Each indexed dir's latest scan.
@@ -216,6 +218,14 @@ impl State {
             }
         }
         self.sent = sessions;
+    }
+
+    /// Tell the client its `SetClaudeDirs` is fully indexed, once every indexed dir has its first scan.
+    fn announce_dirs_indexed(&mut self) {
+        if self.dirs_pending && self.indexers.keys().all(|dir| self.dir_records.contains_key(dir)) {
+            self.dirs_pending = false;
+            self.control(&DaemonMessage::ClaudeDirsIndexed);
+        }
     }
 
     /// Find which container processes carry this daemon's pane markers. `/proc` is scanned only while some
@@ -641,7 +651,12 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             state.control(&DaemonMessage::Panes { panes });
             state.publish_sessions(true);
         }
-        ClientMessage::SetClaudeDirs { dirs } => set_claude_dirs(shared, dirs),
+        ClientMessage::SetClaudeDirs { dirs } => {
+            set_claude_dirs(shared, dirs);
+            let mut state = shared.lock();
+            state.dirs_pending = true;
+            state.announce_dirs_indexed();
+        }
         ClientMessage::Spawn { request, spec } => spawn_pane(shared, client_id, request, spec),
         ClientMessage::Attach { pane } => {
             let mut state = shared.lock();
@@ -758,6 +773,7 @@ fn on_records(shared: &Arc<Shared>, state: &mut State) {
     let first = state.records.is_none();
     state.records = Some(merged);
     state.publish_sessions(first);
+    state.announce_dirs_indexed();
 }
 
 fn spawn_pane(shared: &Arc<Shared>, client_id: u64, request: u64, spec: SpawnRequest) {
@@ -1056,6 +1072,27 @@ mod tests {
             messages.push(frame.parse::<DaemonMessage>().unwrap().unwrap());
         }
         assert!(matches!(&messages[..], [DaemonMessage::Sessions { sessions }] if sessions.len() == 1), "{messages:?}");
+    }
+
+    #[tokio::test]
+    async fn dirs_are_announced_once_every_indexed_dir_has_scanned() {
+        let outbox = Outbox::new(1 << 20);
+        let mut state = State { dirs_pending: true, ..State::default() };
+        state.client =
+            Some(Client { id: 1, outbox: outbox.clone(), attached: HashSet::new(), kicked: Arc::new(Notify::new()) });
+        let dir = PathBuf::from("/claude");
+        state.indexers.insert(dir.clone(), tokio::spawn(async {}));
+        state.announce_dirs_indexed();
+        assert!(state.dirs_pending, "the dir has not been scanned");
+        state.dir_records.insert(dir, Arc::new(Vec::new()));
+        state.announce_dirs_indexed();
+        state.announce_dirs_indexed();
+        outbox.close();
+        let mut messages = Vec::new();
+        while let Some(frame) = outbox.next().await {
+            messages.push(frame.parse::<DaemonMessage>().unwrap().unwrap());
+        }
+        assert!(matches!(&messages[..], [DaemonMessage::ClaudeDirsIndexed]), "{messages:?}");
     }
 
     #[tokio::test]

@@ -248,6 +248,9 @@ impl SettingsView {
             (SHELL_ARGS, _) => Some(join_args(&settings.shell.args)),
             (ssh_hosts::HOST_NAME, index) => settings.ssh_hosts.get(index).map(|host| host.name.clone()),
             (ssh_hosts::HOST_TARGET, index) => settings.ssh_hosts.get(index).map(|host| host.target.clone()),
+            (ssh_hosts::HOST_PORT, index) => {
+                settings.ssh_hosts.get(index).map(|host| host.port.map(|port| port.to_string()).unwrap_or_default())
+            }
             _ => None,
         }
         .unwrap_or_default()
@@ -289,11 +292,11 @@ impl SettingsView {
         let taken =
             cx.try_global::<ssh_hosts::HostStatuses>().map(|statuses| statuses.taken.clone()).unwrap_or_default();
         SettingsStore::update(cx, |settings| match key {
-            (ssh_hosts::HOST_NAME | ssh_hosts::HOST_TARGET, index) => {
-                let field = if key.0 == ssh_hosts::HOST_NAME {
-                    ssh_hosts::HostField::Name
-                } else {
-                    ssh_hosts::HostField::Target
+            (ssh_hosts::HOST_NAME | ssh_hosts::HOST_TARGET | ssh_hosts::HOST_PORT, index) => {
+                let field = match key.0 {
+                    ssh_hosts::HOST_NAME => ssh_hosts::HostField::Name,
+                    ssh_hosts::HOST_TARGET => ssh_hosts::HostField::Target,
+                    _ => ssh_hosts::HostField::Port,
                 };
                 ssh_edit = Some(ssh_hosts::edit_ssh_host(&mut settings.ssh_hosts, index, field, &text, &taken));
             }

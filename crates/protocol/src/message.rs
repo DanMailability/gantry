@@ -392,6 +392,9 @@ pub enum DaemonMessage {
         /// Ids no longer known.
         removed: Vec<String>,
     },
+    /// Every dir of the last `SetClaudeDirs` has been scanned and its sessions sent: the list is complete for them.
+    /// Not sent by older daemons.
+    ClaudeDirsIndexed,
     /// How a `TakeOver` request ended.
     TakeOverResult {
         /// Session id from the request.

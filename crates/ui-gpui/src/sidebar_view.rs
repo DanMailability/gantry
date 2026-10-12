@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use app_core::host_state::{COLLAPSE_ABOVE, HostDot, hosts_heading};
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
     self, Activation, ActiveInput, Arrivals, GroupEdges, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind,
@@ -93,6 +94,25 @@ pub enum SidebarEvent {
     ShowSettings,
     /// The × of the Settings row was clicked: close Settings.
     CloseSettings,
+    /// The × of an SSH host in the SSH hosts block was clicked.
+    DisconnectHost(HostId),
+    /// A host row that is not up was clicked: connect it, or open its Install / Update.
+    ConnectHost(HostId),
+    /// "Add SSH host…" was clicked.
+    AddSshHost,
+}
+
+/// A configured SSH host in the SSH hosts block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRow {
+    /// The host.
+    pub host: HostId,
+    /// The dot before its name: green when connected.
+    pub dot: HostDot,
+    /// Its short state, shown while it is not connected ("connecting…", "not connected").
+    pub label: Option<String>,
+    /// Connected or on its way: the row has an × and a click does nothing.
+    pub up: bool,
 }
 
 /// The session sidebar.
@@ -128,6 +148,10 @@ pub struct SidebarView {
     /// The Settings tab is open (a row above the list), and is the visible tab.
     settings_open: bool,
     settings_active: bool,
+    /// The SSH hosts block above Recent sessions: every configured host.
+    hosts: Vec<HostRow>,
+    /// The block is expanded by hand (it starts collapsed with more than `COLLAPSE_ABOVE` hosts).
+    hosts_open: bool,
     /// What a middle press started on, until the button is released: a row, or the Settings row (`None`).
     middle_pressed: Option<Option<RowKey>>,
     _refresh: Task<()>,
@@ -181,6 +205,8 @@ impl SidebarView {
             roots: ProjectRoots::new(std::env::home_dir()),
             settings_open: false,
             settings_active: false,
+            hosts: Vec::new(),
+            hosts_open: false,
             middle_pressed: None,
             _refresh: refresh,
         };
@@ -236,6 +262,102 @@ impl SidebarView {
     pub fn set_sessions(&mut self, host: &HostId, sessions: Vec<SessionInfo>, cx: &mut Context<Self>) {
         self.sessions.replace(host, sessions);
         self.rebuild(cx);
+    }
+
+    /// The hosts the SSH hosts block lists.
+    pub fn set_hosts(&mut self, hosts: Vec<HostRow>, cx: &mut Context<Self>) {
+        if self.hosts != hosts {
+            self.hosts = hosts;
+            cx.notify();
+        }
+    }
+
+    /// The SSH hosts block: a filled card with a heading, a row per host (only the ones that are up while it is
+    /// collapsed) and "Add SSH host…".
+    fn render_hosts(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let total = self.hosts.len();
+        let collapsible = total > COLLAPSE_ABOVE;
+        let open = !collapsible || self.hosts_open;
+        let up = self.hosts.iter().filter(|row| row.up).count();
+        let heading = div().px_2().pt(px(2.)).pb_1().text_xs().text_color(rgb(theme.tokens.muted));
+        let heading = if collapsible {
+            heading
+                .id("ssh-hosts-heading")
+                .flex()
+                .gap_1()
+                .cursor_pointer()
+                .hover(|style| style.text_color(rgb(theme.tokens.text)))
+                .child(if open { "▾" } else { "▸" })
+                .child(hosts_heading(up, total))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.hosts_open = !this.hosts_open;
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            heading.child(hosts_heading(up, total)).into_any_element()
+        };
+        let row_base = |id: (&'static str, usize)| {
+            div().id(id).h(theme.ui(28.)).px_2().flex().items_center().gap_2().rounded(px(RADIUS - 2.)).text_xs()
+        };
+        div()
+            .flex_none()
+            .mx_3()
+            .mt_2()
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .rounded(px(RADIUS))
+            .bg(rgba((theme.tokens.raised << 8) | 0x80))
+            .child(heading)
+            .children(self.hosts.iter().enumerate().filter(|(_, row)| open || row.up).map(|(index, row)| {
+                let host = row.host.clone();
+                let dot = div()
+                    .flex_none()
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(rgb(crate::context_menu::host_dot_color(theme, row.dot)));
+                let name_color = if row.up { theme.tokens.text } else { theme.tokens.muted };
+                let name = div().flex_1().truncate().text_color(rgb(name_color)).child(host.name().to_string());
+                let label = row.label.clone().map(|label| div().text_color(rgb(theme.tokens.muted)).child(label));
+                if row.up {
+                    row_base(("ssh-host", index)).child(dot).child(name).children(label).child(
+                        div()
+                            .id(("disconnect-host", index))
+                            .size(theme.ui(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .text_color(rgb(theme.tokens.muted))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgba(0x00000026)).text_color(rgb(theme.tokens.text)))
+                            .child("×")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::DisconnectHost(host.clone()));
+                            })),
+                    )
+                } else {
+                    row_base(("ssh-host", index))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                        .child(dot)
+                        .child(name)
+                        .children(label)
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::ConnectHost(host.clone()))))
+                }
+            }))
+            .children(open.then(|| {
+                row_base(("ssh-host-add", 0))
+                    .cursor_pointer()
+                    .text_color(rgb(theme.tokens.muted))
+                    .hover(|style| style.bg(rgb(theme.tokens.raised)).text_color(rgb(theme.tokens.text)))
+                    .child(div().flex_none().w(px(7.)).child("+"))
+                    .child("Add SSH host…")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::AddSshHost)))
+            }))
     }
 
     /// Apply a session change of `host`.
@@ -1038,6 +1160,7 @@ impl Render for SidebarView {
                         .flex_1(),
                     ),
             )
+            .child(self.render_hosts(&theme, cx))
             .child(
                 div()
                     .id("recent-sessions")

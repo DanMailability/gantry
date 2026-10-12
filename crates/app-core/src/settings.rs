@@ -258,8 +258,9 @@ pub fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// The remote Gantry command when a host does not name one: where the tarball installer puts it.
-pub const DEFAULT_REMOTE_COMMAND: &str = "~/.local/bin/gantry";
+/// The remote Gantry command when a host does not name one: where the SSH wizard puts `gantryd`, Gantry without its
+/// window.
+pub const DEFAULT_REMOTE_COMMAND: &str = "~/.local/bin/gantryd";
 
 /// How Gantry signs in to an SSH host. It only picks ssh's options; nothing is stored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -316,6 +317,20 @@ pub struct SshHost {
     pub command: String,
     /// How to sign in.
     pub auth: SshAuth,
+    /// The ssh port; `None` = what ssh (and `~/.ssh/config`) says.
+    pub port: Option<u16>,
+}
+
+/// The port typed in a field: empty = none, else a number from 1 to 65535.
+pub fn parse_port(text: &str) -> Result<Option<u16>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(Some(port)),
+        _ => Err("The port is a number from 1 to 65535".into()),
+    }
 }
 
 /// Add `host` to the list; its name must be valid and unused, its target valid.
@@ -683,6 +698,18 @@ impl Reader {
                     SshAuth::Automatic
                 }
             };
+            let port = match map.get("port") {
+                None => None,
+                Some(value) => {
+                    match value.as_u64().and_then(|port| u16::try_from(port).ok()).filter(|port| *port > 0) {
+                        Some(port) => Some(port),
+                        None => {
+                            self.problem(&format!("{key}.port"), "expected a number from 1 to 65535".into());
+                            None
+                        }
+                    }
+                }
+            };
             if name.is_empty() || target.is_empty() || command.is_empty() {
                 self.problem(&key, "needs a name, a target and a command; dropped".into());
             } else if name.contains('/') {
@@ -692,7 +719,7 @@ impl Reader {
             } else if hosts.iter().any(|host| host.name == name) {
                 self.problem(&key, format!("the name \"{name}\" is used twice; dropped"));
             } else {
-                hosts.push(SshHost { name, target, command, auth });
+                hosts.push(SshHost { name, target, command, auth, port });
             }
         }
         hosts
@@ -1015,6 +1042,9 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
             let mut value = serde_json::json!({"name": host.name, "target": host.target, "command": host.command});
             if host.auth != SshAuth::Automatic {
                 value["auth"] = host.auth.as_str().into();
+            }
+            if let Some(port) = host.port {
+                value["port"] = port.into();
             }
             value
         })
@@ -1653,12 +1683,14 @@ mod tests {
                     target: "me@devbox".into(),
                     command: DEFAULT_REMOTE_COMMAND.into(),
                     auth: SshAuth::Automatic,
+                    port: None,
                 },
                 SshHost {
                     name: "lab".into(),
                     target: "lab".into(),
                     command: "/opt/gantry/bin/gantry".into(),
                     auth: SshAuth::Automatic,
+                    port: None,
                 },
             ]
         );
@@ -1711,6 +1743,33 @@ mod tests {
     }
 
     #[test]
+    fn ssh_host_port_loads_and_a_bad_one_falls_back_with_a_problem() {
+        let loaded = parse(
+            r#"{"sshHosts": [
+                {"name": "a", "target": "a"},
+                {"name": "b", "target": "b", "port": 2222},
+                {"name": "c", "target": "c", "port": 0},
+                {"name": "d", "target": "d", "port": 70000},
+                {"name": "e", "target": "e", "port": "22"}
+            ]}"#,
+        );
+        let ports: Vec<Option<u16>> = loaded.settings.unwrap().ssh_hosts.iter().map(|host| host.port).collect();
+        assert_eq!(ports, [None, Some(2222), None, None, None]);
+        let keys: Vec<&str> = loaded.problems.iter().map(|problem| problem.key.as_str()).collect();
+        assert_eq!(keys, ["sshHosts[2].port", "sshHosts[3].port", "sshHosts[4].port"]);
+    }
+
+    #[test]
+    fn a_typed_port_is_empty_or_one_to_65535() {
+        assert_eq!(parse_port(""), Ok(None));
+        assert_eq!(parse_port(" 2222 "), Ok(Some(2222)));
+        assert_eq!(parse_port("65535"), Ok(Some(65535)));
+        for bad in ["0", "65536", "-1", "22a", "2 2"] {
+            assert!(parse_port(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn hand_written_ssh_hosts_survive_a_save_of_something_else() {
         let text =
             r#"{"theme": "Mist", "sshHosts": [{"name": "devbox", "target": "me@devbox", "note": 1}, {"name": ""}]}"#;
@@ -1733,6 +1792,7 @@ mod tests {
             target: "me@devbox".into(),
             command: DEFAULT_REMOTE_COMMAND.into(),
             auth: SshAuth::Password,
+            port: Some(2222),
         });
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -1741,6 +1801,7 @@ mod tests {
         assert_eq!(written["sshHosts"][0]["name"], "devbox");
         assert_eq!(written["sshHosts"][0]["command"], DEFAULT_REMOTE_COMMAND);
         assert_eq!(written["sshHosts"][0]["auth"], "password");
+        assert_eq!(written["sshHosts"][0]["port"], 2222);
     }
 
     fn host(name: &str, target: &str) -> SshHost {
@@ -1749,6 +1810,7 @@ mod tests {
             target: target.into(),
             command: DEFAULT_REMOTE_COMMAND.into(),
             auth: SshAuth::Automatic,
+            port: None,
         }
     }
 
