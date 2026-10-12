@@ -753,7 +753,11 @@ impl WorkspaceView {
             .iter()
             .map(|entry| HostId::named(&entry.name))
             .filter(|host| self.host_state(host).in_connected_list())
-            .map(|host| ConnectedHost { label: self.host_state(&host).label(), host })
+            .map(|host| {
+                let state = self.host_state(&host);
+                let label = (state != HostState::Connected).then(|| state.label());
+                ConnectedHost { dot: state.dot(), label, host }
+            })
             .collect();
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_connected(connected, cx));
         let listed: HashSet<&str> = self.ssh_hosts.iter().map(|entry| entry.name.as_str()).collect();
@@ -2256,10 +2260,7 @@ impl WorkspaceView {
                 if self.prompting.replace(true) {
                     return;
                 }
-                let detail = format!(
-                    "{running} running session(s) on {name}. Detach leaves them running there. Close all sessions ends them and stops {name}'s Gantry.",
-                    name = host.name()
-                );
+                let detail = format!("Detach keeps its {running} session(s) running.");
                 let answer = window.prompt(
                     PromptLevel::Info,
                     &format!("Disconnect from {}?", host.name()),

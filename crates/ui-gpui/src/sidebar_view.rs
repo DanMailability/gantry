@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use app_core::host_state::HostDot;
 use app_core::menus::{self, MenuAction, MenuContext};
 use app_core::session_tree::{
     self, Activation, ActiveInput, Arrivals, GroupEdges, PaneEntry, ProjectOrder, ProjectRoots, Row, RowKey, RowKind,
@@ -102,8 +103,10 @@ pub enum SidebarEvent {
 pub struct ConnectedHost {
     /// The host.
     pub host: HostId,
-    /// Its short state ("connected", "connecting…", "reconnecting 2/4").
-    pub label: String,
+    /// The dot before its name: green when connected.
+    pub dot: HostDot,
+    /// Its short state, shown only while it is not connected ("connecting…", "reconnecting 2/4").
+    pub label: Option<String>,
 }
 
 /// The session sidebar.
@@ -1082,7 +1085,13 @@ impl Render for SidebarView {
                             .border_1()
                             .border_color(rgb(theme.tokens.line))
                             .text_xs()
-                            .child(crate::theme::ssh_icon(theme.tokens.muted, &theme))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(rgb(crate::context_menu::host_dot_color(&theme, entry.dot))),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -1090,7 +1099,9 @@ impl Render for SidebarView {
                                     .text_color(rgb(theme.tokens.text))
                                     .child(host.name().to_string()),
                             )
-                            .child(div().text_color(rgb(theme.tokens.muted)).child(entry.label.clone()))
+                            .children(
+                                entry.label.clone().map(|label| div().text_color(rgb(theme.tokens.muted)).child(label)),
+                            )
                             .child(
                                 div()
                                     .id(("disconnect-host", index))
