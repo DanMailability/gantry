@@ -9,7 +9,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::term::{ClipboardType, Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb as VteRgb};
 
 use crate::palette::{DARK, Palette};
@@ -57,6 +57,7 @@ enum Reply {
 pub(crate) struct Listener {
     replies: Arc<Mutex<Vec<Reply>>>,
     title: Arc<Mutex<Option<String>>>,
+    clipboard: Arc<Mutex<Vec<String>>>,
 }
 
 impl EventListener for Listener {
@@ -67,6 +68,10 @@ impl EventListener for Listener {
             Event::TextAreaSizeRequest(format) => Reply::TextAreaSize(format),
             Event::Title(title) => {
                 *self.title.lock().unwrap() = Some(title);
+                return;
+            }
+            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                self.clipboard.lock().unwrap().push(text);
                 return;
             }
             Event::ResetTitle => {
@@ -102,6 +107,7 @@ pub struct TermState {
     parser: Processor,
     replies: Arc<Mutex<Vec<Reply>>>,
     title: Arc<Mutex<Option<String>>>,
+    clipboard: Arc<Mutex<Vec<String>>>,
     palette: Palette,
     cell_size: (u16, u16),
 }
@@ -120,13 +126,15 @@ impl TermState {
     fn with_config(cols: u16, rows: u16, config: Config) -> Self {
         let replies = Arc::new(Mutex::new(Vec::new()));
         let title = Arc::new(Mutex::new(None));
-        let listener = Listener { replies: replies.clone(), title: title.clone() };
+        let clipboard = Arc::new(Mutex::new(Vec::new()));
+        let listener = Listener { replies: replies.clone(), title: title.clone(), clipboard: clipboard.clone() };
         let size = GridSize { cols: cols as usize, rows: rows as usize };
         TermState {
             term: Term::new(config, &size, listener),
             parser: Processor::new(),
             replies,
             title,
+            clipboard,
             palette: DARK,
             cell_size: (0, 0),
         }
@@ -177,6 +185,11 @@ impl TermState {
             258 => self.palette.cursor,
             _ => self.palette.foreground,
         }
+    }
+
+    /// Take the texts programs asked to copy to the clipboard (OSC 52), oldest first.
+    pub fn take_clipboard_stores(&mut self) -> Vec<String> {
+        std::mem::take(&mut *self.clipboard.lock().unwrap())
     }
 
     /// Window title set by the program (OSC 0/2), if any.
@@ -539,6 +552,18 @@ mod tests {
         assert_eq!(t.title().as_deref(), Some("build: ok"));
         t.feed(b"\x1b]0;second\x1b\\");
         assert_eq!(t.title().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn osc52_copy_is_collected_and_paste_is_ignored() {
+        let mut t = TermState::new(10, 3);
+        assert!(t.take_clipboard_stores().is_empty());
+        t.feed(b"\x1b]52;c;aGVsbG8=\x07");
+        t.feed(b"\x1b]52;p;aWdub3JlZA==\x07");
+        t.feed(b"\x1b]52;c;?\x07");
+        assert_eq!(t.take_clipboard_stores(), vec!["hello".to_string()]);
+        assert!(t.take_clipboard_stores().is_empty());
+        assert!(t.take_pty_writes().is_empty());
     }
 
     #[test]

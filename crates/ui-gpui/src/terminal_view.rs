@@ -300,6 +300,10 @@ impl TerminalView {
                 self.term.feed(bytes);
                 // The daemon answers terminal queries; replies from this copy would be duplicates.
                 self.term.take_pty_writes();
+                // OSC 52: programs on a container or SSH host have no clipboard of their own.
+                if let Some(text) = self.term.take_clipboard_stores().pop() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
                 let title = self.term.title();
                 if title != self.title {
                     self.title = title;

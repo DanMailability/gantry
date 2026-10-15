@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- Copying inside Claude or a shell running in a dev container or on an SSH host now reaches this machine's clipboard. Programs there copy with the terminal's clipboard escape sequence (OSC 52), which Gantry ignored.
+
 ## [0.6.2] - 2026-10-12
 
 ### Fixed
