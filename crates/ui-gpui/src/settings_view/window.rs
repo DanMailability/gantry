@@ -127,6 +127,25 @@ impl SettingsView {
             cx,
         );
 
+        let check = settings.check_for_updates;
+        let check_switch = self.switch(
+            "check-for-updates",
+            0,
+            check,
+            window,
+            cx,
+            change(move |settings| settings.check_for_updates = !check),
+        );
+        let check_reset = self.reset_slot(
+            "reset-check-for-updates",
+            0,
+            settings,
+            |s| s.check_for_updates,
+            |s, v| s.check_for_updates = v,
+            window,
+            cx,
+        );
+
         let size_control = self.stepper(&LAST_PROMPT_SIZE, settings, window, cx);
         let size_reset = self.reset_slot(
             "reset-last-prompt-size",
@@ -188,6 +207,18 @@ impl SettingsView {
                     ),
                     row(theme, "Sidebar at start", SIDEBAR[sidebar].2, sidebar_bar, sidebar_reset),
                 ],
+            ))
+            .child(group(
+                theme,
+                "Updates",
+                None,
+                vec![row(
+                    theme,
+                    "Check for updates",
+                    "Asks GitHub once a day whether a newer Gantry exists. Nothing else is sent.",
+                    check_switch,
+                    check_reset,
+                )],
             ))
             .child(group(
                 theme,
