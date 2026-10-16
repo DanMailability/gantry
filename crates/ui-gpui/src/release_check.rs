@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use app_core::release::{Release, parse_releases};
+
 /// GitHub's list of published releases.
 const ENDPOINT: &str = "https://api.github.com/repos/idogrf/gantry/releases?per_page=20";
 
@@ -28,6 +30,14 @@ pub(crate) enum Fetched {
     NotModified,
     /// Anything else: no network, a bad status, a timeout.
     Failed,
+}
+
+/// Takes in what a request came back with: a fresh list replaces both values, anything else keeps them.
+pub(crate) fn apply_result(current: &mut Vec<Release>, etag: &mut Option<String>, fetched: Fetched) {
+    if let Fetched::Releases { body, etag: new } = fetched {
+        *current = parse_releases(&body);
+        *etag = new;
+    }
 }
 
 /// The address to ask: the constant, or in debug builds `GANTRY_UPDATE_URL` when set.
@@ -153,6 +163,33 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(fetch_with(&url, None, Duration::from_millis(300)), Fetched::Failed);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    fn release_list(tag: &str) -> String {
+        format!(r#"[{{"tag_name":"{tag}","draft":false,"prerelease":false}}]"#)
+    }
+
+    #[test]
+    fn apply_replaces_on_new_body() {
+        let (mut current, mut etag) = (parse_releases(&release_list("v0.6.0")), Some("\"old\"".to_owned()));
+        let fetched = Fetched::Releases { body: release_list("v0.7.0"), etag: Some("\"new\"".into()) };
+        apply_result(&mut current, &mut etag, fetched);
+        assert_eq!(current[0].version.to_string(), "0.7.0");
+        assert_eq!(etag.as_deref(), Some("\"new\""));
+    }
+
+    #[test]
+    fn apply_keeps_on_not_modified() {
+        let (mut current, mut etag) = (parse_releases(&release_list("v0.6.0")), Some("\"old\"".to_owned()));
+        apply_result(&mut current, &mut etag, Fetched::NotModified);
+        assert_eq!((current.len(), etag.as_deref()), (1, Some("\"old\"")));
+    }
+
+    #[test]
+    fn apply_keeps_previous_on_failure() {
+        let (mut current, mut etag) = (parse_releases(&release_list("v0.6.0")), Some("\"old\"".to_owned()));
+        apply_result(&mut current, &mut etag, Fetched::Failed);
+        assert_eq!((current.len(), etag.as_deref()), (1, Some("\"old\"")));
     }
 
     #[test]

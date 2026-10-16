@@ -47,7 +47,7 @@ pub enum NotesBlock {
 pub fn parse_releases(json: &str) -> Vec<Release> {
     let Ok(serde_json::Value::Array(entries)) = serde_json::from_str(json) else { return Vec::new() };
     let mut releases: Vec<Release> = entries.iter().filter_map(parse_release).collect();
-    releases.sort_by(|a, b| b.version.cmp(&a.version));
+    releases.sort_by_key(|release| std::cmp::Reverse(release.version));
     releases
 }
 
@@ -74,7 +74,7 @@ pub fn online(running: Version, installed: Option<Version>, releases: &[Release]
         return None;
     }
     let mut newer: Vec<Release> = releases.iter().filter(|release| release.version > running).cloned().collect();
-    newer.sort_by(|a, b| b.version.cmp(&a.version));
+    newer.sort_by_key(|release| std::cmp::Reverse(release.version));
     Some(Online { latest, newer })
 }
 

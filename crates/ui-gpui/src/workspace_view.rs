@@ -11,6 +11,7 @@ use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostSta
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
 use app_core::recents;
+use app_core::release::{self, NotesBlock, Online, Release};
 use app_core::search_merge::{self, HostSearch};
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
@@ -48,6 +49,7 @@ use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherHost, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
+use crate::release_check;
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::settings_view::{SettingsEvent, SettingsView};
@@ -282,6 +284,16 @@ pub struct WorkspaceView {
     update_card: Option<FocusHandle>,
     /// Why Restart and update failed, shown in the card.
     update_error: Option<String>,
+    /// Whether `checkForUpdates` is on.
+    check_updates: bool,
+    /// The published releases the last good check found, newest first.
+    releases: Vec<Release>,
+    /// The `ETag` of that answer.
+    release_etag: Option<String>,
+    /// The open release notes card; its focus handle takes Esc.
+    release_card: Option<FocusHandle>,
+    /// The daily check's timer.
+    release_task: Option<Task<()>>,
     /// Take-over requests waiting for the host's daemon, by host and session.
     take_overs: HashMap<(HostId, String), TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
@@ -470,6 +482,11 @@ impl WorkspaceView {
             update_watch: None,
             update_card: None,
             update_error: None,
+            check_updates: cx.global::<SettingsStore>().settings().check_for_updates,
+            releases: Vec::new(),
+            release_etag: None,
+            release_card: None,
+            release_task: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
             attention: AttentionTracker::default(),
@@ -488,6 +505,7 @@ impl WorkspaceView {
         if let Some(path) = this.start_path.clone() {
             this.update_watch = update_watch::watch(&path, cx);
         }
+        this.release_task = Some(this.start_release_timer(cx));
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
             this.add_slot(leaf, window, cx);
@@ -545,6 +563,51 @@ impl WorkspaceView {
         version::update(running, self.daemon_version, self.installed, live)
     }
 
+    /// The release notice: a published release newer than this window and the installed binary. The install notice
+    /// wins when both exist.
+    fn online_notice(&self) -> Option<Online> {
+        if !self.check_updates || self.update_notice().is_some() {
+            return None;
+        }
+        release::online(Version::parse(protocol::build::VERSION)?, self.installed, &self.releases)
+    }
+
+    /// The first check 30 seconds after start, then one a day.
+    fn start_release_timer(&self, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(release_check::FIRST_DELAY).await;
+            loop {
+                if this.update(cx, |view, cx| view.check_releases(cx)).is_err() {
+                    return;
+                }
+                cx.background_executor().timer(release_check::INTERVAL).await;
+            }
+        })
+    }
+
+    /// Asks GitHub for the release list (nothing when the check is off).
+    fn check_releases(&mut self, cx: &mut Context<Self>) {
+        if !self.check_updates {
+            return;
+        }
+        let (url, etag) = (release_check::endpoint(), self.release_etag.clone());
+        cx.spawn(async move |this, cx| {
+            let fetched =
+                cx.background_executor().spawn(async move { release_check::fetch(&url, etag.as_deref()) }).await;
+            let _ = this.update(cx, |view, cx| view.release_fetched(fetched, cx));
+        })
+        .detach();
+    }
+
+    /// An answer arrived; it is dropped when the check was turned off meanwhile.
+    fn release_fetched(&mut self, fetched: release_check::Fetched, cx: &mut Context<Self>) {
+        if !self.check_updates {
+            return;
+        }
+        release_check::apply_result(&mut self.releases, &mut self.release_etag, fetched);
+        cx.notify();
+    }
+
     /// Restart and update: Stop all when the daemon is older, start the new GUI, quit.
     fn restart_and_update(&mut self, cx: &mut Context<Self>) {
         let (Some(update), Some(path)) = (self.update_notice(), self.start_path.clone()) else { return };
@@ -587,6 +650,17 @@ impl WorkspaceView {
         }
         let settings = cx.global::<SettingsStore>().settings().clone();
         self.ssh_hosts = settings.ssh_hosts.clone();
+        if settings.check_for_updates != self.check_updates {
+            self.check_updates = settings.check_for_updates;
+            if self.check_updates {
+                self.check_releases(cx);
+            } else {
+                self.releases.clear();
+                self.release_etag = None;
+                self.release_card = None;
+                cx.notify();
+            }
+        }
         // A host that left the settings is forgotten: no connection, no timer, no attempt, and its panes say so.
         let listed: HashSet<String> = self.ssh_hosts.iter().map(|host| host.name.clone()).collect();
         let removed: Vec<HostId> = self
@@ -2995,6 +3069,31 @@ impl WorkspaceView {
                         })),
                 )
             })
+            .when_some(self.online_notice(), |bar, online| {
+                bar.child(
+                    div()
+                        .id("release-pill")
+                        .flex_none()
+                        .h(theme.ui(24.))
+                        .px(theme.ui(10.))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme.tokens.accent))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.tokens.accent))
+                        .cursor_pointer()
+                        .child(online.pill())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let focus = cx.focus_handle();
+                            window.focus(&focus, cx);
+                            this.release_card = Some(focus);
+                            cx.notify();
+                        })),
+                )
+            })
             .when(waiting > 0, |bar| {
                 bar.child(
                     div()
@@ -3045,6 +3144,85 @@ impl WorkspaceView {
     }
 
     /// The middle of the title bar: `Settings`, or the project and the focused session's chip.
+    /// The release notes card under the release pill: the notes of every release newer than this window.
+    fn render_release_card(
+        &self,
+        focus: &FocusHandle,
+        online: &Online,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let close = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            this.release_card = None;
+            this.focus_current(window, cx);
+            cx.notify();
+        };
+        let (close_on_key, close_outside) = (cx.listener(move |this, _: &(), window, cx| close(this, window, cx)), {
+            cx.listener(move |this, _: &(), window, cx| close(this, window, cx))
+        });
+        let notes = online.newer.iter().fold(div().flex().flex_col().gap(theme.ui(14.)), |notes, release| {
+            notes.child(release_section(theme, release))
+        });
+        let url = online.newer.first().map(|release| release.url.clone()).filter(|url| !url.is_empty());
+        let running = Version::parse(protocol::build::VERSION).map(|version| version.to_string()).unwrap_or_default();
+        div()
+            .id("release-card")
+            .occlude()
+            .absolute()
+            .top(theme.ui(46.))
+            .right(theme.ui(74.))
+            .w(theme.ui(360.))
+            .p(theme.ui(16.))
+            .flex()
+            .flex_col()
+            .gap(theme.ui(12.))
+            .bg(rgb(theme.tokens.raised))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .rounded(px(RADIUS))
+            .track_focus(focus)
+            .on_key_down(move |event, window, cx| {
+                if event.keystroke.key == "escape" {
+                    close_on_key(&(), window, cx);
+                }
+                cx.stop_propagation();
+            })
+            .on_mouse_down_out(move |_, window, cx| close_outside(&(), window, cx))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(theme.tokens.text))
+                    .child(format!("Gantry {} is available", online.latest)),
+            )
+            .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(format!("This window runs {running}.")))
+            .child(div().id("release-notes").max_h(theme.ui(380.)).overflow_y_scroll().child(notes))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.tokens.muted))
+                    .child("Download it from the release page and install as before."),
+            )
+            .when_some(url, |card, url| {
+                card.child(
+                    div()
+                        .id("open-release-page")
+                        .h(theme.ui(32.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS_SMALL))
+                        .bg(rgb(theme.tokens.accent))
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.tokens.on_accent))
+                        .cursor_pointer()
+                        .child("Open release page")
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+                )
+            })
+    }
+
     fn render_title_session(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let theme = theme(cx).clone();
         let middle = div().min_w_0().flex_shrink(1.).flex().flex_row().items_center().gap(theme.ui(8.));
@@ -3475,6 +3653,39 @@ pub(crate) fn round_button(
         .on_click(on_click)
 }
 
+/// One release's heading and notes for the release card.
+fn release_section(theme: &Theme, release: &Release) -> Div {
+    let heading = if release.date.is_empty() {
+        format!("v{}", release.version)
+    } else {
+        format!("v{} · {}", release.version, release.date)
+    };
+    let text = rgb(theme.tokens.text);
+    release::notes_blocks(&release.notes).into_iter().fold(
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.ui(3.))
+            .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(rgb(theme.tokens.accent)).child(heading)),
+        |section, block| {
+            section.child(match block {
+                NotesBlock::Heading(text_line) => {
+                    div().pt(theme.ui(4.)).text_xs().font_weight(FontWeight::BOLD).text_color(text).child(text_line)
+                }
+                NotesBlock::Bullet(item) => div()
+                    .flex()
+                    .gap(theme.ui(6.))
+                    .text_xs()
+                    .text_color(text)
+                    .child(div().flex_none().child("•"))
+                    .child(div().child(item)),
+                NotesBlock::Line(line) => div().text_xs().text_color(text).child(line),
+                NotesBlock::Gap => div().h(theme.ui(4.)),
+            })
+        },
+    )
+}
+
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
@@ -3742,6 +3953,9 @@ impl Render for WorkspaceView {
                                 .on_click(cx.listener(|this, _, _, cx| this.restart_and_update(cx))),
                         ),
                 )
+            })
+            .when_some(self.release_card.as_ref().zip(self.online_notice()), |root, (focus, online)| {
+                root.child(self.render_release_card(focus, &online, &theme, cx))
             })
             .when_some(self.pane_menu.as_ref(), |root, menu| {
                 let pick = cx.listener(|this, action: &MenuAction, window, cx| {
