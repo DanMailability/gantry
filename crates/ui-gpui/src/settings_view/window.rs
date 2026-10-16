@@ -1,8 +1,7 @@
-//! The Window section: what Gantry restores on start, the sidebar at start and the last prompt card.
+//! The Window section: what Gantry restores on start, the sidebar at start and the update check.
 
 use app_core::release::CheckStatus;
 use app_core::settings::{Settings, SidebarAtStart};
-use app_core::theme_colors::{ProjectColor, mix};
 use app_core::version::Version;
 use gpui::{Context, Div, Window, div};
 
@@ -24,16 +23,6 @@ const SIDEBAR: [(SidebarAtStart, &str, &str); 3] = [
     (SidebarAtStart::Shown, "Shown", "Always open when Gantry starts."),
     (SidebarAtStart::Hidden, "Hidden", "Always closed when Gantry starts."),
 ];
-
-const LAST_PROMPT_SIZE: Stepped = Stepped {
-    name: "last-prompt-size",
-    get: |s| s.window.last_prompt_size,
-    set: |s, value| s.window.last_prompt_size = value,
-    delta: 1.0,
-    min: 11.0,
-    max: 32.0,
-    unit: "",
-};
 
 impl SettingsView {
     pub(super) fn window_page(
@@ -110,25 +99,6 @@ impl SettingsView {
             cx,
         );
 
-        let shown = settings.window.last_prompt;
-        let prompt_switch = self.switch(
-            "last-prompt",
-            0,
-            shown,
-            window,
-            cx,
-            change(move |settings| settings.window.last_prompt = !shown),
-        );
-        let prompt_reset = self.reset_slot(
-            "reset-last-prompt",
-            0,
-            settings,
-            |s| s.window.last_prompt,
-            |s, v| s.window.last_prompt = v,
-            window,
-            cx,
-        );
-
         let check = settings.check_for_updates;
         let check_switch = self.switch(
             "check-for-updates",
@@ -179,48 +149,6 @@ impl SettingsView {
             ),
         };
 
-        let size_control = self.stepper(&LAST_PROMPT_SIZE, settings, window, cx);
-        let size_reset = self.reset_slot(
-            "reset-last-prompt-size",
-            0,
-            settings,
-            |s| s.window.last_prompt_size,
-            |s, v| s.window.last_prompt_size = v,
-            window,
-            cx,
-        );
-        let swatches = [None]
-            .into_iter()
-            .chain(ProjectColor::ALL.map(|color| Some(color.value(theme.preset))))
-            .enumerate()
-            .map(|(index, choice)| {
-                let shown = mix(choice.unwrap_or(theme.tokens.accent), theme.tokens.surface, 0.5);
-                let pick = change(move |settings| settings.window.last_prompt_color = choice);
-                self.pressable(
-                    "last-prompt-swatch",
-                    index,
-                    (settings.window.last_prompt_color == choice).then_some(theme.tokens.text),
-                    window,
-                    cx,
-                    pick,
-                )
-                .size(theme.ui(28.))
-                .rounded(px(RADIUS_SMALL))
-                .bg(rgb(shown))
-                .border_2()
-            })
-            .collect::<Vec<_>>();
-        let swatches = div().flex().gap(theme.ui(8.)).children(swatches);
-        let color_reset = self.reset_slot(
-            "reset-last-prompt-color",
-            0,
-            settings,
-            |s| s.window.last_prompt_color,
-            |s, v| s.window.last_prompt_color = v,
-            window,
-            cx,
-        );
-
         div()
             .flex()
             .flex_col()
@@ -254,34 +182,6 @@ impl SettingsView {
                         check_reset,
                     ),
                     row_shell(theme, row_label("Check now", status_line), check_button, div()),
-                ],
-            ))
-            .child(group(
-                theme,
-                "Panes",
-                None,
-                vec![
-                    row(
-                        theme,
-                        "Last prompt",
-                        "Show your last prompt in a card above each Claude pane.",
-                        prompt_switch,
-                        prompt_reset,
-                    ),
-                    row(
-                        theme,
-                        "Prompt text size",
-                        "Two lines at most; the card grows with it.",
-                        size_control,
-                        size_reset,
-                    ),
-                    row(
-                        theme,
-                        "Prompt background",
-                        "A tint of this color. The first swatch is the theme's accent.",
-                        swatches,
-                        color_reset,
-                    ),
                 ],
             ))
     }

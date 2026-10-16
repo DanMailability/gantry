@@ -3464,8 +3464,8 @@ impl WorkspaceView {
                     .leaves
                     .get(&leaf)
                     .map(|entry| display_path(&entry.launch.cwd, std::env::home_dir().as_deref()));
-                let window_settings = cx.global::<SettingsStore>().settings().window;
-                let last_prompt = if window_settings.last_prompt {
+                let last_prompt_settings = cx.global::<SettingsStore>().settings().last_prompt;
+                let last_prompt = if last_prompt_settings.enabled {
                     self.workspace.leaf_last_prompt(leaf, self.sidebar.read(cx).sessions()).map(str::to_string)
                 } else {
                     None
@@ -3504,8 +3504,8 @@ impl WorkspaceView {
                                     pane.child(prompt_card(
                                         text,
                                         multiple,
-                                        window_settings.last_prompt_size,
-                                        window_settings.last_prompt_color,
+                                        last_prompt_settings.size,
+                                        last_prompt_settings.color,
                                         &theme,
                                     ))
                                 })

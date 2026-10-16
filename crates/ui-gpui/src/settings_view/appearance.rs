@@ -3,7 +3,7 @@
 use app_core::session_tree::Tone;
 use app_core::settings::{Settings, StatusFills, ThemeChoice, parse_hex};
 use app_core::theme_colors::{
-    Preset, ProjectColor, Tokens, contrast, derive, readable_fill, tokens as preset_tokens, tone_colors,
+    Preset, ProjectColor, Tokens, contrast, derive, mix, readable_fill, tokens as preset_tokens, tone_colors,
 };
 use gpui::{Context, Div, FontWeight, IntoElement, KeyDownEvent, Window, deferred, div, px, rgb, rgba};
 
@@ -81,6 +81,16 @@ impl Status {
         tone_colors(preset, &StatusFills::default(), self.tone()).fill.unwrap_or(preset_tokens(preset).surface)
     }
 }
+
+const LAST_PROMPT_SIZE: Stepped = Stepped {
+    name: "last-prompt-size",
+    get: |s| s.last_prompt.size,
+    set: |s, value| s.last_prompt.size = value,
+    delta: 1.0,
+    min: 11.0,
+    max: 32.0,
+    unit: "",
+};
 
 const INTERFACE_SIZE: Stepped = Stepped {
     name: "interface-size",
@@ -188,6 +198,7 @@ impl SettingsView {
             .child(self.theme_cards(theme, settings, window, cx))
             .child(self.status_colors(theme, settings, window, cx))
             .child(self.interface_group(theme, settings, window, cx))
+            .child(self.panes_group(theme, settings, window, cx))
             .child(self.project_colors(theme, settings, window, cx))
     }
 
@@ -423,6 +434,91 @@ impl SettingsView {
                     "The ring around the selected row. The first swatch is the theme's accent.",
                     swatches,
                     selection_reset,
+                ),
+            ],
+        )
+    }
+
+    fn panes_group(&mut self, theme: &Theme, settings: &Settings, window: &Window, cx: &mut Context<Self>) -> Div {
+        let shown = settings.last_prompt.enabled;
+        let prompt_switch = self.switch(
+            "last-prompt",
+            0,
+            shown,
+            window,
+            cx,
+            change(move |settings| settings.last_prompt.enabled = !shown),
+        );
+        let prompt_reset = self.reset_slot(
+            "reset-last-prompt",
+            0,
+            settings,
+            |s| s.last_prompt.enabled,
+            |s, v| s.last_prompt.enabled = v,
+            window,
+            cx,
+        );
+
+        let size_control = self.stepper(&LAST_PROMPT_SIZE, settings, window, cx);
+        let size_reset = self.reset_slot(
+            "reset-last-prompt-size",
+            0,
+            settings,
+            |s| s.last_prompt.size,
+            |s, v| s.last_prompt.size = v,
+            window,
+            cx,
+        );
+        let swatches = [None]
+            .into_iter()
+            .chain(ProjectColor::ALL.map(|color| Some(color.value(theme.preset))))
+            .enumerate()
+            .map(|(index, choice)| {
+                let shown = mix(choice.unwrap_or(theme.tokens.accent), theme.tokens.surface, 0.5);
+                let pick = change(move |settings| settings.last_prompt.color = choice);
+                self.pressable(
+                    "last-prompt-swatch",
+                    index,
+                    (settings.last_prompt.color == choice).then_some(theme.tokens.text),
+                    window,
+                    cx,
+                    pick,
+                )
+                .size(theme.ui(28.))
+                .rounded(px(RADIUS_SMALL))
+                .bg(rgb(shown))
+                .border_2()
+            })
+            .collect::<Vec<_>>();
+        let swatches = div().flex().gap(theme.ui(8.)).children(swatches);
+        let color_reset = self.reset_slot(
+            "reset-last-prompt-color",
+            0,
+            settings,
+            |s| s.last_prompt.color,
+            |s, v| s.last_prompt.color = v,
+            window,
+            cx,
+        );
+        group(
+            theme,
+            "Panes",
+            None,
+            vec![
+                row(
+                    theme,
+                    "Last prompt",
+                    "Show your last prompt in a card above each Claude pane.",
+                    prompt_switch,
+                    prompt_reset,
+                ),
+                row(theme, "Prompt text size", "Two lines at most; the card grows with it.", size_control, size_reset),
+                row(
+                    theme,
+                    "Prompt background",
+                    "A tint of this color. The first swatch is the theme's accent.",
+                    swatches,
+                    color_reset,
                 ),
             ],
         )

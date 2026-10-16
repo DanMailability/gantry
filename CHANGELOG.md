@@ -5,6 +5,11 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-16
+
+### Changed
+- The last prompt card's settings (show, text size, background) moved from Settings > Window to Settings > Appearance > Panes. In `settings.json` they are now `lastPrompt.enabled`, `lastPrompt.size` and `lastPrompt.color` instead of `window.lastPrompt`, `window.lastPromptSize` and `window.lastPromptColor`; values saved under the old keys are not carried over.
+
 ## [0.7.0] - 2026-10-16
 
 ### Added
