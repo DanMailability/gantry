@@ -1,7 +1,9 @@
 //! The Window section: what Gantry restores on start, the sidebar at start and the last prompt card.
 
+use app_core::release::CheckStatus;
 use app_core::settings::{Settings, SidebarAtStart};
 use app_core::theme_colors::{ProjectColor, mix};
+use app_core::version::Version;
 use gpui::{Context, Div, Window, div};
 
 use super::*;
@@ -127,6 +129,56 @@ impl SettingsView {
             cx,
         );
 
+        let check = settings.check_for_updates;
+        let check_switch = self.switch(
+            "check-for-updates",
+            0,
+            check,
+            window,
+            cx,
+            change(move |settings| settings.check_for_updates = !check),
+        );
+        let check_reset = self.reset_slot(
+            "reset-check-for-updates",
+            0,
+            settings,
+            |s| s.check_for_updates,
+            |s, v| s.check_for_updates = v,
+            window,
+            cx,
+        );
+
+        let check_row = cx.try_global::<crate::release_check::CheckRow>().cloned().unwrap_or_default();
+        let running = Version::parse(protocol::build::VERSION);
+        let status_color = match check_row.status {
+            CheckStatus::Idle => theme.tokens.muted,
+            CheckStatus::Checking | CheckStatus::Available(_) => theme.tokens.accent,
+            CheckStatus::UpToDate => theme.tokens.text,
+            CheckStatus::Failed => theme.tokens.danger,
+        };
+        let status_line = div()
+            .mt(theme.ui(2.))
+            .text_color(rgb(status_color))
+            .child(running.map_or_else(String::new, |running| check_row.status.line(running)));
+        let check_button = match check_row.url.filter(|_| matches!(check_row.status, CheckStatus::Available(_))) {
+            Some(url) => self.button(
+                "open-release-page",
+                0,
+                "Open release page",
+                window,
+                cx,
+                handler(move |_, _, cx| cx.open_url(&url)),
+            ),
+            None => self.button(
+                "check-now",
+                0,
+                "Check now",
+                window,
+                cx,
+                handler(|_, _, cx| cx.emit(SettingsEvent::CheckNow)),
+            ),
+        };
+
         let size_control = self.stepper(&LAST_PROMPT_SIZE, settings, window, cx);
         let size_reset = self.reset_slot(
             "reset-last-prompt-size",
@@ -187,6 +239,21 @@ impl SettingsView {
                         resume_reset,
                     ),
                     row(theme, "Sidebar at start", SIDEBAR[sidebar].2, sidebar_bar, sidebar_reset),
+                ],
+            ))
+            .child(group(
+                theme,
+                "Updates",
+                None,
+                vec![
+                    row(
+                        theme,
+                        "Check for updates",
+                        "Asks GitHub once a day whether a newer Gantry exists. Nothing else is sent.",
+                        check_switch,
+                        check_reset,
+                    ),
+                    row_shell(theme, row_label("Check now", status_line), check_button, div()),
                 ],
             ))
             .child(group(

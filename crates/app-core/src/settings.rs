@@ -400,6 +400,8 @@ pub struct Settings {
     pub project_colors: ProjectColors,
     /// Whether Working sessions show the moving glow.
     pub animate_working: bool,
+    /// Whether Gantry asks GitHub once a day for a newer release.
+    pub check_for_updates: bool,
     /// The first-run wizard has been answered (imported or skipped), so it does not open by itself.
     pub setup_done: bool,
 }
@@ -468,6 +470,7 @@ impl Default for Settings {
             },
             project_colors: ProjectColors::default(),
             animate_working: true,
+            check_for_updates: true,
             setup_done: false,
         }
     }
@@ -852,6 +855,7 @@ impl Reader {
 
         let ui_font_size = self.number(raw, "", "uiFontSize", 14.0, (11.0, 20.0)) as f32;
         let animate_working = self.bool(raw, "", "animateWorking", true);
+        let check_for_updates = self.bool(raw, "", "checkForUpdates", true);
         let setup_done = self.bool(raw, "", "setupDone", false);
 
         let map = self.object(raw, "", "alerts");
@@ -958,6 +962,7 @@ impl Reader {
             window,
             project_colors,
             animate_working,
+            check_for_updates,
             setup_done,
         }
     }
@@ -1106,6 +1111,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         .collect();
     add(&["projectColors", "folders"], Value::Object(colors), !settings.project_colors.folders.is_empty());
     add(&["animateWorking"], settings.animate_working.into(), settings.animate_working != default.animate_working);
+    add(
+        &["checkForUpdates"],
+        settings.check_for_updates.into(),
+        settings.check_for_updates != default.check_for_updates,
+    );
     add(&["setupDone"], settings.setup_done.into(), settings.setup_done != default.setup_done);
     out
 }
@@ -1214,6 +1224,25 @@ mod tests {
         let path = dir.path().join("settings.json");
         save(&path, &settings, &Map::new()).unwrap();
         assert!(read_json(&path).get("animateWorking").is_none(), "the default writes nothing");
+    }
+
+    #[test]
+    fn check_for_updates_defaults_on_and_round_trips() {
+        assert!(Settings::default().check_for_updates);
+        let loaded = parse(r#"{"checkForUpdates": false}"#);
+        assert!(loaded.problems.is_empty());
+        let mut settings = loaded.settings.unwrap();
+        assert!(!settings.check_for_updates);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &Map::new()).unwrap();
+        assert_eq!(read_json(&path).get("checkForUpdates"), Some(&Value::Bool(false)));
+        let bad = parse(r#"{"checkForUpdates": "no"}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert!(bad.settings.unwrap().check_for_updates);
+        settings.check_for_updates = true;
+        save(&path, &settings, &Map::new()).unwrap();
+        assert!(read_json(&path).get("checkForUpdates").is_none(), "the default writes nothing");
     }
 
     #[test]
