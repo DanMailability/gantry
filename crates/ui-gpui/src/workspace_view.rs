@@ -3678,7 +3678,7 @@ fn release_section(theme: &Theme, release: &Release) -> Div {
                     .text_xs()
                     .text_color(text)
                     .child(div().flex_none().child("•"))
-                    .child(div().child(item)),
+                    .child(div().flex_1().min_w_0().child(item)),
                 NotesBlock::Line(line) => div().text_xs().text_color(text).child(line),
                 NotesBlock::Gap => div().h(theme.ui(4.)),
             })
