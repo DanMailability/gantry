@@ -7,7 +7,6 @@ that runs Claude shows its status, so you can run as many sessions as you like a
 
 https://github.com/user-attachments/assets/c8f1c7a0-12ba-4c0c-a482-666c805bba7f
 
-*Click the animation to watch the one-minute trailer.*
 
 ![Gantry: a sidebar of sessions colored by status, and the focused Claude session](docs/images/ui-overview.png)
 
