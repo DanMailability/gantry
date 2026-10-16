@@ -10,6 +10,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - Gantry checks GitHub once a day for a newer release. A newer one shows as `↑ Update to x.y.z` in the title bar, with its release notes and an Open release page button; Settings > Window > Updates turns the check off and has a Check now button that asks right away and says what it found.
 
+### Fixed
+- Copying inside Claude or a shell running in a dev container or on an SSH host now reaches this machine's clipboard. Programs there copy with the terminal's clipboard escape sequence (OSC 52), which Gantry ignored.
+
 ## [0.6.2] - 2026-10-12
 
 ### Fixed
