@@ -107,6 +107,10 @@ Settings live in `~/.config/gantry/settings.json` (the platform config dir). Edi
 Gantry watches the file and applies changes live. Unknown keys are kept, and a bad value falls back to its default with
 a banner in Settings.
 
+Gantry asks GitHub once a day whether a newer release exists (a plain request to the GitHub API that sends only a
+`gantry/<version>` User-Agent) and shows a title-bar notice with the release notes. It never downloads or installs
+anything. Turn it off in Settings > Window > Updates, or with `"checkForUpdates": false`.
+
 Layouts, logs and the search index are kept per profile under `~/.local/share/gantry/<profile>/`. Debug builds use the
 `dev` profile and release builds `default`; set `GANTRY_PROFILE` to override.
 
