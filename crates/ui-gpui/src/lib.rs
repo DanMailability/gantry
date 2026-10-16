@@ -8,6 +8,7 @@ mod field;
 mod hover_card;
 pub mod launcher_view;
 pub mod recents_view;
+mod release_check;
 mod settings_store;
 mod settings_view;
 mod setup_view;

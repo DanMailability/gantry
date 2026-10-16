@@ -21,6 +21,7 @@ serde_json.workspace = true
 tracing.workspace = true
 notify-rust.workspace = true
 rodio.workspace = true
+ureq = "3.4.2"
 
 [dev-dependencies]
 tempfile.workspace = true

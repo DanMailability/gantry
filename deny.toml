@@ -21,6 +21,7 @@ allow = [
     "0BSD",
     "Unlicense",
     "bzip2-1.0.6",
+    "CDLA-Permissive-2.0",
 ]
 private = { ignore = true }
 
