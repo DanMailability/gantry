@@ -43,6 +43,42 @@ pub enum NotesBlock {
     Gap,
 }
 
+/// What the Settings "Check now" row says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckStatus {
+    /// Nothing asked yet.
+    Idle,
+    /// A manual check is running.
+    Checking,
+    /// The newest release is not newer than this window.
+    UpToDate,
+    /// A newer release exists.
+    Available(Version),
+    /// GitHub did not answer.
+    Failed,
+}
+
+/// The status after a good answer: [`CheckStatus::Available`] when some release is higher than `running`.
+pub fn check_status(running: Version, releases: &[Release]) -> CheckStatus {
+    match releases.iter().map(|release| release.version).max() {
+        Some(latest) if latest > running => CheckStatus::Available(latest),
+        _ => CheckStatus::UpToDate,
+    }
+}
+
+impl CheckStatus {
+    /// The line in the row; `running` is this window's version.
+    pub fn line(&self, running: Version) -> String {
+        match self {
+            CheckStatus::Idle => format!("Gantry {running}"),
+            CheckStatus::Checking => "Checking…".into(),
+            CheckStatus::UpToDate => format!("Gantry {running} is up to date."),
+            CheckStatus::Available(latest) => format!("Gantry {latest} is available."),
+            CheckStatus::Failed => "Couldn't reach GitHub.".into(),
+        }
+    }
+}
+
 /// The published releases in a GitHub releases list, newest first; empty when the text is not such a list.
 pub fn parse_releases(json: &str) -> Vec<Release> {
     let Ok(serde_json::Value::Array(entries)) = serde_json::from_str(json) else { return Vec::new() };
@@ -196,6 +232,25 @@ mod tests {
         assert_eq!(found.latest, v("0.7.1"));
         assert_eq!(found.newer, vec![release("0.7.1"), release("0.7.0")]);
         assert_eq!(found.pill(), "↑ Update to 0.7.1");
+    }
+
+    #[test]
+    fn check_status_compares_the_newest_release_with_the_running_version() {
+        let releases = [release("0.7.0"), release("0.6.2")];
+        assert_eq!(check_status(v("0.6.2"), &releases), CheckStatus::Available(v("0.7.0")));
+        assert_eq!(check_status(v("0.7.0"), &releases), CheckStatus::UpToDate);
+        assert_eq!(check_status(v("0.8.0"), &releases), CheckStatus::UpToDate);
+        assert_eq!(check_status(v("0.6.2"), &[]), CheckStatus::UpToDate);
+    }
+
+    #[test]
+    fn status_lines() {
+        let running = v("0.6.2");
+        assert_eq!(CheckStatus::Idle.line(running), "Gantry 0.6.2");
+        assert_eq!(CheckStatus::Checking.line(running), "Checking…");
+        assert_eq!(CheckStatus::UpToDate.line(running), "Gantry 0.6.2 is up to date.");
+        assert_eq!(CheckStatus::Available(v("0.7.1")).line(running), "Gantry 0.7.1 is available.");
+        assert_eq!(CheckStatus::Failed.line(running), "Couldn't reach GitHub.");
     }
 
     #[test]

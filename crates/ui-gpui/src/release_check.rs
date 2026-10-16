@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use app_core::release::{Release, parse_releases};
+use app_core::release::{CheckStatus, Release, parse_releases};
+use gpui::Global;
 
 /// GitHub's list of published releases.
 const ENDPOINT: &str = "https://api.github.com/repos/idogrf/gantry/releases?per_page=20";
@@ -15,6 +16,23 @@ pub(crate) const FIRST_DELAY: Duration = Duration::from_secs(30);
 
 /// Time between checks.
 pub(crate) const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What the Settings "Check now" row shows; the workspace keeps it current.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CheckRow {
+    /// The status line.
+    pub(crate) status: CheckStatus,
+    /// The newest release's page, when one is newer.
+    pub(crate) url: Option<String>,
+}
+
+impl Default for CheckRow {
+    fn default() -> Self {
+        CheckRow { status: CheckStatus::Idle, url: None }
+    }
+}
+
+impl Global for CheckRow {}
 
 /// What a request came back with.
 #[derive(Debug, PartialEq, Eq)]

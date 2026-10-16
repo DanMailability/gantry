@@ -11,7 +11,7 @@ use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostSta
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::layout_store;
 use app_core::recents;
-use app_core::release::{self, NotesBlock, Online, Release};
+use app_core::release::{self, CheckStatus, NotesBlock, Online, Release};
 use app_core::search_merge::{self, HostSearch};
 use app_core::settings::ThemeChoice;
 use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
@@ -49,7 +49,7 @@ use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherHost, LauncherView};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
-use crate::release_check;
+use crate::release_check::{self, CheckRow};
 use crate::settings_store::{SettingsStore, dir_badge_for};
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::settings_view::{SettingsEvent, SettingsView};
@@ -286,6 +286,8 @@ pub struct WorkspaceView {
     update_error: Option<String>,
     /// Whether `checkForUpdates` is on.
     check_updates: bool,
+    /// A manual check found releases while the daily check is off: the notice still shows.
+    manual_found: bool,
     /// The published releases the last good check found, newest first.
     releases: Vec<Release>,
     /// The `ETag` of that answer.
@@ -483,6 +485,7 @@ impl WorkspaceView {
             update_card: None,
             update_error: None,
             check_updates: cx.global::<SettingsStore>().settings().check_for_updates,
+            manual_found: false,
             releases: Vec::new(),
             release_etag: None,
             release_card: None,
@@ -505,6 +508,7 @@ impl WorkspaceView {
         if let Some(path) = this.start_path.clone() {
             this.update_watch = update_watch::watch(&path, cx);
         }
+        cx.set_global(CheckRow::default());
         this.release_task = Some(this.start_release_timer(cx));
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
@@ -566,7 +570,7 @@ impl WorkspaceView {
     /// The release notice: a published release newer than this window and the installed binary. The install notice
     /// wins when both exist.
     fn online_notice(&self) -> Option<Online> {
-        if !self.check_updates || self.update_notice().is_some() {
+        if !(self.check_updates || self.manual_found) || self.update_notice().is_some() {
             return None;
         }
         release::online(Version::parse(protocol::build::VERSION)?, self.installed, &self.releases)
@@ -577,7 +581,7 @@ impl WorkspaceView {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(release_check::FIRST_DELAY).await;
             loop {
-                if this.update(cx, |view, cx| view.check_releases(cx)).is_err() {
+                if this.update(cx, |view, cx| view.check_releases(false, cx)).is_err() {
                     return;
                 }
                 cx.background_executor().timer(release_check::INTERVAL).await;
@@ -585,27 +589,55 @@ impl WorkspaceView {
         })
     }
 
-    /// Asks GitHub for the release list (nothing when the check is off).
-    fn check_releases(&mut self, cx: &mut Context<Self>) {
-        if !self.check_updates {
+    /// Asks GitHub for the release list. The daily check does nothing while the setting is off; Check now (`manual`)
+    /// always asks, and ignores a press while one is running.
+    fn check_releases(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if !manual && !self.check_updates {
             return;
+        }
+        if manual {
+            if cx.global::<CheckRow>().status == CheckStatus::Checking {
+                return;
+            }
+            self.set_check_row(CheckStatus::Checking, cx);
         }
         let (url, etag) = (release_check::endpoint(), self.release_etag.clone());
         cx.spawn(async move |this, cx| {
             let fetched =
                 cx.background_executor().spawn(async move { release_check::fetch(&url, etag.as_deref()) }).await;
-            let _ = this.update(cx, |view, cx| view.release_fetched(fetched, cx));
+            let _ = this.update(cx, |view, cx| view.release_fetched(fetched, manual, cx));
         })
         .detach();
     }
 
-    /// An answer arrived; it is dropped when the check was turned off meanwhile.
-    fn release_fetched(&mut self, fetched: release_check::Fetched, cx: &mut Context<Self>) {
-        if !self.check_updates {
+    /// An answer arrived. The daily one is dropped when the check was turned off meanwhile; only a manual one reaches
+    /// the Check now row, and its find shows the notice even while the setting is off.
+    fn release_fetched(&mut self, fetched: release_check::Fetched, manual: bool, cx: &mut Context<Self>) {
+        if !manual && !self.check_updates {
             return;
         }
+        let failed = fetched == release_check::Fetched::Failed;
         release_check::apply_result(&mut self.releases, &mut self.release_etag, fetched);
+        if manual && let Some(running) = Version::parse(protocol::build::VERSION) {
+            self.manual_found |= !failed;
+            let status = if failed { CheckStatus::Failed } else { release::check_status(running, &self.releases) };
+            self.set_check_row(status, cx);
+        }
         cx.notify();
+    }
+
+    /// Publishes what the Check now row shows.
+    fn set_check_row(&mut self, status: CheckStatus, cx: &mut Context<Self>) {
+        let url = match status {
+            CheckStatus::Available(_) => {
+                self.releases.first().map(|release| release.url.clone()).filter(|url| !url.is_empty())
+            }
+            _ => None,
+        };
+        let row = CheckRow { status, url };
+        if *cx.global::<CheckRow>() != row {
+            cx.set_global(row);
+        }
     }
 
     /// Restart and update: Stop all when the daemon is older, start the new GUI, quit.
@@ -653,11 +685,13 @@ impl WorkspaceView {
         if settings.check_for_updates != self.check_updates {
             self.check_updates = settings.check_for_updates;
             if self.check_updates {
-                self.check_releases(cx);
+                self.check_releases(false, cx);
             } else {
+                self.manual_found = false;
                 self.releases.clear();
                 self.release_etag = None;
                 self.release_card = None;
+                self.set_check_row(CheckStatus::Idle, cx);
                 cx.notify();
             }
         }
@@ -2908,6 +2942,7 @@ impl WorkspaceView {
                 Some(cx.subscribe_in(&view, window, |this, _, event: &SettingsEvent, window, cx| match event {
                     SettingsEvent::DetectClaudeDirs => this.show_setup(SetupMode::Rerun, window, cx),
                     SettingsEvent::AddSshHost => this.open_ssh_wizard(WizardStart::Add, window, cx),
+                    SettingsEvent::CheckNow => this.check_releases(true, cx),
                     SettingsEvent::HostRenamed { from, to, reconnect } => {
                         this.host_renamed(&HostId::named(from), &HostId::named(to), *reconnect, window, cx)
                     }
@@ -2933,6 +2968,9 @@ impl WorkspaceView {
             self.workspace.focus(leaf);
         }
         self.settings = None;
+        if cx.global::<CheckRow>().status != CheckStatus::Checking {
+            self.set_check_row(CheckStatus::Idle, cx);
+        }
         self._settings_events = None;
         self.focus_current(window, cx);
         self.save(cx);

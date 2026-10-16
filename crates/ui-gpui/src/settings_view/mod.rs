@@ -205,6 +205,8 @@ pub(crate) enum SettingsEvent {
     HostRemoved(String),
     /// Disconnect and connect the host again (its target was edited while connected).
     ReconnectHost(String),
+    /// Ask GitHub for a newer release now.
+    CheckNow,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -255,6 +257,7 @@ pub(crate) struct SettingsView {
     /// Why the last edit on the SSH hosts page was refused.
     ssh_message: Option<String>,
     _host_statuses: Subscription,
+    _check_row: Subscription,
 }
 
 impl SettingsView {
@@ -296,6 +299,7 @@ impl SettingsView {
             edited_targets: Default::default(),
             ssh_message: None,
             _host_statuses: cx.observe_global::<ssh_hosts::HostStatuses>(|_, cx| cx.notify()),
+            _check_row: cx.observe_global::<crate::release_check::CheckRow>(|_, cx| cx.notify()),
         }
     }
 
