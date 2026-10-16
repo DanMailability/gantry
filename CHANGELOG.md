@@ -5,6 +5,8 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-16
+
 ### Added
 - Gantry checks GitHub once a day for a newer release. A newer one shows as `↑ Update to x.y.z` in the title bar, with its release notes and an Open release page button; Settings > Window > Updates turns the check off and has a Check now button that asks right away and says what it found.
 
