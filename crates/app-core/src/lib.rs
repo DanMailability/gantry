@@ -15,6 +15,7 @@ pub mod mouse;
 pub mod palette;
 pub mod paste;
 pub mod recents;
+pub mod release;
 pub mod replay;
 pub mod scroll;
 pub mod search_merge;
