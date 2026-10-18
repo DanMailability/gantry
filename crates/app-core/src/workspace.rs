@@ -491,7 +491,21 @@ pub struct Workspace {
     /// so that switching to "Restore tabs and panes" brings them back.
     #[serde(skip)]
     dropped: Vec<(Tab, Vec<(NodeId, Leaf)>)>,
+    /// The tabs shown so far, for Back / Forward; never saved.
+    #[serde(skip)]
+    history: TabHistory,
     next_id: NodeId,
+}
+
+/// Most tabs `TabHistory` remembers.
+const HISTORY_LIMIT: usize = 50;
+
+/// The tabs that were shown, oldest first, and where the visible one is in the list. Each entry is the focused leaf
+/// of its tab when it was last shown (the Settings tab has a leaf of its own).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TabHistory {
+    entries: Vec<NodeId>,
+    at: usize,
 }
 
 impl Workspace {
@@ -737,6 +751,60 @@ impl Workspace {
             self.active = index;
         }
         valid
+    }
+
+    /// Index of the tab holding `leaf`, the Settings tab included.
+    fn tab_holding(&self, leaf: NodeId) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.root.contains(leaf))
+    }
+
+    /// Record the visible tab in the Back / Forward history. Showing a tab other than the current entry's drops
+    /// everything after that entry and adds the tab; staying on it only remembers its focused leaf.
+    pub fn note_visit(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let (leaf, active) = (tab.focused, self.active);
+        let history = &self.history;
+        let current = history.entries.get(history.at).and_then(|entry| self.tab_holding(*entry));
+        let history = &mut self.history;
+        if current == Some(active) {
+            history.entries[history.at] = leaf;
+            return;
+        }
+        if !history.entries.is_empty() {
+            history.entries.truncate(history.at + 1);
+        }
+        history.entries.push(leaf);
+        if history.entries.len() > HISTORY_LIMIT {
+            history.entries.remove(0);
+        }
+        history.at = history.entries.len() - 1;
+    }
+
+    /// Show the tab `delta` places away in the history (-1 Back, 1 Forward), skipping tabs that were closed.
+    /// False when there is none.
+    pub fn history_step(&mut self, delta: isize) -> bool {
+        let old_at = self.history.at;
+        let entries = std::mem::take(&mut self.history.entries);
+        let mut kept = Vec::with_capacity(entries.len());
+        let mut at = 0;
+        for (index, entry) in entries.into_iter().enumerate() {
+            if self.tab_holding(entry).is_some() {
+                if index <= old_at {
+                    at = kept.len();
+                }
+                kept.push(entry);
+            }
+        }
+        self.history = TabHistory { entries: kept, at };
+        let target = self.history.at as isize + delta;
+        let Some(leaf) = usize::try_from(target).ok().and_then(|i| self.history.entries.get(i)).copied() else {
+            return false;
+        };
+        let Some(index) = self.tab_holding(leaf) else { return false };
+        self.history.at = target as usize;
+        self.active = index;
+        self.tabs[index].focused = leaf;
+        true
     }
 
     /// Show the tab `delta` places away in `leaf_order` (the sidebar's leaves, top to bottom), wrapping around. The
@@ -1114,6 +1182,66 @@ mod tests {
             ws.new_tab(shell(&format!("/t{index}")));
         }
         ws
+    }
+
+    fn visit(ws: &mut Workspace, leaf: NodeId) {
+        ws.focus(leaf);
+        ws.note_visit();
+    }
+
+    #[test]
+    fn history_goes_back_and_forward() {
+        let mut ws = Workspace::default();
+        let (a, b, c) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/c")));
+        ws.note_visit();
+        visit(&mut ws, a);
+        visit(&mut ws, c);
+        assert!(ws.history_step(-1));
+        assert_eq!(ws.focused(), Some(a));
+        ws.note_visit();
+        assert!(ws.history_step(-1));
+        assert_eq!(ws.focused(), Some(c));
+        assert!(!ws.history_step(-1));
+        assert!(ws.history_step(1) && ws.history_step(1));
+        assert_eq!(ws.focused(), Some(c));
+        assert!(!ws.history_step(1));
+        let _ = b;
+    }
+
+    #[test]
+    fn a_new_visit_drops_the_forward_history() {
+        let mut ws = Workspace::default();
+        let (a, b, c) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/c")));
+        visit(&mut ws, a);
+        visit(&mut ws, b);
+        assert!(ws.history_step(-1));
+        visit(&mut ws, c);
+        assert!(!ws.history_step(1));
+        assert!(ws.history_step(-1));
+        assert_eq!(ws.focused(), Some(a));
+    }
+
+    #[test]
+    fn history_skips_closed_tabs() {
+        let mut ws = Workspace::default();
+        let (a, b, c) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/c")));
+        visit(&mut ws, a);
+        visit(&mut ws, b);
+        visit(&mut ws, c);
+        ws.close(b);
+        assert!(ws.history_step(-1));
+        assert_eq!(ws.focused(), Some(a));
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let mut ws = Workspace::default();
+        let (a, b) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")));
+        for _ in 0..HISTORY_LIMIT {
+            visit(&mut ws, a);
+            visit(&mut ws, b);
+        }
+        assert_eq!(ws.history.entries.len(), HISTORY_LIMIT);
     }
 
     #[test]

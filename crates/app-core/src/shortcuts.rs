@@ -62,6 +62,8 @@ pub const ACTIONS: &[Action] = &[
     action("newShellTab", Group::Tabs, "New shell tab", "ctrl-shift-alt-t", "cmd-alt-t"),
     action("nextTab", Group::Tabs, "Next tab", "ctrl-tab", "cmd-shift-]"),
     action("previousTab", Group::Tabs, "Previous tab", "ctrl-shift-tab", "cmd-shift-["),
+    action("historyBack", Group::Tabs, "Previous tab in history", "ctrl-shift-pageup", "cmd-["),
+    action("historyForward", Group::Tabs, "Next tab in history", "ctrl-shift-pagedown", "cmd-]"),
     action("splitRightClaude", Group::Panes, "Split right (Claude)", "ctrl-shift-d", "cmd-d"),
     action("splitRightShell", Group::Panes, "Split right (shell)", "ctrl-shift-alt-d", "cmd-alt-d"),
     action("splitDownClaude", Group::Panes, "Split down (Claude)", "ctrl-shift-e", "cmd-e"),
@@ -364,6 +366,8 @@ mod tests {
             ("focusDown", "ctrl-shift-down"),
             ("previousTab", "ctrl-shift-tab"),
             ("nextTab", "ctrl-tab"),
+            ("historyBack", "ctrl-shift-pageup"),
+            ("historyForward", "ctrl-shift-pagedown"),
             ("toggleSidebar", "ctrl-shift-b"),
             ("findSession", "ctrl-shift-f"),
             ("openLauncher", "ctrl-shift-o"),
@@ -378,7 +382,7 @@ mod tests {
         for (id, key) in expected {
             assert_eq!(ks(&linux, id).first().map(String::as_str), Some(key), "{id}");
         }
-        assert_eq!(linux.len(), expected.len() + 1, "23 single bindings, the zoom alias");
+        assert_eq!(linux.len(), expected.len() + 1, "25 single bindings, the zoom alias");
         let mac = bindings(&none(), Platform::MacOs);
         assert_eq!(ks(&mac, "nextTab"), ["cmd-shift-]", "ctrl-tab"]);
         assert_eq!(ks(&mac, "previousTab"), ["cmd-shift-[", "ctrl-shift-tab"]);

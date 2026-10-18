@@ -93,6 +93,8 @@ mod workspace_actions {
             FocusDown,
             PreviousTab,
             NextTab,
+            HistoryBack,
+            HistoryForward,
             ToggleSidebar,
             FindSession,
             OpenLauncher,
@@ -122,6 +124,8 @@ fn workspace_binding(id: &str, key: &str) -> Option<gpui::KeyBinding> {
         "newShellTab" => KeyBinding::new(key, NewShellTab, context),
         "nextTab" => KeyBinding::new(key, NextTab, context),
         "previousTab" => KeyBinding::new(key, PreviousTab, context),
+        "historyBack" => KeyBinding::new(key, HistoryBack, context),
+        "historyForward" => KeyBinding::new(key, HistoryForward, context),
         "splitRightClaude" => KeyBinding::new(key, SplitRightClaude, context),
         "splitRightShell" => KeyBinding::new(key, SplitRightShell, context),
         "splitDownClaude" => KeyBinding::new(key, SplitDownClaude, context),
@@ -1905,6 +1909,7 @@ impl WorkspaceView {
 
     /// Give keyboard focus to the workspace's focused leaf (or the empty window).
     fn focus_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.note_visit();
         if let Some((setup, _)) = &self.setup {
             setup.focus_handle(cx).focus(window, cx);
             return;
@@ -2931,6 +2936,20 @@ impl WorkspaceView {
         self.cycle(1, window, cx)
     }
 
+    /// Show the tab `delta` places away in the Back / Forward history (-1 Back, 1 Forward).
+    fn history(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.history_step(delta) {
+            self.focus_current(window, cx);
+            self.save(cx);
+        }
+    }
+    fn history_back(&mut self, _: &HistoryBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.history(-1, window, cx)
+    }
+    fn history_forward(&mut self, _: &HistoryForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.history(1, window, cx)
+    }
+
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(leaf) = self.workspace.focused() {
             self.before_settings = Some(leaf);
@@ -3802,6 +3821,15 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::focus_down))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::history_back))
+            .on_action(cx.listener(Self::history_forward))
+            // The mouse side buttons, anywhere in the window (over a pane too: the panes never see them).
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if let MouseButton::Navigate(direction) = event.button {
+                    cx.stop_propagation();
+                    this.history(if direction == gpui::NavigationDirection::Back { -1 } else { 1 }, window, cx);
+                }
+            }))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::find_session))
             .on_action(cx.listener(Self::open_launcher))

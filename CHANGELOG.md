@@ -5,10 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-10-18
-
 ### Added
 - Panes have a scrollbar at their right edge. It shows where the view sits in the pane's scrollback; drag it, or click the track to jump. It turns blue while the view scrolls and greys out when idle. A "Jump to bottom" chip appears when you scroll up, fades out a second and a half after you stop, and scrolls back to the live output in a quarter of a second. Shell panes always have it; for Claude panes it is a switch in Settings > Appearance > Panes (on by default), and it shows something only while Claude runs in its classic renderer (`/tui default`), since in fullscreen mode Claude scrolls inside the app. It is hidden for programs on the alternate screen (vim, less).
+- Back and Forward through the tabs you have visited, like a browser: the mouse side buttons (anywhere in the window, over a terminal pane too) or the new "Previous tab in history" / "Next tab in history" shortcuts (`Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown`, `Cmd+[` / `Cmd+]` on macOS, rebindable in Settings > Shortcuts). Showing a tab any other way drops the forward history; tabs you closed are skipped. The history is not saved between runs.
 
 ## [0.7.1] - 2026-10-16
 
