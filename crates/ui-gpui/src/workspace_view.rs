@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, describe, without_claude_glyph};
 use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
@@ -14,7 +14,7 @@ use app_core::recents;
 use app_core::release::{self, CheckStatus, NotesBlock, Online, Release};
 use app_core::search_merge::{self, HostSearch};
 use app_core::settings::ThemeChoice;
-use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect, drop_zone};
+use app_core::split_tree::{self, Axis, Direction, Divider, NodeId, PANE_ANIM_MS, Rect, drop_zone};
 use app_core::theme_colors::{Preset, mix, terminal_palette};
 use app_core::version::{self, Note, Update, Version};
 use app_core::workspace::{
@@ -59,8 +59,8 @@ use crate::sidebar_view::{HostRow, RenameTarget, SidebarEvent, SidebarView};
 use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart};
 use crate::terminal_view::{PaneEvent, TerminalView, terminal_binding};
 use crate::theme::{
-    RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, pin_icon, side_line, ssh_icon,
-    sweeping, theme, working_sweep,
+    FadeKind, RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, UI_FONT, container_icon, dir_badge, fade_in, pin_icon,
+    side_line, ssh_icon, sweeping, theme, working_sweep,
 };
 use crate::update_watch::{self, DaemonBuild};
 use crate::window_frame;
@@ -165,6 +165,44 @@ enum TakeOverTarget {
     Leaf(NodeId),
 }
 
+/// A split or close the user asked for, drawn from `from` to the active tab's layout over `PANE_ANIM_MS`.
+struct PaneAnim {
+    /// Where each pane was drawn when the change happened (unit space); a new leaf starts as a sliver.
+    from: Vec<(NodeId, Rect)>,
+    started: Instant,
+    /// The new leaf of a split and the axis it slides in along.
+    entering: Option<(NodeId, Axis)>,
+}
+
+/// The start rectangles of a split of `target` along `axis`: every pane where it is drawn now, plus `new_leaf` as a
+/// sliver on the far side of the target's drawn rectangle.
+fn start_rects(drawn: &[(NodeId, Rect)], target: NodeId, new_leaf: NodeId, axis: Axis) -> Vec<(NodeId, Rect)> {
+    let mut from = drawn.to_vec();
+    if let Some(&(_, rect)) = drawn.iter().find(|(leaf, _)| *leaf == target) {
+        from.push((new_leaf, split_tree::entry_rect(rect, axis)));
+    }
+    from
+}
+
+/// A pane card's padding, between its border and its content.
+const CARD_PAD: f32 = 6.0;
+/// A pane card's border width (`border_2`).
+const CARD_BORDER: f32 = 2.0;
+
+/// Where a pane's content sits inside its card while a split or close animates, in px from the card's padding box:
+/// `[left, top, width, height]`, at its final size (so the terminal resizes once), top-left for a surviving pane and
+/// pinned to the entry edge for a new one. `width`/`height` are the tab content's size.
+fn content_frame(drawn: Rect, end: Rect, entering: Option<Axis>, width: f32, height: f32) -> [f32; 4] {
+    let (dx, dy) = split_tree::anchor_offset(drawn, end, entering);
+    let inset = PANE_GAP + 2.0 * (CARD_BORDER + CARD_PAD);
+    [CARD_PAD + dx * width, CARD_PAD + dy * height, end.w * width - inset, end.h * height - inset]
+}
+
+/// How far a pane animation is after `elapsed`: 0 at the start, 1 (or more) when it is done.
+fn pane_progress(elapsed: Duration) -> f32 {
+    elapsed.as_secs_f32() * 1000.0 / PANE_ANIM_MS as f32
+}
+
 /// A new session waiting to learn whether a dev container mounts its directory.
 struct PendingOpen {
     claude: bool,
@@ -246,6 +284,8 @@ pub struct WorkspaceView {
     dragging: Option<Divider>,
     /// Window bounds of the visible tab's pane area (for divider drags).
     content_bounds: Bounds<Pixels>,
+    /// The running split or close animation of the active tab, if any.
+    pane_anim: Option<PaneAnim>,
     /// Where the pane being dragged would land, while it is over a pane of the visible tab.
     pane_drop: Option<PaneDrop>,
     sidebar: Entity<SidebarView>,
@@ -469,6 +509,7 @@ impl WorkspaceView {
             prompting: Rc::new(Cell::new(false)),
             dragging: None,
             content_bounds: Bounds::default(),
+            pane_anim: None,
             pane_drop: None,
             sidebar,
             sidebar_bounds: Bounds::default(),
@@ -1872,8 +1913,15 @@ impl WorkspaceView {
         if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
+        let target = self.workspace.focused();
+        let from = axis.map(|_| self.drawn_rects());
         let leaf = match axis.and_then(|axis| self.workspace.split_on(axis, launch.clone(), host.clone())) {
-            Some(leaf) => leaf,
+            Some(leaf) => {
+                if let (Some(axis), Some(from), Some(target)) = (axis, from, target) {
+                    self.start_pane_anim(start_rects(&from, target, leaf, axis), Some((leaf, axis)), window, cx);
+                }
+                leaf
+            }
             None => self.workspace.new_tab_on(launch, host),
         };
         self.add_slot(leaf, window, cx);
@@ -1883,7 +1931,16 @@ impl WorkspaceView {
     }
 
     fn close_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(key) = self.workspace.close(leaf).and_then(|removed| removed.key()) {
+        let from = self.drawn_rects();
+        // A pane of the visible tab that keeps other panes: the survivors grow into its space.
+        let swipe = from.len() > 1 && from.iter().any(|(drawn, _)| *drawn == leaf);
+        let removed = self.workspace.close(leaf);
+        if swipe {
+            self.start_pane_anim(from, None, window, cx);
+        } else {
+            self.cancel_pane_anim();
+        }
+        if let Some(key) = removed.and_then(|removed| removed.key()) {
             if let Some(client) = self.client(&key.host) {
                 client.kill(key.pane);
             } else if let Some(instance) = self.workspace.instances.get(&key.host) {
@@ -1904,6 +1961,33 @@ impl WorkspaceView {
         self.save(cx);
     }
 
+    /// The active tab's pane rectangles as drawn right now: on their way while a split or close animates.
+    fn drawn_rects(&self) -> Vec<(NodeId, Rect)> {
+        let Some(tab) = self.workspace.active_tab().filter(|tab| !tab.settings) else { return Vec::new() };
+        let layout = tab.root.layout(Rect::UNIT);
+        match &self.pane_anim {
+            Some(anim) => split_tree::tween(&anim.from, &layout, pane_progress(anim.started.elapsed())),
+            None => layout,
+        }
+    }
+
+    /// Animate the active tab from `from` to its layout, when animations are on and the window is active.
+    fn start_pane_anim(
+        &mut self,
+        from: Vec<(NodeId, Rect)>,
+        entering: Option<(NodeId, Axis)>,
+        window: &Window,
+        cx: &App,
+    ) {
+        self.pane_anim = (cx.global::<SettingsStore>().settings().animate_ui && window.is_window_active())
+            .then(|| PaneAnim { from, started: Instant::now(), entering });
+    }
+
+    /// End the pane animation: the panes jump to their layout.
+    fn cancel_pane_anim(&mut self) {
+        self.pane_anim = None;
+    }
+
     fn focus_leaf(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.focus(leaf) {
             self.focus_current(window, cx);
@@ -1913,6 +1997,13 @@ impl WorkspaceView {
 
     /// Give keyboard focus to the workspace's focused leaf (or the empty window).
     fn focus_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Another tab is showing: none of the animated panes is in it.
+        if let Some(anim) = &self.pane_anim {
+            let leaves = self.workspace.active_tab().map(|tab| tab.root.leaves()).unwrap_or_default();
+            if !anim.from.iter().any(|(leaf, _)| leaves.contains(leaf)) {
+                self.cancel_pane_anim();
+            }
+        }
         self.workspace.note_visit();
         if let Some((setup, _)) = &self.setup {
             setup.focus_handle(cx).focus(window, cx);
@@ -3136,6 +3227,7 @@ impl WorkspaceView {
             self.save(cx);
             return;
         }
+        self.cancel_pane_anim();
         let bounds = self.content_bounds;
         let ratio = match divider.axis {
             Axis::Horizontal => {
@@ -3548,6 +3640,11 @@ impl WorkspaceView {
             };
         }
         let multiple = tab.root.leaves().len() > 1;
+        let layout = tab.root.layout(Rect::UNIT);
+        let drawn = self.drawn_rects();
+        let animating = self.pane_anim.is_some();
+        let entering = self.pane_anim.as_ref().and_then(|anim| anim.entering);
+        let size = self.content_bounds.size;
         let dragging_pane = cx.has_active_drag();
         div()
             .id("tab-content")
@@ -3557,11 +3654,18 @@ impl WorkspaceView {
             .w_full()
             .child({
                 let view = cx.entity();
-                canvas(move |bounds, _, cx| view.update(cx, |this, _| this.content_bounds = bounds), |_, _, _, _| {})
-                    .absolute()
-                    .size_full()
+                let resized = move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, _| {
+                        // A window resize ends a split or close animation at its end.
+                        if this.content_bounds.size != bounds.size {
+                            this.cancel_pane_anim();
+                        }
+                        this.content_bounds = bounds
+                    })
+                };
+                canvas(resized, |_, _, _, _| {}).absolute().size_full()
             })
-            .children(tab.root.layout(Rect::UNIT).into_iter().enumerate().filter_map(|(index, (leaf, rect))| {
+            .children(layout.into_iter().zip(drawn).enumerate().filter_map(|(index, ((leaf, end), (_, rect)))| {
                 let view = self.slots.get(&leaf)?.view.clone();
                 let focused = leaf == tab.focused;
                 let title = self.workspace.leaf_name(leaf).map_or_else(|| view.read(cx).title(), String::from);
@@ -3607,13 +3711,13 @@ impl WorkspaceView {
                         .h(relative(rect.h))
                         .p(px(PANE_GAP / 2.))
                         .child(
-                            // A rounded card; the terminal sits inside its padding, clear of the corners.
+                            // A rounded card; the terminal sits inside its padding, clear of the corners. While a split
+                            // or close animates, the card moves and clips its content, which keeps its final size (one
+                            // resize, not one per frame): top-left, or pinned to the edge a new pane enters from.
                             div()
                                 .size_full()
-                                .flex()
-                                .flex_col()
                                 .group(format!("pane-card-{index}"))
-                                .p(px(6.))
+                                .p(px(CARD_PAD))
                                 .rounded(px(RADIUS_LARGE))
                                 .bg(rgb(theme.tokens.terminal))
                                 .border_2()
@@ -3622,29 +3726,42 @@ impl WorkspaceView {
                                 } else {
                                     theme.tokens.line
                                 }))
-                                .when(multiple, |pane| {
-                                    pane.child(pane_header(
-                                        index, leaf, title, status, unseen, offline, animate, container, host, dir,
-                                        folder, project, &theme,
-                                    ))
-                                })
-                                .when_some(last_prompt, |pane, text| {
-                                    pane.child(prompt_card(
-                                        text,
-                                        multiple,
-                                        last_prompt_settings.size,
-                                        last_prompt_settings.color,
-                                        &theme,
-                                    ))
-                                })
-                                .child(
-                                    div()
-                                        .relative()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .child(view)
-                                        .child(self.split_buttons(leaf, index, focused, &theme, cx)),
-                                ),
+                                .when(animating, |card| card.overflow_hidden())
+                                .child({
+                                    let content = div().flex().flex_col();
+                                    let content = if animating {
+                                        let axis = entering.filter(|(new, _)| *new == leaf).map(|(_, axis)| axis);
+                                        let [left, top, w, h] =
+                                            content_frame(rect, end, axis, size.width.into(), size.height.into());
+                                        content.absolute().left(px(left)).top(px(top)).w(px(w)).h(px(h))
+                                    } else {
+                                        content.size_full()
+                                    };
+                                    content
+                                        .when(multiple, |pane| {
+                                            pane.child(pane_header(
+                                                index, leaf, title, status, unseen, offline, animate, container, host,
+                                                dir, folder, project, &theme,
+                                            ))
+                                        })
+                                        .when_some(last_prompt, |pane, text| {
+                                            pane.child(prompt_card(
+                                                text,
+                                                multiple,
+                                                last_prompt_settings.size,
+                                                last_prompt_settings.color,
+                                                &theme,
+                                            ))
+                                        })
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .child(view)
+                                                .child(self.split_buttons(leaf, index, focused, &theme, cx)),
+                                        )
+                                }),
                         )
                         .children(overlay),
                 )
@@ -3862,6 +3979,17 @@ impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let theme = theme(cx).clone();
+        let fade = cx.global::<SettingsStore>().settings().animate_ui;
+        // A split or close moves only while animations are on and the window is active; else it is at its end.
+        if !(fade && window.is_window_active()) {
+            self.cancel_pane_anim();
+        }
+        match self.pane_anim.as_ref().map(|anim| pane_progress(anim.started.elapsed()) >= 1.0) {
+            Some(true) => self.cancel_pane_anim(),
+            Some(false) => window.request_animation_frame(),
+            None => {}
+        }
+        let scrim = rgba((theme.tokens.ground << 8) | 0xcc);
         // The interface scales with `uiFontSize`; GPUI's rem is 16 px at the default of 14.
         window.set_rem_size(px(16.0 * theme.ui_scale));
         let sidebar = self.workspace.sidebar.clone();
@@ -4020,7 +4148,15 @@ impl Render for WorkspaceView {
                         .items_center()
                         .justify_center()
                         .p(theme.ui(16.))
-                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
+                        .when(!fade, |overlay| overlay.bg(scrim))
+                        .when(fade, |overlay| {
+                            overlay.child(fade_in(
+                                div().absolute().top_0().left_0().size_full().bg(scrim),
+                                "fade-setup-scrim",
+                                FadeKind::Scrim,
+                                true,
+                            ))
+                        })
                         .child(view),
                 )
             })
@@ -4037,7 +4173,15 @@ impl Render for WorkspaceView {
                         .items_center()
                         .justify_center()
                         .p(theme.ui(16.))
-                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
+                        .when(!fade, |overlay| overlay.bg(scrim))
+                        .when(fade, |overlay| {
+                            overlay.child(fade_in(
+                                div().absolute().top_0().left_0().size_full().bg(scrim),
+                                "fade-ssh-wizard-scrim",
+                                FadeKind::Scrim,
+                                true,
+                            ))
+                        })
                         .child(view),
                 )
             })
@@ -4054,7 +4198,15 @@ impl Render for WorkspaceView {
                         .items_center()
                         .justify_center()
                         .p(theme.ui(16.))
-                        .bg(rgba((theme.tokens.ground << 8) | 0xcc))
+                        .when(!fade, |overlay| overlay.bg(scrim))
+                        .when(fade, |overlay| {
+                            overlay.child(fade_in(
+                                div().absolute().top_0().left_0().size_full().bg(scrim),
+                                "fade-askpass-scrim",
+                                FadeKind::Scrim,
+                                true,
+                            ))
+                        })
                         .child(view),
                 )
             })
@@ -4225,6 +4377,54 @@ mod tests {
             .iter()
             .find(|binding| binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false))
             .map(|binding| binding.action().name())
+    }
+
+    #[test]
+    fn second_split_starts_from_drawn_rects() {
+        let (left, right, new) = (1, 2, 3);
+        let old = [(left, Rect::UNIT)];
+        let layout = [(left, Rect { w: 0.5, ..Rect::UNIT }), (right, Rect { x: 0.5, w: 0.5, ..Rect::UNIT })];
+        let drawn = split_tree::tween(&old, &layout, 0.5);
+        let from = start_rects(&drawn, right, new, Axis::Vertical);
+        assert_eq!(&from[..2], &drawn[..]);
+        assert_ne!(from[0].1, layout[0].1, "mid-animation, not the old or new layout");
+        assert_eq!(from[2], (new, split_tree::entry_rect(drawn[1].1, Axis::Vertical)));
+    }
+
+    #[test]
+    fn a_surviving_pane_keeps_its_content_top_left_at_its_final_size() {
+        let (drawn, end) = (Rect { w: 0.7, ..Rect::UNIT }, Rect { w: 0.5, ..Rect::UNIT });
+        let [left, top, w, h] = content_frame(drawn, end, None, 1000.0, 600.0);
+        assert_eq!((left, top), (CARD_PAD, CARD_PAD));
+        // What `size_full` gives inside the card at rest: the final box minus the gap, border and padding.
+        assert_eq!(w, 500.0 - PANE_GAP - 2.0 * (CARD_BORDER + CARD_PAD));
+        assert_eq!(h, 600.0 - PANE_GAP - 2.0 * (CARD_BORDER + CARD_PAD));
+    }
+
+    #[test]
+    fn an_entering_pane_keeps_its_content_pinned_to_the_entry_edge() {
+        let end = Rect { x: 0.5, w: 0.5, ..Rect::UNIT };
+        let drawn = Rect { x: 0.8, w: 0.2, ..Rect::UNIT };
+        let [left, _, w, _] = content_frame(drawn, end, Some(Axis::Horizontal), 1000.0, 600.0);
+        // The card's inner right edge, in its padding box.
+        assert!((left + w - (200.0 - PANE_GAP - 2.0 * CARD_BORDER - CARD_PAD)).abs() < 1e-3);
+        let end = Rect { y: 0.5, h: 0.5, ..Rect::UNIT };
+        let drawn = Rect { y: 0.9, h: 0.1, ..Rect::UNIT };
+        let [_, top, _, h] = content_frame(drawn, end, Some(Axis::Vertical), 1000.0, 600.0);
+        assert!((top + h - (60.0 - PANE_GAP - 2.0 * CARD_BORDER - CARD_PAD)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn start_rects_without_the_target_adds_nothing() {
+        let drawn = [(1, Rect::UNIT)];
+        assert_eq!(start_rects(&drawn, 7, 8, Axis::Horizontal), drawn.to_vec());
+    }
+
+    #[test]
+    fn pane_progress_runs_from_zero_to_one_over_the_animation() {
+        assert_eq!(pane_progress(Duration::ZERO), 0.0);
+        assert!((pane_progress(Duration::from_millis(split_tree::PANE_ANIM_MS / 2)) - 0.5).abs() < 1e-6);
+        assert!(pane_progress(Duration::from_millis(split_tree::PANE_ANIM_MS)) >= 1.0);
     }
 
     #[test]

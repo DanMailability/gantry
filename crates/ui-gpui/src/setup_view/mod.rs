@@ -20,7 +20,7 @@ use gpui::{
 use crate::field;
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::FONT_FAMILY;
-use crate::theme::{RADIUS_LARGE, RADIUS_SMALL, Theme, dir_badge, theme};
+use crate::theme::{FadeKind, RADIUS_LARGE, RADIUS_SMALL, Theme, dir_badge, fade_in, theme};
 
 pub(crate) use import::{Mode, opens_by_itself};
 
@@ -670,7 +670,7 @@ impl Render for SetupView {
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.import(cx))),
                 )
             });
-        div()
+        let card = div()
             .key_context("Setup")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -706,7 +706,8 @@ impl Render for SetupView {
                     .clone()
                     .map(|message| div().px(theme.ui(22.)).pb(theme.ui(8.)).text_xs().child(format!("⚠ {message}"))),
             )
-            .child(footer)
+            .child(footer);
+        fade_in(card, "fade-setup", FadeKind::Card, cx.global::<SettingsStore>().settings().animate_ui)
     }
 }
 

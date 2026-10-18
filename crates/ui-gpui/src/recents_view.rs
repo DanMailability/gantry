@@ -20,7 +20,9 @@ use protocol::message::{SearchHit, SessionInfo, Speaker};
 
 use crate::field;
 use crate::settings_store::{SettingsStore, dir_badge_for};
-use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, container_icon, dir_badge, side_line, ssh_icon, theme};
+use crate::theme::{
+    FadeKind, RADIUS, RADIUS_LARGE, RADIUS_SMALL, Theme, container_icon, dir_badge, fade_in, side_line, ssh_icon, theme,
+};
 
 const ROW_HEIGHT: f32 = 36.0;
 /// Height of a conversation hit's row (two lines).
@@ -717,7 +719,7 @@ impl Render for RecentsView {
                 .child(div().text_color(rgb(theme.tokens.text)).font_weight(FontWeight::SEMIBOLD).child(key))
                 .child(what)
         };
-        div()
+        let card = div()
             .key_context("Recents")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -799,7 +801,8 @@ impl Render for RecentsView {
                     .child(hint("Tab", "next project"))
                     .child(div().flex_1())
                     .child(hint("Esc", if self.choosing { "back" } else { "close" })),
-            )
+            );
+        fade_in(card, "fade-recents", FadeKind::Card, cx.global::<SettingsStore>().settings().animate_ui)
     }
 }
 

@@ -11,8 +11,8 @@ use app_core::settings::{ProjectColors, StatusFills};
 use app_core::theme_colors::{Preset, Tokens, ToneColors, tone_colors};
 use app_core::workspace::DirBadge;
 use gpui::{
-    Animation, AnimationExt, App, Div, ElementId, FontWeight, Global, IntoElement, ParentElement, Pixels, Styled, Svg,
-    div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
+    Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, Global, IntoElement, ParentElement, Pixels,
+    Styled, Svg, div, hsla, linear_color_stop, linear_gradient, px, relative, rgb, rgba, svg,
 };
 
 use crate::assets::{CONTAINER_ICON, PIN_ICON, SSH_ICON};
@@ -181,6 +181,53 @@ pub(crate) fn working_sweep(id: impl Into<ElementId>, inset: Pixels, theme: &The
     )
 }
 
+/// How long a scrim fades in.
+pub(crate) const FADE_SCRIM: Duration = Duration::from_millis(250);
+/// How long a card (an overlay's panel, a menu, a hover card) fades in.
+pub(crate) const FADE_CARD: Duration = Duration::from_millis(250);
+/// How far, in pixels, a card starts below its place and rises.
+pub(crate) const FADE_RISE: f32 = 4.0;
+
+/// What a fade-in is applied to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FadeKind {
+    /// A full-window backdrop: fades, does not move.
+    Scrim,
+    /// A panel, menu or hover card: fades and rises `FADE_RISE` px.
+    Card,
+}
+
+/// The look of a fade-in at `progress` (0..1, already eased): its opacity and how many pixels it still has to rise.
+pub(crate) fn fade_progress(progress: f32) -> (f32, f32) {
+    let progress = progress.clamp(0., 1.);
+    (progress, FADE_RISE * (1. - progress))
+}
+
+/// Fade `element` in once, when it first appears (`id` must be stable while it is open, so a re-render does not
+/// replay it). A `Card` also rises into place. With `enabled` off the element is returned as it is.
+pub(crate) fn fade_in<E: IntoElement + Styled + 'static>(
+    element: E,
+    id: impl Into<ElementId>,
+    kind: FadeKind,
+    enabled: bool,
+) -> AnyElement {
+    if !enabled {
+        return element.into_any_element();
+    }
+    let duration = if kind == FadeKind::Card { FADE_CARD } else { FADE_SCRIM };
+    element
+        .with_animation(
+            id,
+            Animation::new(duration).with_easing(app_core::split_tree::ease_out_cubic),
+            move |element, progress| {
+                let (opacity, rise) = fade_progress(progress);
+                let element = element.opacity(opacity);
+                if kind == FadeKind::Card { element.relative().top(px(rise)) } else { element }
+            },
+        )
+        .into_any_element()
+}
+
 /// Make the embedded interface font available.
 pub(crate) fn load_fonts(cx: &App) {
     if let Err(error) = cx.text_system().add_fonts(embedded_fonts()) {
@@ -215,6 +262,18 @@ mod tests {
     fn the_group_tint_is_the_text_color_at_about_eleven_percent() {
         assert_eq!(group_tint(0xe7eaf3), 0xe7ea_f31c);
         assert_eq!(group_tint(0x1f2533) & 0xff, 0x1c);
+    }
+
+    #[test]
+    fn fade_progress_starts_transparent_and_raised_and_ends_opaque_and_in_place() {
+        assert_eq!(fade_progress(0.), (0., FADE_RISE));
+        assert_eq!(fade_progress(1.), (1., 0.));
+        let mut last = fade_progress(0.);
+        for step in 1..=10 {
+            let now = fade_progress(step as f32 / 10.);
+            assert!(now.0 >= last.0 && now.1 <= last.1, "monotonic at step {step}");
+            last = now;
+        }
     }
 
     #[test]

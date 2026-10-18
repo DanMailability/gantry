@@ -14,7 +14,7 @@ use gpui::{
 };
 
 use crate::settings_store::shortcut_label;
-use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT};
+use crate::theme::{FadeKind, RADIUS, RADIUS_SMALL, Theme, UI_FONT, fade_in};
 
 /// How many menus are open.
 static OPEN: AtomicUsize = AtomicUsize::new(0);
@@ -220,50 +220,52 @@ pub(crate) fn render(
     let sub = menu.sub.clone();
     let (sub_open, sub_bounds) = (menu.sub.clone(), menu.sub_bounds.clone());
     let first_submenu = menu.items.iter().position(|item| matches!(item, MenuItem::Submenu { .. }));
-    deferred(
-        anchored().position(menu.position).snap_to_window().child(
-            div()
-                .id(id)
-                // A floating layer: clicks must not reach what is beneath it.
-                .occlude()
-                .track_focus(&menu.focus)
-                .on_key_down(move |event, window, cx| {
-                    match event.keystroke.key.as_str() {
-                        "escape" | "left" if sub.get().is_some() => {
-                            sub.set(None);
-                            window.refresh();
-                        }
-                        "escape" => dismiss_key(window, cx),
-                        "right" if sub.get().is_none() && first_submenu.is_some() => {
-                            sub.set(first_submenu);
-                            window.refresh();
-                        }
-                        _ => {}
-                    }
-                    // Keys must not reach what is beneath the menu (the sidebar filter).
-                    cx.stop_propagation();
-                })
-                .on_mouse_down_out(move |_, window, cx| {
-                    let in_sub = sub_open.get().is_some()
-                        && sub_bounds.get().is_some_and(|bounds| bounds.contains(&window.mouse_position()));
-                    if !in_sub {
-                        on_dismiss(window, cx);
-                    }
-                })
-                .min_w(theme.ui(220.))
-                .p_1()
-                .flex()
-                .flex_col()
-                .text_sm()
-                .font_family(UI_FONT)
-                .text_color(rgb(theme.tokens.text))
-                .bg(rgb(theme.tokens.raised))
-                .border_1()
-                .border_color(rgb(theme.tokens.line))
-                .rounded(px(RADIUS))
-                .shadow_lg()
-                .children(rows),
-        ),
-    )
+    let card = div()
+        .id(id)
+        // A floating layer: clicks must not reach what is beneath it.
+        .occlude()
+        .track_focus(&menu.focus)
+        .on_key_down(move |event, window, cx| {
+            match event.keystroke.key.as_str() {
+                "escape" | "left" if sub.get().is_some() => {
+                    sub.set(None);
+                    window.refresh();
+                }
+                "escape" => dismiss_key(window, cx),
+                "right" if sub.get().is_none() && first_submenu.is_some() => {
+                    sub.set(first_submenu);
+                    window.refresh();
+                }
+                _ => {}
+            }
+            // Keys must not reach what is beneath the menu (the sidebar filter).
+            cx.stop_propagation();
+        })
+        .on_mouse_down_out(move |_, window, cx| {
+            let in_sub = sub_open.get().is_some()
+                && sub_bounds.get().is_some_and(|bounds| bounds.contains(&window.mouse_position()));
+            if !in_sub {
+                on_dismiss(window, cx);
+            }
+        })
+        .min_w(theme.ui(220.))
+        .p_1()
+        .flex()
+        .flex_col()
+        .text_sm()
+        .font_family(UI_FONT)
+        .text_color(rgb(theme.tokens.text))
+        .bg(rgb(theme.tokens.raised))
+        .border_1()
+        .border_color(rgb(theme.tokens.line))
+        .rounded(px(RADIUS))
+        .shadow_lg()
+        .children(rows);
+    deferred(anchored().position(menu.position).snap_to_window().child(fade_in(
+        card,
+        "fade-context-menu",
+        FadeKind::Card,
+        settings.animate_ui,
+    )))
     .with_priority(1)
 }

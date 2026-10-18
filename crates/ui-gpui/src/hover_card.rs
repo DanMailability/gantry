@@ -9,7 +9,8 @@ use gpui::{
 };
 
 use crate::context_menu;
-use crate::theme::{RADIUS_SMALL, UI_FONT, container_icon, dir_badge, ssh_icon, theme};
+use crate::settings_store::SettingsStore;
+use crate::theme::{FadeKind, RADIUS_SMALL, UI_FONT, container_icon, dir_badge, fade_in, ssh_icon, theme};
 
 /// The mark before a title: tones without a fill need one (the fill already says the rest), and a row marked unread
 /// carries a pin so it is told apart from Done.
@@ -87,7 +88,7 @@ impl Render for HoverCard {
         // keep the height of one line: such a card gets the maximum as its definite width.
         let max = theme.ui(320.);
         let wide = self.natural_width(window, |size| theme.ui(size)) > max;
-        div()
+        let card = div()
             .max_w(max)
             .when(wide, |card| card.w(max))
             .px(theme.ui(12.))
@@ -133,7 +134,8 @@ impl Render for HoverCard {
             }))
             .children(
                 self.folder.clone().map(|folder| div().text_xs().text_color(rgb(theme.tokens.muted)).child(folder)),
-            )
+            );
+        fade_in(card, "fade-hover-card", FadeKind::Card, cx.global::<SettingsStore>().settings().animate_ui)
     }
 }
 

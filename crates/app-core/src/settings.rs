@@ -417,6 +417,8 @@ pub struct Settings {
     pub project_colors: ProjectColors,
     /// Whether Working sessions show the moving glow.
     pub animate_working: bool,
+    /// Whether splits slide in and menus, overlays and cards fade in.
+    pub animate_ui: bool,
     /// Whether Gantry asks GitHub once a day for a newer release.
     pub check_for_updates: bool,
     /// The first-run wizard has been answered (imported or skipped), so it does not open by itself.
@@ -486,6 +488,7 @@ impl Default for Settings {
             scrollbar: ScrollbarSettings { claude: true },
             project_colors: ProjectColors::default(),
             animate_working: true,
+            animate_ui: true,
             check_for_updates: true,
             setup_done: false,
         }
@@ -871,6 +874,7 @@ impl Reader {
 
         let ui_font_size = self.number(raw, "", "uiFontSize", 14.0, (11.0, 20.0)) as f32;
         let animate_working = self.bool(raw, "", "animateWorking", true);
+        let animate_ui = self.bool(raw, "", "animateUi", true);
         let check_for_updates = self.bool(raw, "", "checkForUpdates", true);
         let setup_done = self.bool(raw, "", "setupDone", false);
 
@@ -988,6 +992,7 @@ impl Reader {
             scrollbar,
             project_colors,
             animate_working,
+            animate_ui,
             check_for_updates,
             setup_done,
         }
@@ -1139,6 +1144,7 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         .collect();
     add(&["projectColors", "folders"], Value::Object(colors), !settings.project_colors.folders.is_empty());
     add(&["animateWorking"], settings.animate_working.into(), settings.animate_working != default.animate_working);
+    add(&["animateUi"], settings.animate_ui.into(), settings.animate_ui != default.animate_ui);
     add(
         &["checkForUpdates"],
         settings.check_for_updates.into(),
@@ -1235,6 +1241,24 @@ mod tests {
         assert_eq!(written["claudeDirs"][0]["color"], "violet");
         assert_eq!(written["claudeDirs"][1]["color"], "teal");
         assert!(written["claudeDirs"][2].get("color").is_none(), "no color picked, none written");
+    }
+
+    #[test]
+    fn animate_ui_defaults_on_and_round_trips() {
+        assert!(Settings::default().animate_ui);
+        let loaded = parse(r#"{"animateUi": false}"#);
+        assert!(loaded.problems.is_empty());
+        let mut settings = loaded.settings.unwrap();
+        assert!(!settings.animate_ui);
+        let bad = parse(r#"{"animateUi": "no"}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert_eq!(bad.problems[0].key, "animateUi");
+        assert!(bad.settings.unwrap().animate_ui);
+        settings.animate_ui = true;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        save(&path, &settings, &Map::new()).unwrap();
+        assert!(read_json(&path).get("animateUi").is_none(), "the default writes nothing");
     }
 
     #[test]

@@ -23,7 +23,7 @@ use gpui::{
 use crate::field;
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::FONT_FAMILY;
-use crate::theme::{RADIUS_LARGE, RADIUS_SMALL, Theme, theme};
+use crate::theme::{FadeKind, RADIUS_LARGE, RADIUS_SMALL, Theme, fade_in, theme};
 
 use run::{Job, Msg, Questions};
 
@@ -1036,7 +1036,7 @@ impl Render for SshWizard {
                     },
                 ))
             }));
-        div()
+        let card = div()
             .key_context("SshWizard")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -1067,7 +1067,8 @@ impl Render for SshWizard {
             .child(body)
             .children(working)
             .children(error)
-            .child(footer)
+            .child(footer);
+        fade_in(card, "fade-ssh-wizard", FadeKind::Card, cx.global::<SettingsStore>().settings().animate_ui)
     }
 }
 

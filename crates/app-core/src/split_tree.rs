@@ -65,6 +65,52 @@ impl Rect {
     }
 }
 
+/// How long a pane resize or entry animation lasts.
+pub const PANE_ANIM_MS: u64 = 300;
+
+/// Ease-out cubic: fast start, gentle stop. `p` is clamped to 0..=1.
+pub fn ease_out_cubic(p: f32) -> f32 {
+    let p = p.clamp(0.0, 1.0);
+    1.0 - (1.0 - p).powi(3)
+}
+
+/// The sliver a new leaf starts from: zero size on the far edge of its final rectangle along `axis`.
+pub fn entry_rect(target: Rect, axis: Axis) -> Rect {
+    match axis {
+        Axis::Horizontal => Rect { x: target.x + target.w, w: 0.0, ..target },
+        Axis::Vertical => Rect { y: target.y + target.h, h: 0.0, ..target },
+    }
+}
+
+/// Rectangles between `from` and `to` at `progress` (eased), one per `to` item in `to` order.
+/// A `to` id missing from `from` stays at its end rectangle; `from`-only ids are ignored.
+pub fn tween(from: &[(NodeId, Rect)], to: &[(NodeId, Rect)], progress: f32) -> Vec<(NodeId, Rect)> {
+    let t = ease_out_cubic(progress);
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    to.iter()
+        .map(|&(id, end)| {
+            let start = from.iter().find(|(f, _)| *f == id).map_or(end, |&(_, r)| r);
+            let r = Rect {
+                x: lerp(start.x, end.x),
+                y: lerp(start.y, end.y),
+                w: lerp(start.w, end.w),
+                h: lerp(start.h, end.h),
+            };
+            (id, r)
+        })
+        .collect()
+}
+
+/// Offset (unit space) of a pane's content wrapper from its card's top-left, so an entering pane's content
+/// stays at its final size and is revealed instead of squeezed. `None` means not entering.
+pub fn anchor_offset(drawn: Rect, final_rect: Rect, entering: Option<Axis>) -> (f32, f32) {
+    match entering {
+        None => (0.0, 0.0),
+        Some(Axis::Horizontal) => (drawn.w - final_rect.w, 0.0),
+        Some(Axis::Vertical) => (0.0, drawn.h - final_rect.h),
+    }
+}
+
 /// A draggable boundary between the two children of a split.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Divider {
@@ -349,6 +395,78 @@ mod tests {
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn ease_endpoints_and_monotonic() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert_eq!(ease_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_out_cubic(2.0), 1.0);
+        for i in 0..10 {
+            let a = ease_out_cubic(i as f32 / 10.0);
+            let b = ease_out_cubic((i + 1) as f32 / 10.0);
+            assert!(b > a, "{a} !< {b}");
+        }
+    }
+
+    #[test]
+    fn entry_rect_right_and_down() {
+        assert_eq!(entry_rect(rect(0.0, 0.0, 0.5, 1.0), Axis::Horizontal), rect(0.5, 0.0, 0.0, 1.0));
+        assert_eq!(entry_rect(rect(0.0, 0.0, 1.0, 0.5), Axis::Vertical), rect(0.0, 0.5, 1.0, 0.0));
+    }
+
+    #[test]
+    fn tween_endpoints() {
+        let from = [(1, rect(0.0, 0.0, 1.0, 1.0)), (2, rect(0.5, 0.0, 0.0, 1.0))];
+        let to = [(1, rect(0.0, 0.0, 0.5, 1.0)), (2, rect(0.5, 0.0, 0.5, 1.0))];
+        assert_eq!(tween(&from, &to, 0.0), from.to_vec());
+        assert_eq!(tween(&from, &to, 1.0), to.to_vec());
+    }
+
+    #[test]
+    fn tween_midpoint_uses_ease() {
+        let from = [(1, rect(0.0, 0.0, 0.0, 1.0))];
+        let to = [(1, rect(0.0, 0.0, 1.0, 1.0))];
+        let mid = tween(&from, &to, 0.5);
+        assert!((mid[0].1.w - 0.875).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tween_new_leaf_grows_from_sliver() {
+        let target = rect(0.5, 0.0, 0.5, 1.0);
+        let from = [(2, entry_rect(target, Axis::Horizontal))];
+        let to = [(2, target)];
+        assert_eq!(tween(&from, &to, 0.0)[0].1.w, 0.0);
+        assert_eq!(tween(&from, &to, 1.0)[0].1.w, 0.5);
+    }
+
+    #[test]
+    fn tween_ignores_gone_leaves() {
+        let from = [(1, rect(0.0, 0.0, 0.5, 1.0)), (9, rect(0.5, 0.0, 0.5, 1.0))];
+        let to = [(1, rect(0.0, 0.0, 1.0, 1.0))];
+        let out = tween(&from, &to, 0.5);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 1);
+    }
+
+    #[test]
+    fn tween_unknown_start_uses_end() {
+        let end = rect(0.5, 0.0, 0.5, 1.0);
+        for p in [0.0, 0.3, 1.0] {
+            assert_eq!(tween(&[], &[(3, end)], p), vec![(3, end)]);
+        }
+    }
+
+    #[test]
+    fn anchor_offset_cases() {
+        let drawn = rect(0.0, 0.0, 0.1, 0.1);
+        let fin = rect(0.0, 0.0, 0.5, 0.5);
+        assert_eq!(anchor_offset(drawn, fin, None), (0.0, 0.0));
+        let (x, y) = anchor_offset(drawn, fin, Some(Axis::Horizontal));
+        assert!((x + 0.4).abs() < 1e-6 && y == 0.0);
+        let (x, y) = anchor_offset(drawn, fin, Some(Axis::Vertical));
+        assert!(x == 0.0 && (y + 0.4).abs() < 1e-6);
     }
 
     /// `1 | (2 over 3)`: leaf 1 on the left half, 2 above 3 on the right.

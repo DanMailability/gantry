@@ -25,7 +25,7 @@ use protocol::message::{DirEntry, SessionInfo};
 use crate::context_menu::host_dot_color;
 use crate::field;
 use crate::settings_store::SettingsStore;
-use crate::theme::{RADIUS, RADIUS_LARGE, RADIUS_SMALL, ssh_icon, theme};
+use crate::theme::{FadeKind, RADIUS, RADIUS_LARGE, RADIUS_SMALL, fade_in, ssh_icon, theme};
 
 /// Quiet time after typing before a folder listing is asked for.
 const LIST_DELAY: Duration = Duration::from_millis(120);
@@ -706,7 +706,7 @@ impl LauncherView {
 impl Render for LauncherView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
-        div()
+        let card = div()
             .key_context("Launcher")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -833,6 +833,7 @@ impl Render for LauncherView {
                         (false, true) => "Enter: shell · Alt+Enter: Claude · Tab: config dir · Esc: close",
                         (false, false) => "Enter: shell · Alt+Enter: Claude · Esc: close",
                     }),
-            )
+            );
+        fade_in(card, "fade-launcher", FadeKind::Card, cx.global::<SettingsStore>().settings().animate_ui)
     }
 }

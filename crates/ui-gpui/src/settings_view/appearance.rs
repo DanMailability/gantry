@@ -422,12 +422,24 @@ impl SettingsView {
         let swatches = div().flex().gap(theme.ui(8.)).children(swatches.collect::<Vec<_>>());
         let selection_reset =
             self.reset_slot("reset-selection", 0, settings, |s| s.selection, |s, v| s.selection = v, window, cx);
+        let animate = settings.animate_ui;
+        let animate_toggle =
+            self.switch("animate-ui", 0, animate, window, cx, change(move |settings| settings.animate_ui = !animate));
+        let animate_reset =
+            self.reset_slot("reset-animate-ui", 0, settings, |s| s.animate_ui, |s, v| s.animate_ui = v, window, cx);
         group(
             theme,
             "Interface",
             None,
             vec![
                 row(theme, "Interface size", "Sidebar, tabs and menus.", control, reset),
+                row(
+                    theme,
+                    "Animate panes and pop-ups",
+                    "Splits slide in, and menus, overlays and cards fade in. Off shows every change at once.",
+                    animate_toggle,
+                    animate_reset,
+                ),
                 row(
                     theme,
                     "Selection ring",

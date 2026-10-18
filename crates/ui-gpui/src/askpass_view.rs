@@ -10,7 +10,8 @@ use gpui::{
 };
 
 use crate::field;
-use crate::theme::{RADIUS_LARGE, RADIUS_SMALL, Theme, theme};
+use crate::settings_store::SettingsStore;
+use crate::theme::{FadeKind, RADIUS_LARGE, RADIUS_SMALL, Theme, fade_in, theme};
 
 /// What the dialog asks the window to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,7 +173,7 @@ impl Render for AskpassView {
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.submit(cx))),
                 ),
         };
-        div()
+        let card = div()
             .key_context("Askpass")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
@@ -208,6 +209,7 @@ impl Render for AskpassView {
                     .bg(rgb(theme.tokens.ground))
                     .child(input.flex_1())
             }))
-            .child(buttons)
+            .child(buttons);
+        fade_in(card, "fade-askpass", FadeKind::Card, cx.global::<SettingsStore>().settings().animate_ui)
     }
 }
