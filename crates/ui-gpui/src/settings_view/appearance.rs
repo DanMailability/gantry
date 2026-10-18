@@ -500,6 +500,36 @@ impl SettingsView {
             window,
             cx,
         );
+        let claude_bar = settings.scrollbar.claude;
+        let claude_bar_switch = self.switch(
+            "claude-scrollbar",
+            0,
+            claude_bar,
+            window,
+            cx,
+            change(move |settings| settings.scrollbar.claude = !claude_bar),
+        );
+        let claude_bar_reset = self.reset_slot(
+            "reset-claude-scrollbar",
+            0,
+            settings,
+            |s| s.scrollbar.claude,
+            |s, v| s.scrollbar.claude = v,
+            window,
+            cx,
+        );
+        let claude_bar_label = row_label(
+            "Scrollbar in Claude panes",
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme.ui(4.))
+                .child(muted(theme, "Shell panes always have a scrollbar. This adds one to Claude panes."))
+                .child(muted(
+                    theme,
+                    "Note: Claude's fullscreen mode doesn't allow external scrollbars, so this only works in classic mode. To use it, run /tui default in Claude.",
+                )),
+        );
         group(
             theme,
             "Panes",
@@ -520,6 +550,7 @@ impl SettingsView {
                     swatches,
                     color_reset,
                 ),
+                row_shell(theme, claude_bar_label, claude_bar_switch, claude_bar_reset),
             ],
         )
     }

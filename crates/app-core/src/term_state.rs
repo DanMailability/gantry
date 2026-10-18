@@ -240,6 +240,23 @@ impl TermState {
         self.term.scroll_display(Scroll::Delta(lines));
     }
 
+    /// Lines of scrollback above the screen and how many of them the viewport is scrolled up by.
+    pub fn scroll_extent(&self) -> (usize, usize) {
+        let grid = self.term.grid();
+        (grid.history_size(), grid.display_offset())
+    }
+
+    /// Scroll the viewport to `offset` lines above the live output.
+    pub fn scroll_to_offset(&mut self, offset: usize) {
+        let (_, current) = self.scroll_extent();
+        self.scroll_viewport(offset as i32 - current as i32);
+    }
+
+    /// Whether the program is on the alternate screen, which has no scrollback.
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
     /// Jump the viewport back to live output.
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
@@ -542,6 +559,24 @@ mod tests {
         assert_eq!(t.row_text(0), "line21");
         t.scroll_to_bottom();
         assert_eq!(t.row_text(0), "line26");
+    }
+
+    #[test]
+    fn scroll_extent_follows_the_viewport() {
+        let mut t = TermState::new(10, 5);
+        assert_eq!(t.scroll_extent(), (0, 0));
+        for i in 0..30 {
+            t.feed(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(t.scroll_extent(), (26, 0));
+        t.scroll_to_offset(10);
+        assert_eq!(t.scroll_extent(), (26, 10));
+        assert_eq!(t.row_text(0), "line16");
+        t.scroll_to_offset(0);
+        assert_eq!(t.scroll_extent(), (26, 0));
+        assert!(!t.alt_screen());
+        t.feed(b"\x1b[?1049h");
+        assert!(t.alt_screen());
     }
 
     #[test]

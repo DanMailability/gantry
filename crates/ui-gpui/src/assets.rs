@@ -19,6 +19,9 @@ pub(crate) const SPLIT_DOWN_ICON: &str = "icons/split-down.svg";
 /// The close pane button's icon (an X).
 pub(crate) const CLOSE_ICON: &str = "icons/close.svg";
 
+/// The jump to bottom chip's icon (an arrow pointing down), drawn by `terminal_view`.
+pub(crate) const ARROW_DOWN_ICON: &str = "icons/arrow-down.svg";
+
 /// The last prompt card's icon (a chat bubble), drawn by `workspace_view::prompt_card`.
 pub(crate) const PROMPT_ICON: &str = "icons/prompt.svg";
 
@@ -39,6 +42,7 @@ impl AssetSource for Assets {
             SPLIT_RIGHT_ICON => Some(include_bytes!("../assets/icons/split-right.svg")),
             SPLIT_DOWN_ICON => Some(include_bytes!("../assets/icons/split-down.svg")),
             CLOSE_ICON => Some(include_bytes!("../assets/icons/close.svg")),
+            ARROW_DOWN_ICON => Some(include_bytes!("../assets/icons/arrow-down.svg")),
             PROMPT_ICON => Some(include_bytes!("../assets/icons/prompt.svg")),
             PIN_ICON => Some(include_bytes!("../assets/icons/pin.svg")),
             LOGO => Some(include_bytes!("../assets/icons/gantry.png")),
@@ -54,6 +58,7 @@ impl AssetSource for Assets {
             SPLIT_RIGHT_ICON.into(),
             SPLIT_DOWN_ICON.into(),
             CLOSE_ICON.into(),
+            ARROW_DOWN_ICON.into(),
             PROMPT_ICON.into(),
             PIN_ICON.into(),
             LOGO.into(),
@@ -67,7 +72,16 @@ mod tests {
 
     #[test]
     fn the_icons_are_embedded_and_nothing_else_is() {
-        for icon in [CONTAINER_ICON, SSH_ICON, SPLIT_RIGHT_ICON, SPLIT_DOWN_ICON, CLOSE_ICON, PROMPT_ICON, PIN_ICON] {
+        for icon in [
+            CONTAINER_ICON,
+            SSH_ICON,
+            SPLIT_RIGHT_ICON,
+            SPLIT_DOWN_ICON,
+            CLOSE_ICON,
+            ARROW_DOWN_ICON,
+            PROMPT_ICON,
+            PIN_ICON,
+        ] {
             let bytes = Assets.load(icon).unwrap().expect("embedded");
             assert!(std::str::from_utf8(&bytes).unwrap().starts_with("<svg"), "{icon}");
         }

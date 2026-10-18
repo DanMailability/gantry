@@ -255,6 +255,14 @@ pub struct LastPromptSettings {
     pub color: Option<u32>,
 }
 
+/// The `scrollbar` setting: which panes get a scrollbar. Shell panes always have one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarSettings {
+    /// Give Claude panes a scrollbar too. It shows something only while Claude runs in its classic renderer; in
+    /// fullscreen mode Claude does its own scrolling and the bar stays empty.
+    pub claude: bool,
+}
+
 /// `~/x` becomes `<home>/x`; other paths are unchanged.
 pub fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
     match (path.strip_prefix("~"), home) {
@@ -403,6 +411,8 @@ pub struct Settings {
     pub window: WindowSettings,
     /// The last prompt card above Claude panes.
     pub last_prompt: LastPromptSettings,
+    /// The scrollbar at the right edge of panes.
+    pub scrollbar: ScrollbarSettings,
     /// Project colors.
     pub project_colors: ProjectColors,
     /// Whether Working sessions show the moving glow.
@@ -473,6 +483,7 @@ impl Default for Settings {
                 right_to_left: true,
             },
             last_prompt: LastPromptSettings { enabled: true, size: 18.0, color: None },
+            scrollbar: ScrollbarSettings { claude: true },
             project_colors: ProjectColors::default(),
             animate_working: true,
             check_for_updates: true,
@@ -936,6 +947,10 @@ impl Reader {
             color: self.color(&map, "lastPrompt.", "color"),
         };
 
+        let map = self.object(raw, "", "scrollbar");
+        let scrollbar =
+            ScrollbarSettings { claude: self.bool(&map, "scrollbar.", "claude", defaults.scrollbar.claude) };
+
         let map = self.object(raw, "", "projectColors");
         let enabled = self.bool(&map, "projectColors.", "enabled", true);
         let folders_map = self.object(&map, "projectColors.", "folders");
@@ -970,6 +985,7 @@ impl Reader {
             favorites,
             window,
             last_prompt,
+            scrollbar,
             project_colors,
             animate_working,
             check_for_updates,
@@ -1104,6 +1120,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         &["lastPrompt", "color"],
         last_prompt.color.map_or(Value::Null, |color| hex(color).into()),
         last_prompt.color != base.color,
+    );
+    add(
+        &["scrollbar", "claude"],
+        settings.scrollbar.claude.into(),
+        settings.scrollbar.claude != default.scrollbar.claude,
     );
     add(
         &["projectColors", "enabled"],
@@ -1485,6 +1506,16 @@ mod tests {
         let bad = parse(r#"{"lastPrompt": {"enabled": "yes"}}"#);
         assert_eq!(bad.problems.len(), 1);
         assert!(bad.settings.unwrap().last_prompt.enabled);
+    }
+
+    #[test]
+    fn scrollbar_in_claude_panes_defaults_on_and_a_bad_value_falls_back_with_a_problem() {
+        assert!(parse("{}").settings.unwrap().scrollbar.claude);
+        let off = parse(r#"{"scrollbar": {"claude": false}}"#);
+        assert!(!off.settings.unwrap().scrollbar.claude);
+        let bad = parse(r#"{"scrollbar": {"claude": "no"}}"#);
+        assert_eq!(bad.problems.len(), 1);
+        assert!(bad.settings.unwrap().scrollbar.claude);
     }
 
     #[test]

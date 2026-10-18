@@ -258,6 +258,13 @@ pub fn contrast(a: u32, b: u32) -> f64 {
     (light + 0.05) / (dark + 0.05)
 }
 
+/// `color` with its lightness capped at `max_lightness` (0..=1), keeping hue and saturation: a pale accent becomes a
+/// deeper shade of the same color, one that is already deep stays as it is.
+pub fn deepen(color: u32, max_lightness: f64) -> u32 {
+    let (h, s, l) = rgb_to_hsl(color);
+    if l <= max_lightness { color } else { hsl_to_rgb(h, s, max_lightness) }
+}
+
 /// `top` laid over `under` at `amount` (0..=1) of opacity, as `0xRRGGBB`.
 pub fn mix(top: u32, under: u32, amount: f32) -> u32 {
     let channel = |shift: u32| {
@@ -312,6 +319,15 @@ mod tests {
         assert_eq!(mix(0xffffff, 0x000000, 0.5), 0x808080);
         assert_eq!(mix(0x102030, 0x405060, 0.0), 0x405060);
         assert_eq!(mix(0x102030, 0x405060, 1.0), 0x102030);
+    }
+
+    #[test]
+    fn deepen_caps_lightness_and_keeps_the_hue() {
+        let (hue, sat, _) = rgb_to_hsl(0x9ecbff);
+        let (h, s, l) = rgb_to_hsl(deepen(0x9ecbff, 0.62));
+        assert!((l - 0.62).abs() < 0.01, "{l}");
+        assert!((h - hue).abs() < 1.5 && (s - sat).abs() < 0.02, "{h} {s}");
+        assert_eq!(deepen(0x2f74c4, 0.62), 0x2f74c4);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! GPUI view that renders one terminal pane and exchanges bytes with its PTY.
 
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
+use crate::assets::ARROW_DOWN_ICON;
 use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, Theme, UI_FONT, theme};
 use app_core::bidi::{RowOrder, logical_hit, to_display};
@@ -10,18 +12,21 @@ use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
 use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
 use app_core::paste::encode_paste;
-use app_core::scroll::{ScrollAction, scroll_action};
+use app_core::scroll::{
+    ACTIVE_HOLD_MS, CHIP_FADE_MS, CHIP_HOLD_MS, JUMP_MS, ScrollAction, activity, chip_opacity, jump_offset,
+    offset_for_thumb_top, scroll_action, thumb,
+};
 use app_core::settings::Settings;
 use app_core::snapshot::{CellStyle, Rgb, ScreenSnapshot, row_spans};
 use app_core::term_state::TermState;
-use app_core::theme_colors::terminal_palette;
+use app_core::theme_colors::{deepen, mix, terminal_palette};
 use app_core::url::link_at;
 use app_core::workspace::PaneLaunch;
 use daemon::client::{ClientEvent, DaemonClient};
 use gpui::{
     App, BorderStyle, Bounds, ClickEvent, ContentMask, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
-    FontWeight, Hsla, Pixels, Point, StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, canvas, div, fill,
-    font, outline, point, prelude::*, px, rgb, size,
+    FontWeight, Hsla, Pixels, Point, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, canvas, div,
+    fill, font, outline, point, prelude::*, px, rgb, size, svg,
 };
 use gpui::{
     ClipboardItem, ElementInputHandler, EntityInputHandler, KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent,
@@ -148,6 +153,16 @@ fn mouse_reaches_program(state: &PaneState) -> bool {
     input_fate(state) == InputFate::Send
 }
 
+/// Width of the scrollbar column at the right edge of a pane, before the interface scale.
+const SCROLLBAR_WIDTH: f32 = 10.0;
+/// The shortest the scrollbar thumb gets.
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+
+/// The shortest the scrollbar thumb gets, in pixels.
+fn min_thumb(cx: &App) -> f32 {
+    f32::from(theme(cx).ui(SCROLLBAR_MIN_THUMB))
+}
+
 /// What the pressed mouse button is doing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Drag {
@@ -207,6 +222,17 @@ pub struct TerminalView {
     grid_size: (u16, u16),
     metrics: CellMetrics,
     scroll_accum: f32,
+    /// Where the scrollbar track was drawn last frame.
+    scrollbar_track: Bounds<Pixels>,
+    /// While the scrollbar thumb is dragged: how far below the thumb's top edge it was grabbed.
+    scrollbar_grab: Option<f32>,
+    /// When the view last scrolled by wheel, drag or the jump to bottom chip: the thumb is in its active color for a
+    /// moment after.
+    scrollbar_moved: Option<Instant>,
+    /// Repaints the thumb when its active color should start to fade.
+    scrollbar_timer: Option<Task<()>>,
+    /// While the jump to bottom chip scrolls the view down: the offset it started at and when.
+    jump: Option<(usize, Instant)>,
     drag: Drag,
     mouse_position: Option<Point<Pixels>>,
     hovered_link: Option<(u16, Range<usize>)>,
@@ -242,6 +268,11 @@ impl TerminalView {
             grid_size: (80, 24),
             metrics: CellMetrics { width: px(8.), height: px(18.) },
             scroll_accum: 0.0,
+            scrollbar_track: Bounds::default(),
+            scrollbar_grab: None,
+            scrollbar_moved: None,
+            scrollbar_timer: None,
+            jump: None,
             drag: Drag::default(),
             mouse_position: None,
             hovered_link: None,
@@ -431,6 +462,7 @@ impl TerminalView {
     }
 
     fn send_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.jump = None;
         self.term.scroll_to_bottom();
         self.term.clear_selection();
         self.write_pty(bytes);
@@ -584,7 +616,72 @@ impl TerminalView {
         self.update_hovered_link(event.modifiers, cx);
     }
 
+    /// The view just scrolled: show the thumb in its active color, and repaint once it should fade.
+    fn scrollbar_scrolled(&mut self, cx: &mut Context<Self>) {
+        self.scrollbar_moved = Some(Instant::now());
+        self.scrollbar_timer = Some(cx.spawn(async move |this, cx| {
+            // Repaint when the thumb starts to fade, then when the chip does; the fades run on animation frames.
+            cx.background_executor().timer(Duration::from_millis(ACTIVE_HOLD_MS + 20)).await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                return;
+            }
+            let chip_fade_from = CHIP_HOLD_MS - CHIP_FADE_MS;
+            cx.background_executor().timer(Duration::from_millis(chip_fade_from - ACTIVE_HOLD_MS)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+    }
+
+    /// The jump to bottom chip: back to live output.
+    fn jump_to_bottom(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.focus_handle.focus(window, cx);
+        cx.emit(PaneEvent::Focused);
+        let (_, offset) = self.term.scroll_extent();
+        self.jump = Some((offset, Instant::now()));
+        self.scrollbar_scrolled(cx);
+        cx.notify();
+    }
+
+    /// A press on the scrollbar column: grab the thumb, or move it under the pointer when the press is on the track.
+    fn scrollbar_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.jump = None;
+        self.focus_handle.focus(window, cx);
+        cx.emit(PaneEvent::Focused);
+        let (history, offset) = self.term.scroll_extent();
+        let track = f32::from(self.scrollbar_track.size.height);
+        let rows = self.grid_size.1 as usize;
+        let Some(thumb) = thumb(track, rows, history, offset, min_thumb(cx)).filter(|_| !self.term.alt_screen()) else {
+            return;
+        };
+        let y = f32::from(event.position.y - self.scrollbar_track.origin.y);
+        let on_thumb = y >= thumb.top && y <= thumb.top + thumb.len;
+        self.scrollbar_grab = Some(if on_thumb { y - thumb.top } else { thumb.len / 2.0 });
+        self.drag_scrollbar(event.position.y, cx);
+    }
+
+    /// Move the grabbed thumb to the pointer height `y`.
+    fn drag_scrollbar(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        let Some(grab) = self.scrollbar_grab else { return };
+        let (history, _) = self.term.scroll_extent();
+        let track = f32::from(self.scrollbar_track.size.height);
+        let Some(thumb) = thumb(track, self.grid_size.1 as usize, history, 0, min_thumb(cx)) else { return };
+        let top = f32::from(y - self.scrollbar_track.origin.y) - grab;
+        self.term.scroll_to_offset(offset_for_thumb_top(top, track, thumb.len, history));
+        self.scrollbar_scrolled(cx);
+        cx.notify();
+    }
+
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.scrollbar_grab.is_some() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.drag_scrollbar(event.position.y, cx);
+            } else {
+                self.scrollbar_grab = None;
+                cx.notify();
+            }
+            return;
+        }
         self.mouse_position = Some(event.position);
         self.update_hovered_link(event.modifiers, cx);
         if self.term.scroll_modes().mouse_report && !event.modifiers.shift && !self.drag.selecting {
@@ -617,6 +714,10 @@ impl TerminalView {
     /// Finish the current drag: report the release of a reported press (at `cell`, else the last cell the program
     /// heard about), or end a selection drag.
     fn end_drag(&mut self, modifiers: Modifiers, cell: Option<(u16, u16)>, cx: &mut Context<Self>) {
+        if self.scrollbar_grab.take().is_some() {
+            cx.notify();
+            return;
+        }
         if let Some((button, reported_cell)) = self.drag.release() {
             self.report(MouseAction::Release(button), modifiers, cell.or(reported_cell));
             return;
@@ -639,7 +740,11 @@ impl TerminalView {
         // A program that ended or is restarting cannot read wheel reports; scroll the history instead.
         let modes = if mouse_reaches_program(&self.state) { self.term.scroll_modes() } else { Default::default() };
         match scroll_action(modes, lines, col, row) {
-            ScrollAction::Viewport(n) => self.term.scroll_viewport(n),
+            ScrollAction::Viewport(n) => {
+                self.jump = None;
+                self.term.scroll_viewport(n);
+                self.scrollbar_scrolled(cx);
+            }
             ScrollAction::Send(bytes) => self.write_pty(&bytes),
         }
         cx.notify();
@@ -731,6 +836,17 @@ impl Render for TerminalView {
         let font = pane_font(Some(installed_family(terminal_font.family.as_deref(), installed_families(cx))));
         let font_size = px(terminal_font.size);
         let metrics = Self::cell_metrics(&font, font_size, terminal_font.line_height, window);
+        if let Some((start, at)) = self.jump {
+            // The chip's scroll to the bottom: one step per frame, the thumb staying in its active color.
+            let elapsed = at.elapsed().as_millis() as u64;
+            self.term.scroll_to_offset(jump_offset(start, elapsed));
+            if elapsed >= JUMP_MS {
+                self.jump = None;
+            } else {
+                window.request_animation_frame();
+            }
+            self.scrollbar_scrolled(cx);
+        }
         let mut snapshot = self.term.snapshot();
         if let Some((row, cols)) = &self.hovered_link
             && let Some(cells) = snapshot.rows.get_mut(*row as usize)
@@ -745,6 +861,39 @@ impl Render for TerminalView {
         let background = to_hsla(snapshot.background);
         let layout_view = cx.entity();
         let input_view = cx.entity();
+        let track_view = cx.entity();
+        // Shell panes always have the bar; Claude panes when `scrollbar.claude` is on.
+        let show_bar = !self.launch.is_claude() || cx.global::<SettingsStore>().settings().scrollbar.claude;
+        let (history, offset) = self.term.scroll_extent();
+        let thumb = thumb(
+            f32::from(self.scrollbar_track.size.height),
+            self.grid_size.1 as usize,
+            history,
+            offset,
+            min_thumb(cx),
+        )
+        .filter(|_| show_bar && !self.term.alt_screen());
+        // The chip shows while scrolled up, until it has faded out after the last movement (it stays during a drag).
+        let chip = if self.scrollbar_grab.is_some() {
+            1.0
+        } else {
+            self.scrollbar_moved.map_or(0.0, |at| chip_opacity(at.elapsed().as_millis() as u64))
+        };
+        if chip > 0.0 && chip < 1.0 {
+            window.request_animation_frame();
+        }
+        let jump_to_bottom = thumb.is_some() && offset > 0 && chip > 0.0;
+        // The thumb is in the accent color while the view moves and fades to grey once it rests.
+        let level = if self.scrollbar_grab.is_some() {
+            1.0
+        } else {
+            self.scrollbar_moved.map_or(0.0, |at| activity(at.elapsed().as_millis() as u64))
+        };
+        if level > 0.0 && level < 1.0 {
+            window.request_animation_frame();
+        }
+        let mut thumb_color = rgb(mix(deepen(theme.tokens.accent, 0.62), theme.tokens.muted, level));
+        thumb_color.a = 0.45 + 0.5 * level;
         let focus = self.focus_handle.clone();
         div()
             .key_context("Terminal")
@@ -774,19 +923,111 @@ impl Render for TerminalView {
             .flex_col()
             .bg(background)
             .child(
-                canvas(
-                    move |bounds, _window, cx| {
-                        layout_view.update(cx, |view, cx| view.layout(bounds, metrics, cx));
-                    },
-                    move |bounds, (), window, cx| {
-                        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                            paint_grid(&snapshot, bounds.origin, metrics, &font, font_size, focused, window, cx);
-                        });
-                        window.handle_input(&focus, ElementInputHandler::new(bounds, input_view), cx);
-                    },
-                )
-                .flex_1()
-                .w_full(),
+                div()
+                    .relative()
+                    .flex_1()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        canvas(
+                            move |bounds, _window, cx| {
+                                layout_view.update(cx, |view, cx| view.layout(bounds, metrics, cx));
+                            },
+                            move |bounds, (), window, cx| {
+                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                    paint_grid(
+                                        &snapshot,
+                                        bounds.origin,
+                                        metrics,
+                                        &font,
+                                        font_size,
+                                        focused,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                                window.handle_input(&focus, ElementInputHandler::new(bounds, input_view), cx);
+                            },
+                        )
+                        .flex_1()
+                        .h_full(),
+                    )
+                    // The scrollbar column is reserved whenever the pane has a bar, so the grid does not resize when
+                    // the thumb appears.
+                    .when(show_bar, |row| {
+                        row.child(
+                            div()
+                                .relative()
+                                .flex_none()
+                                .w(theme.ui(SCROLLBAR_WIDTH))
+                                .h_full()
+                                .on_mouse_down(MouseButton::Left, cx.listener(Self::scrollbar_down))
+                                .child(
+                                    canvas(
+                                        move |bounds, _window, cx| {
+                                            track_view.update(cx, |view, cx| {
+                                                if view.scrollbar_track != bounds {
+                                                    view.scrollbar_track = bounds;
+                                                    cx.notify();
+                                                }
+                                            });
+                                        },
+                                        |_, (), _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .when_some(thumb, |bar, thumb| {
+                                    bar.child(
+                                        div()
+                                            .absolute()
+                                            .top(px(thumb.top))
+                                            .left(theme.ui(2.))
+                                            .w(theme.ui(SCROLLBAR_WIDTH - 4.))
+                                            .h(px(thumb.len))
+                                            .rounded(theme.ui((SCROLLBAR_WIDTH - 4.) / 2.))
+                                            .bg(thumb_color),
+                                    )
+                                }),
+                        )
+                    })
+                    .when(jump_to_bottom, |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right(theme.ui(SCROLLBAR_WIDTH))
+                                .bottom(theme.ui(14.))
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .opacity(chip)
+                                        .h(theme.ui(28.))
+                                        .px(theme.ui(12.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(theme.ui(6.))
+                                        .rounded(theme.ui(14.))
+                                        .bg(rgb(theme.tokens.raised))
+                                        .border_1()
+                                        .border_color(rgb(theme.tokens.accent))
+                                        .text_color(rgb(theme.tokens.accent))
+                                        .font_family(UI_FONT)
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .on_mouse_down(MouseButton::Left, cx.listener(Self::jump_to_bottom))
+                                        .child(
+                                            svg()
+                                                .path(ARROW_DOWN_ICON)
+                                                .size(theme.ui(12.))
+                                                .text_color(rgb(theme.tokens.accent)),
+                                        )
+                                        .child("Jump to bottom"),
+                                ),
+                        )
+                    }),
             )
             .when_some(self.host_card.clone(), |this, card| {
                 // The host is not usable: its state, in the middle of the pane.
