@@ -27,6 +27,7 @@ use protocol::message::SessionInfo;
 use crate::context_menu::{self, OpenMenu};
 use crate::field;
 use crate::hover_card::{self, HoverCard, Lead, lead};
+use crate::pane_drag::DraggedPane;
 use crate::settings_store::{SettingsStore, dir_badge_for, shortcut_label};
 use crate::theme::{
     RADIUS, Theme, UI_FONT, container_icon, dir_badge, group_tint, pin_icon, side_line, ssh_icon, sweeping, theme,
@@ -86,6 +87,8 @@ pub enum SidebarEvent {
         /// Where the button was clicked.
         position: Point<Pixels>,
     },
+    /// A pane of a split tab was dropped on the sidebar: make it a tab of its own.
+    PullOut(NodeId),
     /// Open the recent sessions pop-up.
     OpenRecents,
     /// Give keyboard focus back to the pane.
@@ -788,6 +791,17 @@ impl SidebarView {
             .in_tab
             .then(|| div().absolute().left(theme.ui(20.)).top_0().bottom_0().w(px(2.)).bg(rgb(theme.tokens.line)));
         let base = base.when(row.in_tab, |base| base.relative().pl(theme.ui(32.))).children(guide);
+        // A row that stands for a pane of the layout can be picked up and dropped on a pane or on the sidebar.
+        let dragged_pane = match &row.kind {
+            RowKind::Session { session, leaf: Some(leaf), .. } => {
+                Some(DraggedPane { leaf: *leaf, title: session_title(session).to_string() })
+            }
+            RowKind::Pane { entry, .. } => Some(DraggedPane { leaf: entry.leaf, title: entry.title.clone() }),
+            _ => None,
+        };
+        let base = base.when_some(dragged_pane, |base, dragged| {
+            base.on_drag(dragged, |dragged: &DraggedPane, _offset, _window, cx: &mut App| cx.new(|_| dragged.clone()))
+        });
         // A row listed under another project's tab heading names its own project.
         let project = || {
             row.project_label
@@ -1032,6 +1046,17 @@ impl Render for SidebarView {
             .bg(rgb(theme.tokens.surface))
             .text_color(rgb(theme.tokens.text))
             .font_family(UI_FONT)
+            // A pane of a split tab dropped anywhere on the sidebar becomes a tab of its own.
+            .drag_over::<DraggedPane>({
+                let pullable = session_tree::pullable_leaves(&self.panes);
+                let tint = rgba((theme.tokens.accent << 8) | 0x2e);
+                move |style, dragged, _, _| if pullable.contains(&dragged.leaf) { style.bg(tint) } else { style }
+            })
+            .on_drop(cx.listener(|this, dragged: &DraggedPane, _, cx| {
+                if session_tree::pullable_leaves(&this.panes).contains(&dragged.leaf) {
+                    cx.emit(SidebarEvent::PullOut(dragged.leaf));
+                }
+            }))
             .child(
                 div()
                     .id("filter")

@@ -179,6 +179,67 @@ impl Node {
         first.sibling_leaf(leaf).or_else(|| second.sibling_leaf(leaf))
     }
 
+    /// Trade the places of leaves `a` and `b`; every ratio stays. False (nothing changed) if either is absent.
+    pub fn swap_leaves(&mut self, a: NodeId, b: NodeId) -> bool {
+        if !self.contains(a) || !self.contains(b) {
+            return false;
+        }
+        self.relabel(a, b);
+        true
+    }
+
+    fn relabel(&mut self, a: NodeId, b: NodeId) {
+        match self {
+            Node::Leaf(id) if *id == a => *id = b,
+            Node::Leaf(id) if *id == b => *id = a,
+            Node::Leaf(_) => {}
+            Node::Split { first, second, .. } => {
+                first.relabel(a, b);
+                second.relabel(a, b);
+            }
+        }
+    }
+
+    /// Put leaf `new` where leaf `old` is. False (nothing changed) if `old` is absent.
+    pub fn replace_leaf(&mut self, old: NodeId, new: NodeId) -> bool {
+        match self {
+            Node::Leaf(id) if *id == old => {
+                *id = new;
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split { first, second, .. } => first.replace_leaf(old, new) || second.replace_leaf(old, new),
+        }
+    }
+
+    /// Replace leaf `target` with an even split holding `target` and `leaf`: `leaf` first for `Left`/`Up`, second for
+    /// `Right`/`Down`. False if `target` is absent.
+    pub fn insert_beside(&mut self, target: NodeId, side: Direction, split_id: NodeId, leaf: NodeId) -> bool {
+        match self {
+            Node::Leaf(id) if *id == target => {
+                let (axis, leaf_first) = match side {
+                    Direction::Left => (Axis::Horizontal, true),
+                    Direction::Right => (Axis::Horizontal, false),
+                    Direction::Up => (Axis::Vertical, true),
+                    Direction::Down => (Axis::Vertical, false),
+                };
+                let (first, second) = if leaf_first { (leaf, target) } else { (target, leaf) };
+                *self = Node::Split {
+                    id: split_id,
+                    axis,
+                    ratio: 0.5,
+                    first: Box::new(Node::Leaf(first)),
+                    second: Box::new(Node::Leaf(second)),
+                };
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split { first, second, .. } => {
+                first.insert_beside(target, side, split_id, leaf) || second.insert_beside(target, side, split_id, leaf)
+            }
+        }
+    }
+
     /// Set a split's ratio (clamped to `MIN_RATIO..=MAX_RATIO`). False if `split` is not a split here.
     pub fn set_ratio(&mut self, split: NodeId, ratio: f32) -> bool {
         match self {
@@ -242,6 +303,39 @@ impl Node {
             })
             .max_by(|a, b| a.1.total_cmp(&b.1).then(b.2.y.total_cmp(&a.2.y)).then(b.2.x.total_cmp(&a.2.x)))
             .map(|(id, ..)| id)
+    }
+}
+
+/// Where on a pane a dragged pane is dropped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DropZone {
+    /// The middle: the two panes trade places.
+    Center,
+    /// Near an edge: the dragged pane splits the target on that side.
+    Edge(Direction),
+}
+
+/// The zone of the pane filling `area` that the point (`x`, `y`) falls in: the middle half on both axes is
+/// `Center`, anywhere else the nearest edge.
+pub fn drop_zone(area: Rect, x: f32, y: f32) -> DropZone {
+    let (rx, ry) = ((x - area.x) / area.w, (y - area.y) / area.h);
+    if (0.25..=0.75).contains(&rx) && (0.25..=0.75).contains(&ry) {
+        return DropZone::Center;
+    }
+    let edges = [(rx, Direction::Left), (1.0 - rx, Direction::Right), (ry, Direction::Up), (1.0 - ry, Direction::Down)];
+    let (_, nearest) =
+        edges.into_iter().reduce(|best, edge| if edge.0 < best.0 { edge } else { best }).expect("four edges");
+    DropZone::Edge(nearest)
+}
+
+/// What a drop in `zone` of the pane filling `area` covers: all of it for `Center`, else the half on that side.
+pub fn zone_rect(area: Rect, zone: DropZone) -> Rect {
+    match zone {
+        DropZone::Center => area,
+        DropZone::Edge(Direction::Left) => Rect { w: area.w / 2.0, ..area },
+        DropZone::Edge(Direction::Right) => Rect { x: area.x + area.w / 2.0, w: area.w / 2.0, ..area },
+        DropZone::Edge(Direction::Up) => Rect { h: area.h / 2.0, ..area },
+        DropZone::Edge(Direction::Down) => Rect { y: area.y + area.h / 2.0, h: area.h / 2.0, ..area },
     }
 }
 
@@ -333,5 +427,79 @@ mod tests {
         let tree = three();
         let json = serde_json::to_string(&tree).unwrap();
         assert_eq!(serde_json::from_str::<Node>(&json).unwrap(), tree);
+    }
+
+    #[test]
+    fn swapping_two_leaves_keeps_the_ratios() {
+        let mut tree = three();
+        assert!(tree.set_ratio(10, 0.3));
+        assert!(tree.set_ratio(11, 0.7));
+        assert!(tree.swap_leaves(1, 3));
+        assert_eq!(tree.leaves(), vec![3, 2, 1]);
+        assert_eq!(tree.dividers(Rect::UNIT)[0].ratio, 0.3);
+        assert_eq!(tree.dividers(Rect::UNIT)[1].ratio, 0.7);
+        assert!(!tree.swap_leaves(1, 99), "an absent leaf changes nothing");
+        assert_eq!(tree.leaves(), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn insert_beside_puts_the_leaf_on_the_dropped_side() {
+        for (side, axis, order) in [
+            (Direction::Left, Axis::Horizontal, vec![9, 1]),
+            (Direction::Right, Axis::Horizontal, vec![1, 9]),
+            (Direction::Up, Axis::Vertical, vec![9, 1]),
+            (Direction::Down, Axis::Vertical, vec![1, 9]),
+        ] {
+            let mut tree = Node::Leaf(1);
+            assert!(tree.insert_beside(1, side, 20, 9));
+            assert_eq!(tree.leaves(), order, "{side:?}");
+            assert!(
+                matches!(tree, Node::Split { id: 20, axis: a, ratio, .. } if a == axis && ratio == 0.5),
+                "{side:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replacing_a_leaf_keeps_its_place_and_the_ratios() {
+        let mut tree = three();
+        assert!(tree.set_ratio(11, 0.7));
+        assert!(tree.replace_leaf(2, 9));
+        assert_eq!(tree.leaves(), vec![1, 9, 3]);
+        assert_eq!(tree.dividers(Rect::UNIT)[1].ratio, 0.7);
+        assert!(!tree.replace_leaf(2, 8), "the old leaf is gone");
+        assert!(!tree.replace_leaf(99, 8));
+    }
+
+    #[test]
+    fn insert_beside_an_absent_target_changes_nothing() {
+        let mut tree = three();
+        assert!(!tree.insert_beside(99, Direction::Left, 20, 9));
+        assert_eq!(tree, three());
+    }
+
+    #[test]
+    fn drop_zone_middle_band_and_edges() {
+        let area = rect(0.5, 0.0, 0.5, 1.0);
+        let at = |fx: f32, fy: f32| drop_zone(area, area.x + area.w * fx, area.y + area.h * fy);
+        assert_eq!(at(0.5, 0.5), DropZone::Center);
+        assert_eq!(at(0.26, 0.5), DropZone::Center);
+        assert_eq!(at(0.74, 0.5), DropZone::Center);
+        assert_eq!(at(0.1, 0.5), DropZone::Edge(Direction::Left));
+        assert_eq!(at(0.9, 0.5), DropZone::Edge(Direction::Right));
+        assert_eq!(at(0.5, 0.1), DropZone::Edge(Direction::Up));
+        assert_eq!(at(0.5, 0.9), DropZone::Edge(Direction::Down));
+        assert_eq!(at(0.2, 0.1), DropZone::Edge(Direction::Up), "a corner goes to the nearest edge");
+        assert_eq!(at(0.05, 0.3), DropZone::Edge(Direction::Left));
+    }
+
+    #[test]
+    fn zone_rect_is_the_half_on_that_side() {
+        let area = rect(0.5, 0.0, 0.5, 1.0);
+        assert_eq!(zone_rect(area, DropZone::Center), area);
+        assert_eq!(zone_rect(area, DropZone::Edge(Direction::Left)), rect(0.5, 0.0, 0.25, 1.0));
+        assert_eq!(zone_rect(area, DropZone::Edge(Direction::Right)), rect(0.75, 0.0, 0.25, 1.0));
+        assert_eq!(zone_rect(area, DropZone::Edge(Direction::Up)), rect(0.5, 0.0, 0.5, 0.5));
+        assert_eq!(zone_rect(area, DropZone::Edge(Direction::Down)), rect(0.5, 0.5, 0.5, 0.5));
     }
 }

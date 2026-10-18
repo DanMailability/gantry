@@ -788,6 +788,11 @@ fn row_leaf(row: &Row) -> Option<NodeId> {
     }
 }
 
+/// The leaves of `panes` that share their tab with another pane, so can be pulled out into a tab of their own.
+pub fn pullable_leaves(panes: &[PaneEntry]) -> HashSet<NodeId> {
+    panes.iter().filter(|pane| !pane.alone).map(|pane| pane.leaf).collect()
+}
+
 /// Every leaf listed in `rows`, top to bottom, once each (the tab order of Ctrl+Tab).
 pub fn leaves_in_order(rows: &[Row]) -> Vec<NodeId> {
     let mut leaves = Vec::new();
@@ -1503,6 +1508,28 @@ mod tests {
         );
         assert_eq!(rows[2].project_label, None);
         assert_eq!(rows[3].project_label.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn only_panes_of_split_tabs_can_be_pulled_out() {
+        let alone = shell_pane(1, "/r/alpha");
+        let in_a_tab = PaneEntry { alone: false, ..shell_pane(2, "/r/alpha") };
+        let pullable = pullable_leaves(&[alone, in_a_tab]);
+        assert!(!pullable.contains(&1));
+        assert!(pullable.contains(&2));
+        assert!(!pullable.contains(&99), "an unknown leaf is not pullable");
+    }
+
+    #[test]
+    fn a_tab_mixing_two_hosts_lists_both_panes_under_the_first_panes_project() {
+        let remote = PaneEntry { host: HostId::named("prod-1"), ..shell_pane(2, "/r/alpha") };
+        let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/alpha"), remote]);
+        fixture.tabs = vec![tab(0, 1, &[1, 2])];
+        let rows = fixture.rows();
+        assert!(matches!(&rows[1].kind, RowKind::Tab { panes: 2, first: 1, .. }), "{:?}", rows[1].kind);
+        let leaves: Vec<_> = rows.iter().filter(|row| row.in_tab).map(Row::key).collect();
+        assert_eq!(leaves, vec![RowKey::Leaf(1), RowKey::Leaf(2)]);
+        assert_eq!(rows.iter().filter(|row| matches!(row.kind, RowKind::Project { .. })).count(), 1);
     }
 
     #[test]

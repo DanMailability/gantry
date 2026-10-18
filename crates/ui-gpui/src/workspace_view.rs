@@ -14,7 +14,7 @@ use app_core::recents;
 use app_core::release::{self, CheckStatus, NotesBlock, Online, Release};
 use app_core::search_merge::{self, HostSearch};
 use app_core::settings::ThemeChoice;
-use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect};
+use app_core::split_tree::{Axis, Direction, Divider, NodeId, Rect, drop_zone};
 use app_core::theme_colors::{Preset, mix, terminal_palette};
 use app_core::version::{self, Note, Update, Version};
 use app_core::workspace::{
@@ -27,9 +27,9 @@ use daemon::containers::GONE as CONTAINER_GONE;
 use daemon::paths::{Paths, current_profile};
 use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, Share, SshHostSpec, connect as ssh_connect};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render,
-    Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, DragMoveEvent, Entity, FocusHandle, Focusable,
+    FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point,
+    PromptLevel, Render, Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
 };
 use notify::RecommendedWatcher;
 use protocol::host::{HostId, PaneKey};
@@ -48,6 +48,7 @@ use crate::assets::{CLOSE_ICON, LOGO, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_
 use crate::context_menu::{self, OpenMenu};
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{LauncherBrowse, LauncherEvent, LauncherHost, LauncherView};
+use crate::pane_drag::{DraggedPane, PaneDrop, preview_for, preview_label};
 use crate::recents_view::{RecentsEvent, RecentsView, SEARCH_LIMIT};
 use crate::release_check::{self, CheckRow};
 use crate::settings_store::{SettingsStore, dir_badge_for};
@@ -245,6 +246,8 @@ pub struct WorkspaceView {
     dragging: Option<Divider>,
     /// Window bounds of the visible tab's pane area (for divider drags).
     content_bounds: Bounds<Pixels>,
+    /// Where the pane being dragged would land, while it is over a pane of the visible tab.
+    pane_drop: Option<PaneDrop>,
     sidebar: Entity<SidebarView>,
     /// Window bounds of the sidebar (for width drags).
     sidebar_bounds: Bounds<Pixels>,
@@ -466,6 +469,7 @@ impl WorkspaceView {
             prompting: Rc::new(Cell::new(false)),
             dragging: None,
             content_bounds: Bounds::default(),
+            pane_drop: None,
             sidebar,
             sidebar_bounds: Bounds::default(),
             resizing_sidebar: false,
@@ -2007,21 +2011,22 @@ impl WorkspaceView {
                 }
             })
             .collect();
+        // A tab can mix hosts: it lists the panes whose host is live, and is not listed when none is.
         let tabs: Vec<TabEntry> = self
             .workspace
             .tabs
             .iter()
             .enumerate()
             .filter(|(_, tab)| !tab.settings)
-            // A tab is one host's (splitting keeps the host): it is listed only while its host is live.
-            .filter(|(_, tab)| {
-                tab.root.leaves().first().is_none_or(|leaf| !self.is_away(&self.workspace.leaves[leaf].host))
-            })
-            .map(|(index, tab)| TabEntry {
-                index,
-                name: tab.name.clone(),
-                focused: tab.focused,
-                leaves: tab.root.leaves(),
+            .filter_map(|(index, tab)| {
+                let leaves: Vec<NodeId> = tab
+                    .root
+                    .leaves()
+                    .into_iter()
+                    .filter(|leaf| !self.is_away(&self.workspace.leaves[leaf].host))
+                    .collect();
+                let focused = if leaves.contains(&tab.focused) { tab.focused } else { *leaves.first()? };
+                Some(TabEntry { index, name: tab.name.clone(), focused, leaves })
             })
             .collect();
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, tabs, cx));
@@ -2375,6 +2380,13 @@ impl WorkspaceView {
             }
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
             SidebarEvent::New { claude, position } => self.new_pressed(claude, position, window, cx),
+            SidebarEvent::PullOut(leaf) => {
+                if self.workspace.pull_out(leaf) {
+                    self.focus_current(window, cx);
+                    self.save(cx);
+                    cx.notify();
+                }
+            }
             SidebarEvent::OpenRecents => self.open_recents(&OpenRecents, window, cx),
             SidebarEvent::Dismiss => self.focus_current(window, cx),
             SidebarEvent::ShowSettings => self.open_settings(&OpenSettings, window, cx),
@@ -3035,6 +3047,88 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// The pointer moved while a pane is dragged over `leaf`'s overlay: work out where the drop would land.
+    fn drag_over_pane(&mut self, leaf: NodeId, event: &DragMoveEvent<DraggedPane>, cx: &mut Context<Self>) {
+        let (bounds, position) = (event.bounds, event.event.position);
+        let src = event.drag(cx).leaf;
+        let next = bounds.contains(&position).then(|| {
+            let area = Rect {
+                x: f32::from(bounds.origin.x),
+                y: f32::from(bounds.origin.y),
+                w: f32::from(bounds.size.width),
+                h: f32::from(bounds.size.height),
+            };
+            let zone = drop_zone(area, f32::from(position.x), f32::from(position.y));
+            let check = self.workspace.drop_check(src, leaf, zone);
+            let same_tab = self.workspace.tab_of(src) == Some(self.workspace.active);
+            let title = self
+                .workspace
+                .leaf_name(leaf)
+                .map(String::from)
+                .or_else(|| self.slots.get(&leaf).map(|slot| slot.view.read(cx).title()))
+                .unwrap_or_default();
+            PaneDrop { target: leaf, zone, check, label: preview_label(zone, check, same_tab, &title) }
+        });
+        match next {
+            Some(drop) if self.pane_drop.as_ref() != Some(&drop) => {
+                self.pane_drop = Some(drop);
+                cx.notify();
+            }
+            None if self.pane_drop.as_ref().is_some_and(|drop| drop.target == leaf) => {
+                self.pane_drop = None;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// The button was released over `target`'s overlay with pane `src`: do what the preview showed.
+    fn drop_pane(&mut self, src: NodeId, target: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drop) = self.pane_drop.take().filter(|drop| drop.target == target) else { return };
+        if self.workspace.move_leaf(src, drop.target, drop.zone) {
+            self.focus_current(window, cx);
+            self.save(cx);
+        }
+        cx.notify();
+    }
+
+    /// The translucent landing area over the visible tab while a pane is dragged over one of its panes: the accent when
+    /// the drop works, the danger color when it is refused.
+    fn pane_drop_preview(&self, tab: &app_core::workspace::Tab, theme: &Theme, cx: &App) -> Option<Div> {
+        if !cx.has_active_drag() {
+            return None;
+        }
+        let drop = self.pane_drop.as_ref()?;
+        let (_, pane) = tab.root.layout(Rect::UNIT).into_iter().find(|(leaf, _)| *leaf == drop.target)?;
+        let (rect, refused) = preview_for(pane, drop.zone, drop.check)?;
+        let color = if refused { theme.tokens.danger } else { theme.tokens.accent };
+        // The same padded box as a pane's wrapper, so the landing area lines up with the pane's card.
+        Some(
+            div()
+                .absolute()
+                .left(relative(rect.x))
+                .top(relative(rect.y))
+                .w(relative(rect.w))
+                .h(relative(rect.h))
+                .p(px(PANE_GAP / 2.))
+                .child(
+                    div()
+                        .size_full()
+                        .rounded(px(RADIUS_LARGE))
+                        .border_2()
+                        .border_dashed()
+                        .border_color(rgb(color))
+                        .bg(rgba((color << 8) | 0x2e))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(color))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(drop.label.clone()),
+                ),
+        )
+    }
+
     fn drag_divider(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(divider) = self.dragging else { return };
         if event.pressed_button != Some(MouseButton::Left) {
@@ -3454,6 +3548,7 @@ impl WorkspaceView {
             };
         }
         let multiple = tab.root.leaves().len() > 1;
+        let dragging_pane = cx.has_active_drag();
         div()
             .id("tab-content")
             .relative()
@@ -3489,6 +3584,20 @@ impl WorkspaceView {
                 } else {
                     None
                 };
+                // While a pane is being dragged, an overlay takes the pointer from the terminal and tracks the drop.
+                let overlay = dragging_pane.then(|| {
+                    div()
+                        .id(("pane-drop", index))
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedPane>, _, cx| {
+                            this.drag_over_pane(leaf, event, cx)
+                        }))
+                        .on_drop(cx.listener(move |this, dragged: &DraggedPane, window, cx| {
+                            this.drop_pane(dragged.leaf, leaf, window, cx)
+                        }))
+                });
                 Some(
                     div()
                         .absolute()
@@ -3515,8 +3624,8 @@ impl WorkspaceView {
                                 }))
                                 .when(multiple, |pane| {
                                     pane.child(pane_header(
-                                        index, title, status, unseen, offline, animate, container, host, dir, folder,
-                                        project, &theme,
+                                        index, leaf, title, status, unseen, offline, animate, container, host, dir,
+                                        folder, project, &theme,
                                     ))
                                 })
                                 .when_some(last_prompt, |pane, text| {
@@ -3536,9 +3645,11 @@ impl WorkspaceView {
                                         .child(view)
                                         .child(self.split_buttons(leaf, index, focused, &theme, cx)),
                                 ),
-                        ),
+                        )
+                        .children(overlay),
                 )
             }))
+            .children(self.pane_drop_preview(tab, &theme, cx))
             .children(tab.root.dividers(Rect::UNIT).into_iter().map(|divider| {
                 let handle = div().id(("divider", divider.split as usize)).absolute();
                 let handle = match divider.axis {
@@ -3619,6 +3730,7 @@ fn prompt_card(text: String, multiple: bool, size: f32, color: Option<u32>, them
 #[allow(clippy::too_many_arguments)]
 fn pane_header(
     index: usize,
+    leaf: NodeId,
     title: String,
     status: Option<SessionStatus>,
     unseen: Unseen,
@@ -3647,6 +3759,9 @@ fn pane_header(
     div()
         .id(("pane-header", index))
         .tooltip(hover_card::tooltip(card))
+        .on_drag(DraggedPane { leaf, title: title.clone() }, |dragged: &DraggedPane, _offset, _window, cx: &mut App| {
+            cx.new(|_| dragged.clone())
+        })
         .relative()
         .flex_none()
         .h(theme.ui(28.))

@@ -7,6 +7,7 @@ mod context_menu;
 mod field;
 mod hover_card;
 pub mod launcher_view;
+mod pane_drag;
 pub mod recents_view;
 mod release_check;
 mod settings_store;

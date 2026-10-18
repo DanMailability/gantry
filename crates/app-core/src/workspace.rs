@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::attention::most_urgent;
 use crate::sessions::SessionStore;
 use crate::settings::{Settings, ShellSettings, expand_home};
-use crate::split_tree::{Axis, Direction, Node, NodeId};
+use crate::split_tree::{Axis, Direction, DropZone, Node, NodeId};
 use crate::theme_colors::ProjectColor;
 
 /// Program name of Claude Code.
@@ -472,6 +472,17 @@ impl Default for SidebarState {
 /// Most panes one tab may hold; further splits are refused.
 pub const MAX_PANES_PER_TAB: usize = 4;
 
+/// What a drop of one pane on another would do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropCheck {
+    /// Nothing to drop here (the pane itself, a pane outside the visible tab, the Settings tab).
+    Nothing,
+    /// The drop works.
+    Allowed,
+    /// The visible tab already holds `MAX_PANES_PER_TAB` panes and the drop would add one.
+    Full,
+}
+
 /// All tabs of the window.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -656,6 +667,25 @@ impl Workspace {
         self.tabs.get(self.active).is_some_and(|tab| !tab.settings && tab.root.leaves().len() < MAX_PANES_PER_TAB)
     }
 
+    /// What dropping leaf `src` on `zone` of leaf `target` (a pane of the visible tab) would do.
+    pub fn drop_check(&self, src: NodeId, target: NodeId, zone: DropZone) -> DropCheck {
+        let (Some(from), Some(here)) = (self.tab_of(src), self.tab_of(target)) else { return DropCheck::Nothing };
+        if src == target
+            || here != self.active
+            || self.tabs[from].settings
+            || self.tabs[here].settings
+            || !self.leaves.contains_key(&src)
+        {
+            return DropCheck::Nothing;
+        }
+        let adds_a_pane = from != here;
+        if matches!(zone, DropZone::Edge(_)) && adds_a_pane && self.tabs[here].root.leaves().len() >= MAX_PANES_PER_TAB
+        {
+            return DropCheck::Full;
+        }
+        DropCheck::Allowed
+    }
+
     /// Split the focused leaf, putting `launch` second (on this machine), and focus it. `None` when there are no
     /// tabs or the tab is full.
     pub fn split(&mut self, axis: Axis, launch: PaneLaunch) -> Option<NodeId> {
@@ -678,7 +708,15 @@ impl Workspace {
 
     /// Remove `leaf` (and its tab if it was the last leaf). Focus moves to its sibling.
     pub fn close(&mut self, leaf: NodeId) -> Option<Leaf> {
-        let index = self.tab_of(leaf)?;
+        self.tab_of(leaf)?;
+        self.detach(leaf);
+        self.leaves.remove(&leaf)
+    }
+
+    /// Take `leaf` out of its tab's tree (the tab goes with its last leaf), leaving its `Leaf` entry alone. The tab's
+    /// focus moves to the sibling when it was on `leaf`; `active` follows the visible tab.
+    fn detach(&mut self, leaf: NodeId) {
+        let index = self.tab_of(leaf).expect("a detached leaf is in a tab");
         let tab = &mut self.tabs[index];
         let sibling = tab.root.sibling_leaf(leaf);
         let root = std::mem::replace(&mut tab.root, Node::Leaf(0));
@@ -696,7 +734,56 @@ impl Workspace {
                 }
             }
         }
-        self.leaves.remove(&leaf)
+    }
+
+    /// A tab of its own for `leaf`, before the Settings tab (which stays last). The visible tab stays visible.
+    fn push_tab(&mut self, leaf: NodeId) {
+        let at = self.settings_tab().unwrap_or(self.tabs.len());
+        self.tabs.insert(at, Tab { root: Node::Leaf(leaf), focused: leaf, settings: false, name: None });
+        if self.active >= at {
+            self.active += 1;
+        }
+    }
+
+    /// Make `leaf`, a pane of a split tab, a tab of its own (before the Settings tab); the visible tab stays visible.
+    /// False, with nothing changed, if `leaf` is unknown, in the Settings tab or alone in its tab.
+    pub fn pull_out(&mut self, leaf: NodeId) -> bool {
+        let Some(index) = self.tab_of(leaf) else { return false };
+        if self.tabs[index].settings || self.tabs[index].root.leaves().len() < 2 {
+            return false;
+        }
+        self.detach(leaf);
+        self.push_tab(leaf);
+        true
+    }
+
+    /// Drop leaf `src` on `zone` of leaf `target` (a pane of the visible tab): an edge splits `target` on that side
+    /// with `src`, the middle swaps them. A tab left without panes disappears; when `src` came from another tab and
+    /// the middle was hit, `target` becomes a tab of its own. The visible tab stays visible and `src` gets focus.
+    /// False, with nothing changed, unless `drop_check` allows it.
+    pub fn move_leaf(&mut self, src: NodeId, target: NodeId, zone: DropZone) -> bool {
+        if self.drop_check(src, target, zone) != DropCheck::Allowed {
+            return false;
+        }
+        let same_tab = self.tab_of(src) == Some(self.active);
+        match zone {
+            DropZone::Center if same_tab => {
+                self.tabs[self.active].root.swap_leaves(src, target);
+            }
+            DropZone::Center => {
+                // Detach first: while `src` is in two trees `tab_of` would find the earlier one.
+                self.detach(src);
+                self.tabs[self.active].root.replace_leaf(target, src);
+                self.push_tab(target);
+            }
+            DropZone::Edge(side) => {
+                self.detach(src);
+                let split = self.alloc();
+                self.tabs[self.active].root.insert_beside(target, side, split, src);
+            }
+        }
+        self.tabs[self.active].focused = src;
+        true
     }
 
     /// The tabs to keep aside for `dead` leaves: a tab whose leaves are all dead whole, a dead leaf of a tab with live
@@ -1231,6 +1318,324 @@ mod tests {
         ws.close(b);
         assert!(ws.history_step(-1));
         assert_eq!(ws.focused(), Some(a));
+    }
+
+    /// A tab of `count` side-by-side shell panes (the last tab, visible); returns its leaves.
+    fn tab_of_panes(ws: &mut Workspace, count: usize) -> Vec<NodeId> {
+        let mut leaves = vec![ws.new_tab(shell("/p0"))];
+        for index in 1..count {
+            leaves.push(ws.split(Axis::Horizontal, shell(&format!("/p{index}"))).unwrap());
+        }
+        leaves
+    }
+
+    const LEFT: DropZone = DropZone::Edge(Direction::Left);
+
+    #[test]
+    fn drop_check_allows_edges_below_the_limit() {
+        let mut ws = Workspace::default();
+        let other = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, 3);
+        assert_eq!(ws.drop_check(other, here[0], LEFT), DropCheck::Allowed);
+        assert_eq!(ws.drop_check(here[2], here[0], LEFT), DropCheck::Allowed);
+    }
+
+    #[test]
+    fn a_full_tab_refuses_an_edge_drop_from_another_tab_but_allows_one_from_itself() {
+        let mut ws = Workspace::default();
+        let other = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, MAX_PANES_PER_TAB);
+        assert_eq!(ws.drop_check(other, here[0], LEFT), DropCheck::Full);
+        assert_eq!(ws.drop_check(here[3], here[0], LEFT), DropCheck::Allowed);
+    }
+
+    #[test]
+    fn a_full_tab_still_allows_a_swap() {
+        let mut ws = Workspace::default();
+        let other = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, MAX_PANES_PER_TAB);
+        assert_eq!(ws.drop_check(other, here[0], DropZone::Center), DropCheck::Allowed);
+    }
+
+    #[test]
+    fn dropping_a_pane_on_itself_is_nothing() {
+        let mut ws = Workspace::default();
+        let here = tab_of_panes(&mut ws, 2);
+        assert_eq!(ws.drop_check(here[0], here[0], DropZone::Center), DropCheck::Nothing);
+        assert_eq!(ws.drop_check(here[0], here[0], LEFT), DropCheck::Nothing);
+    }
+
+    #[test]
+    fn a_target_outside_the_visible_tab_is_nothing() {
+        let mut ws = Workspace::default();
+        let first = tab_of_panes(&mut ws, 2);
+        let second = tab_of_panes(&mut ws, 2);
+        assert_eq!(ws.drop_check(second[0], first[0], LEFT), DropCheck::Nothing);
+        assert_eq!(ws.drop_check(first[0], 9999, LEFT), DropCheck::Nothing);
+        assert_eq!(ws.drop_check(9999, second[0], LEFT), DropCheck::Nothing);
+    }
+
+    #[test]
+    fn the_settings_tab_is_never_a_source_or_a_target() {
+        let mut ws = Workspace::default();
+        let here = tab_of_panes(&mut ws, 2);
+        let other = ws.new_tab(shell("/o"));
+        let settings = ws.open_settings();
+        let settings_leaf = ws.tabs[settings].focused;
+        assert_eq!(ws.drop_check(other, here[0], LEFT), DropCheck::Nothing, "Settings is visible: no target");
+        ws.focus(here[0]);
+        assert_eq!(ws.drop_check(settings_leaf, here[0], LEFT), DropCheck::Nothing, "Settings cannot be a source");
+        assert_eq!(ws.drop_check(other, here[0], LEFT), DropCheck::Allowed);
+    }
+
+    fn leaves_of(ws: &Workspace, tab: usize) -> Vec<NodeId> {
+        ws.tabs[tab].root.leaves()
+    }
+
+    #[test]
+    fn an_edge_drop_from_the_same_tab_reorders() {
+        let mut ws = Workspace::default();
+        let [a, b, c] = tab_of_panes(&mut ws, 3)[..] else { panic!("three panes") };
+        assert!(ws.move_leaf(c, a, LEFT));
+        assert_eq!(leaves_of(&ws, 0), vec![c, a, b]);
+        assert_eq!(ws.focused(), Some(c));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn dropping_a_pane_on_the_edge_of_its_sibling_changes_the_axis() {
+        let mut ws = Workspace::default();
+        let [a, b] = tab_of_panes(&mut ws, 2)[..] else { panic!("two panes") };
+        assert!(ws.move_leaf(a, b, DropZone::Edge(Direction::Down)));
+        assert_eq!(leaves_of(&ws, 0), vec![b, a]);
+        assert!(matches!(ws.tabs[0].root, Node::Split { axis: Axis::Vertical, .. }));
+        assert!(ws.move_leaf(b, a, LEFT));
+        assert_eq!(leaves_of(&ws, 0), vec![b, a]);
+        assert!(matches!(ws.tabs[0].root, Node::Split { axis: Axis::Horizontal, .. }));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn a_swap_in_the_same_tab_trades_places() {
+        let mut ws = Workspace::default();
+        let [a, b, c] = tab_of_panes(&mut ws, 3)[..] else { panic!("three panes") };
+        assert!(ws.move_leaf(a, c, DropZone::Center));
+        assert_eq!(leaves_of(&ws, 0), vec![c, b, a]);
+        assert_eq!(ws.focused(), Some(a));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn a_single_pane_tab_dropped_on_an_edge_joins_the_visible_tab_and_its_tab_disappears() {
+        let mut ws = Workspace::default();
+        let o = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, 2);
+        assert_eq!(ws.active, 1);
+        let leaves_before = ws.leaves.clone();
+        assert!(ws.move_leaf(o, here[1], DropZone::Edge(Direction::Right)));
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.active, 0, "the visible tab is still the visible tab");
+        assert_eq!(leaves_of(&ws, 0), vec![here[0], here[1], o]);
+        assert_eq!(ws.focused(), Some(o));
+        assert_eq!(ws.leaves, leaves_before, "only the layout changed");
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn a_pane_of_a_split_tab_moves_and_the_source_tab_keeps_a_valid_focus() {
+        let mut ws = Workspace::default();
+        let source = tab_of_panes(&mut ws, 2);
+        let here = tab_of_panes(&mut ws, 2);
+        assert_eq!(ws.tabs[0].focused, source[1]);
+        assert!(ws.move_leaf(source[1], here[0], DropZone::Edge(Direction::Right)));
+        assert_eq!(leaves_of(&ws, 0), vec![source[0]]);
+        assert_eq!(ws.tabs[0].focused, source[0]);
+        assert_eq!(leaves_of(&ws, 1), vec![here[0], source[1], here[1]]);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn a_center_drop_from_another_tab_pushes_the_target_into_a_new_last_tab() {
+        let mut ws = Workspace::default();
+        let o = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, 2);
+        assert!(ws.move_leaf(o, here[0], DropZone::Center));
+        assert_eq!(ws.tabs.len(), 2);
+        assert_eq!(leaves_of(&ws, 0), vec![o, here[1]]);
+        assert_eq!(leaves_of(&ws, 1), vec![here[0]]);
+        assert_eq!((ws.active, ws.focused()), (0, Some(o)));
+        assert_eq!(ws.tabs[1].focused, here[0]);
+        assert!(ws.is_consistent());
+    }
+
+    /// `ws` written and read back the way the GUI saves and restores it (refused when inconsistent).
+    fn saved_and_loaded(ws: &Workspace) -> Workspace {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        crate::layout_store::save(&path, ws).unwrap();
+        crate::layout_store::load(&path).unwrap().expect("a layout that loads")
+    }
+
+    #[test]
+    fn a_middle_drop_from_a_tab_after_the_visible_one_keeps_the_layout_consistent() {
+        let mut ws = Workspace::default();
+        let here = tab_of_panes(&mut ws, 2);
+        let later = ws.new_tab(shell("/later"));
+        ws.focus(here[0]);
+        assert!(ws.move_leaf(later, here[0], DropZone::Center));
+        assert_eq!(leaves_of(&ws, 0), vec![later, here[1]]);
+        assert_eq!(leaves_of(&ws, 1), vec![here[0]]);
+        assert_eq!((ws.active, ws.focused()), (0, Some(later)));
+        assert!(ws.is_consistent());
+        assert_eq!(saved_and_loaded(&ws).tabs, ws.tabs);
+    }
+
+    #[test]
+    fn a_middle_drop_of_a_pane_from_a_split_tab_after_the_visible_one_keeps_the_layout_consistent() {
+        let mut ws = Workspace::default();
+        let here = tab_of_panes(&mut ws, 2);
+        let source = tab_of_panes(&mut ws, 2);
+        ws.focus(here[0]);
+        assert!(ws.move_leaf(source[1], here[0], DropZone::Center));
+        assert_eq!(leaves_of(&ws, 0), vec![source[1], here[1]]);
+        assert_eq!(leaves_of(&ws, 1), vec![source[0]]);
+        assert_eq!(leaves_of(&ws, 2), vec![here[0]]);
+        assert!(ws.is_consistent());
+        assert_eq!(saved_and_loaded(&ws).tabs, ws.tabs);
+    }
+
+    #[test]
+    fn an_edge_drop_from_a_tab_after_the_visible_one_keeps_the_layout_consistent() {
+        let mut ws = Workspace::default();
+        let here = tab_of_panes(&mut ws, 2);
+        let later = ws.new_tab(shell("/later"));
+        ws.focus(here[0]);
+        assert!(ws.move_leaf(later, here[1], DropZone::Edge(Direction::Down)));
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(leaves_of(&ws, 0), vec![here[0], here[1], later]);
+        assert!(ws.is_consistent());
+        assert_eq!(saved_and_loaded(&ws).tabs, ws.tabs);
+    }
+
+    #[test]
+    fn a_new_tab_from_a_move_goes_before_the_settings_tab() {
+        let mut ws = Workspace::default();
+        let o = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, 2);
+        ws.open_settings();
+        ws.focus(here[0]);
+        assert!(ws.move_leaf(o, here[0], DropZone::Center));
+        assert!(ws.tabs.last().unwrap().settings, "Settings stays last");
+        assert_eq!(ws.tabs[ws.active].root.leaves(), vec![o, here[1]]);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn a_refused_drop_changes_nothing() {
+        let mut ws = Workspace::default();
+        let o = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, MAX_PANES_PER_TAB);
+        let before = ws.clone();
+        assert!(!ws.move_leaf(o, here[0], LEFT));
+        assert!(!ws.move_leaf(here[0], here[0], DropZone::Center));
+        assert_eq!(ws, before);
+    }
+
+    #[test]
+    fn mixed_hosts_may_share_a_tab() {
+        let mut ws = Workspace::default();
+        let remote = ws.new_tab_on(shell("/r"), HostId::named("prod-1"));
+        let here = tab_of_panes(&mut ws, 2);
+        assert!(ws.move_leaf(remote, here[0], LEFT));
+        assert_eq!(leaves_of(&ws, 0), vec![remote, here[0], here[1]]);
+        assert_eq!(ws.leaves[&remote].host, HostId::named("prod-1"));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn a_moved_layout_survives_save_and_load() {
+        let mut ws = Workspace::default();
+        let o = ws.new_tab(shell("/o"));
+        let here = tab_of_panes(&mut ws, 2);
+        assert!(ws.move_leaf(o, here[1], DropZone::Edge(Direction::Down)));
+        let loaded: Workspace = serde_json::from_str(&serde_json::to_string(&ws).unwrap()).unwrap();
+        assert_eq!((loaded.tabs, loaded.leaves, loaded.active), (ws.tabs.clone(), ws.leaves.clone(), ws.active));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn back_and_forward_survive_a_move_that_removes_a_tab() {
+        let mut ws = Workspace::default();
+        let (a, b, c) = (ws.new_tab(shell("/a")), ws.new_tab(shell("/b")), ws.new_tab(shell("/c")));
+        visit(&mut ws, a);
+        visit(&mut ws, b);
+        visit(&mut ws, c);
+        assert!(ws.move_leaf(b, c, DropZone::Edge(Direction::Right)));
+        assert_eq!(ws.tabs.len(), 2);
+        assert!(ws.history_step(-1), "the entry for b now resolves to the tab that holds it");
+        assert!(ws.history_step(-1));
+        assert_eq!(ws.focused(), Some(a));
+        assert!(ws.history_step(1));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn pulling_a_pane_out_makes_it_the_last_tab_and_keeps_the_visible_tab() {
+        let mut ws = Workspace::default();
+        let [a, b, c] = tab_of_panes(&mut ws, 3)[..] else { panic!("three panes") };
+        ws.focus(a);
+        let leaves_before = ws.leaves.clone();
+        assert!(ws.pull_out(b));
+        assert_eq!(ws.tabs.len(), 2);
+        assert_eq!(leaves_of(&ws, 0), vec![a, c]);
+        assert_eq!(leaves_of(&ws, 1), vec![b]);
+        assert_eq!((ws.active, ws.focused()), (0, Some(a)));
+        assert_eq!(ws.tabs[1].focused, b);
+        assert_eq!(ws.leaves, leaves_before);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn pulling_out_the_focused_pane_moves_focus_to_its_sibling() {
+        let mut ws = Workspace::default();
+        let [a, b] = tab_of_panes(&mut ws, 2)[..] else { panic!("two panes") };
+        assert_eq!(ws.focused(), Some(b));
+        assert!(ws.pull_out(b));
+        assert_eq!((ws.active, ws.focused()), (0, Some(a)));
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn pulling_out_a_lone_pane_does_nothing() {
+        let mut ws = Workspace::default();
+        let a = ws.new_tab(shell("/a"));
+        let before = ws.clone();
+        assert!(!ws.pull_out(a));
+        assert!(!ws.pull_out(9999));
+        assert_eq!(ws, before);
+    }
+
+    #[test]
+    fn pulling_out_from_a_background_tab_leaves_the_visible_tab_alone() {
+        let mut ws = Workspace::default();
+        let source = tab_of_panes(&mut ws, 2);
+        let visible = ws.new_tab(shell("/v"));
+        assert!(ws.pull_out(source[0]));
+        assert_eq!((ws.active, ws.focused()), (1, Some(visible)));
+        assert_eq!(leaves_of(&ws, 2), vec![source[0]]);
+        assert!(ws.is_consistent());
+    }
+
+    #[test]
+    fn pulling_out_while_settings_is_visible_keeps_settings_visible() {
+        let mut ws = Workspace::default();
+        let source = tab_of_panes(&mut ws, 2);
+        let settings = ws.open_settings();
+        assert!(ws.pull_out(source[0]));
+        assert!(ws.tabs[ws.active].settings, "Settings is still the visible tab");
+        assert_eq!(ws.tabs.iter().position(|tab| tab.settings), Some(ws.tabs.len() - 1));
+        assert_eq!(settings, 1);
+        assert!(ws.is_consistent());
     }
 
     #[test]
@@ -1884,6 +2289,25 @@ mod tests {
         assert!(restored.attach.is_empty(), "nothing is attached to a host that is not connected");
         assert_eq!(ws.instances[&HostId::named("devbox")], "r1", "kept for when the host is back");
         assert!(ws.finished_leaves().is_empty(), "a remote leaf waiting for its host is not finished");
+    }
+
+    #[test]
+    fn a_mixed_host_tab_is_kept_whole_by_restore_while_one_host_is_away() {
+        let mut saved = workspace_on("i1");
+        saved.set_instance(&HostId::named("devbox"), "r1");
+        let local = saved.new_tab(shell("/a"));
+        saved.pane_started(local, 1, "/a".into());
+        let remote = saved.new_tab(shell("/b"));
+        on_host(&mut saved, remote, "devbox");
+        saved.pane_started(remote, 3, "/b".into());
+        assert!(saved.move_leaf(local, remote, DropZone::Edge(Direction::Right)));
+        let restored = restore_local(Some(saved), "i1", &[info(1, "bash", 5)], &launch(), true, &HashSet::new());
+        let ws = &restored.workspace;
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.tabs[0].root.leaves(), vec![remote, local]);
+        assert_eq!(ws.leaves[&local].pane, Some(1));
+        assert_eq!(ws.leaves[&remote].pane, Some(3), "the away host's pane waits for its host");
+        assert!(ws.is_consistent());
     }
 
     #[test]
