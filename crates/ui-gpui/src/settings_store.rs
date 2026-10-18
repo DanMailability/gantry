@@ -11,6 +11,7 @@ use app_core::theme_colors::{readable_fill, resolve, tokens};
 use app_core::workspace::{ClaudeDirs, DirBadge, ResolvedDir};
 use gpui::{App, Global, Task, WindowAppearance};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use protocol::host::HostId;
 use serde_json::{Map, Value};
 
 use crate::theme::Theme;
@@ -209,9 +210,10 @@ pub(crate) fn shortcut_label(settings: &Settings, action: &str) -> String {
     shortcuts::label(shortcuts::current(action, &settings.shortcuts, platform).as_deref(), platform)
 }
 
-/// The badge of the config dir at `claude_dir`, shown only with two or more config dirs.
-pub(crate) fn dir_badge_for(settings: &Settings, claude_dir: Option<&Path>) -> Option<DirBadge> {
-    if settings.claude_dirs.len() < 2 {
+/// The badge of the config dir at `claude_dir`, shown only with two or more config dirs and never for an SSH host
+/// (a remote session always runs the remote's default `claude`).
+pub(crate) fn dir_badge_for(settings: &Settings, claude_dir: Option<&Path>, host: &HostId) -> Option<DirBadge> {
+    if settings.claude_dirs.len() < 2 || !host.is_local() {
         return None;
     }
     let dirs = ClaudeDirs::from_settings(settings, None, std::env::home_dir().as_deref());
@@ -349,12 +351,13 @@ mod tests {
             color: None,
         };
         let mut settings = Settings { claude_dirs: vec![dir("Personal", "/c/one")], ..Settings::default() };
-        assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/one"))), None);
+        assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/one")), &HostId::local()), None);
         settings.claude_dirs.push(dir("Work", "/c/two"));
-        let badge = dir_badge_for(&settings, Some(Path::new("/c/two"))).unwrap();
+        let badge = dir_badge_for(&settings, Some(Path::new("/c/two")), &HostId::local()).unwrap();
         assert_eq!((badge.name.as_str(), badge.letter.as_str()), ("Work", "W"));
-        assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/else"))), None);
-        assert_eq!(dir_badge_for(&settings, None), None);
+        assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/else")), &HostId::local()), None);
+        assert_eq!(dir_badge_for(&settings, None, &HostId::local()), None);
+        assert_eq!(dir_badge_for(&settings, Some(Path::new("/c/two")), &HostId::named("box")), None);
     }
 
     // Linux/Windows labels (macOS shows ⌘ symbols).

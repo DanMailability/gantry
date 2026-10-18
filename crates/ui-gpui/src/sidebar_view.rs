@@ -837,7 +837,11 @@ impl SidebarView {
                 let card = HoverCard {
                     title: session_title(session).to_string(),
                     status: Some(note.clone()),
-                    dir: dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref()),
+                    dir: dir_badge_for(
+                        cx.global::<SettingsStore>().settings(),
+                        session.claude_dir.as_deref(),
+                        &session.host,
+                    ),
                     container: session.container.is_some(),
                     host: session.host.remote_name().map(String::from),
                     folder: Some(display_path(&session.cwd, std::env::home_dir().as_deref())),
@@ -856,8 +860,12 @@ impl SidebarView {
                         .when(session.container.is_some(), |pill| pill.child(container_icon(colors.ink, &theme)))
                         .when(!session.host.is_local(), |pill| pill.child(ssh_icon(colors.ink, &theme)))
                         .children(
-                            dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
-                                .map(|badge| dir_badge(&badge, &theme)),
+                            dir_badge_for(
+                                cx.global::<SettingsStore>().settings(),
+                                session.claude_dir.as_deref(),
+                                &session.host,
+                            )
+                            .map(|badge| dir_badge(&badge, &theme)),
                         )
                         .children(project()),
                 )

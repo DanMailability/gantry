@@ -463,8 +463,12 @@ impl RecentsView {
                         .when(session.container.is_some(), |pill| pill.child(container_icon(theme.tokens.text, &theme)))
                         .when(!session.host.is_local(), |pill| pill.child(ssh_icon(theme.tokens.text, &theme)))
                         .children(
-                            dir_badge_for(cx.global::<SettingsStore>().settings(), session.claude_dir.as_deref())
-                                .map(|badge| dir_badge(&badge, &theme)),
+                            dir_badge_for(
+                                cx.global::<SettingsStore>().settings(),
+                                session.claude_dir.as_deref(),
+                                &session.host,
+                            )
+                            .map(|badge| dir_badge(&badge, &theme)),
                         )
                         .when(!self.query.text().trim().is_empty(), |pill| {
                             let name =
@@ -525,6 +529,7 @@ impl RecentsView {
                                         dir_badge_for(
                                             cx.global::<SettingsStore>().settings(),
                                             session.claude_dir.as_deref(),
+                                            &session.host,
                                         )
                                         .map(|badge| dir_badge(&badge, &theme)),
                                     )

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use app_core::attention::{Alert, AlertKind, AttentionTracker, alert_channels, describe, without_claude_glyph};
 use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::launcher::{self, OpenFolder, OpenPane};
-use app_core::layout_store;
 use app_core::recents;
 use app_core::release::{self, CheckStatus, NotesBlock, Online, Release};
 use app_core::search_merge::{self, HostSearch};
@@ -21,6 +20,7 @@ use app_core::workspace::{
     ClaudeDirs, DirBadge, HostLive, KilledOffline, MAX_PANES_PER_TAB, PaneLaunch, Rerun, Restored, Workspace,
     reconcile, without_killed_offline,
 };
+use app_core::{layout_store, window_state};
 use daemon::askpass::AskPrompt;
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::containers::GONE as CONTAINER_GONE;
@@ -29,7 +29,8 @@ use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, Share, SshHostSpec,
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Decorations, Div, DragMoveEvent, Entity, FocusHandle, Focusable,
     FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point,
-    PromptLevel, Render, Subscription, Task, Window, canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
+    PromptLevel, Render, Subscription, Task, Window, WindowBounds, canvas, div, img, prelude::*, px, relative, rgb,
+    rgba, svg,
 };
 use notify::RecommendedWatcher;
 use protocol::host::{HostId, PaneKey};
@@ -189,13 +190,12 @@ const CARD_PAD: f32 = 6.0;
 /// A pane card's border width (`border_2`).
 const CARD_BORDER: f32 = 2.0;
 
-/// Where a pane's content sits inside its card while a split or close animates, in px from the card's padding box:
-/// `[left, top, width, height]`, at its final size (so the terminal resizes once), top-left for a surviving pane and
-/// pinned to the entry edge for a new one. `width`/`height` are the tab content's size.
-fn content_frame(drawn: Rect, end: Rect, entering: Option<Axis>, width: f32, height: f32) -> [f32; 4] {
-    let (dx, dy) = split_tree::anchor_offset(drawn, end, entering);
+/// Where a surviving pane's content sits inside its card while a split or close animates, in px from the card's
+/// padding box: `[left, top, width, height]`, top-left and at its final size (so the terminal resizes once, the card
+/// clips it). `width`/`height` are the tab content's size.
+fn content_frame(end: Rect, width: f32, height: f32) -> [f32; 4] {
     let inset = PANE_GAP + 2.0 * (CARD_BORDER + CARD_PAD);
-    [CARD_PAD + dx * width, CARD_PAD + dy * height, end.w * width - inset, end.h * height - inset]
+    [CARD_PAD, CARD_PAD, end.w * width - inset, end.h * height - inset]
 }
 
 /// How far a pane animation is after `elapsed`: 0 at the start, 1 (or more) when it is done.
@@ -1502,10 +1502,10 @@ impl WorkspaceView {
         }
     }
 
-    /// The badge of the Claude config dir `leaf` runs in, when two or more are configured.
+    /// The badge of the Claude config dir `leaf` runs in, when two or more are configured (never on an SSH host).
     fn leaf_dir_badge(&self, leaf: NodeId, cx: &App) -> Option<DirBadge> {
         let entry = self.workspace.leaves.get(&leaf)?;
-        if !entry.launch.is_claude() || entry.launch.container.is_some() {
+        if !entry.launch.is_claude() || entry.launch.container.is_some() || !entry.host.is_local() {
             return None;
         }
         let recorded = entry
@@ -1514,7 +1514,7 @@ impl WorkspaceView {
             .and_then(|id| self.sidebar.read(cx).sessions().get(&entry.host, id))
             .and_then(|info| info.claude_dir.clone());
         let path = recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone());
-        dir_badge_for(cx.global::<SettingsStore>().settings(), path.as_deref())
+        dir_badge_for(cx.global::<SettingsStore>().settings(), path.as_deref(), &entry.host)
     }
 
     /// Whether `leaf` runs on an SSH host that is not connected (it gets the Closed look).
@@ -2946,6 +2946,18 @@ impl WorkspaceView {
 
     /// Window close requested: true to close now; otherwise asks Detach / Stop all / Cancel.
     pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (bounds, maximized) = match window.window_bounds() {
+            WindowBounds::Windowed(bounds) | WindowBounds::Fullscreen(bounds) => (bounds, false),
+            WindowBounds::Maximized(bounds) => (bounds, true),
+        };
+        let state = window_state::WindowState {
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+            maximized,
+        };
+        if let Err(err) = window_state::save(&window_state::file_beside(&self.layout_file), &state) {
+            tracing::warn!("saving the window size failed: {err}");
+        }
         // Stop all only reaches this machine's daemon: SSH hosts are just disconnected and keep running.
         let local: Vec<NodeId> =
             self.workspace.leaves.iter().filter(|(_, leaf)| leaf.host.is_local()).map(|(id, _)| *id).collect();
@@ -3652,6 +3664,8 @@ impl WorkspaceView {
             .flex_1()
             .min_h_0()
             .w_full()
+            // The entering pane slides in from beyond the tab's edge.
+            .when(animating, |content| content.overflow_hidden())
             .child({
                 let view = cx.entity();
                 let resized = move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
@@ -3702,6 +3716,9 @@ impl WorkspaceView {
                             this.drop_pane(dragged.leaf, leaf, window, cx)
                         }))
                 });
+                // The entering pane keeps its final size and moves; every other pane's card follows its drawn rectangle.
+                let entering_axis = entering.filter(|(new, _)| *new == leaf).map(|(_, axis)| axis);
+                let rect = entering_axis.map_or(rect, |axis| split_tree::slide_rect(rect, end, axis));
                 Some(
                     div()
                         .absolute()
@@ -3712,8 +3729,8 @@ impl WorkspaceView {
                         .p(px(PANE_GAP / 2.))
                         .child(
                             // A rounded card; the terminal sits inside its padding, clear of the corners. While a split
-                            // or close animates, the card moves and clips its content, which keeps its final size (one
-                            // resize, not one per frame): top-left, or pinned to the edge a new pane enters from.
+                            // or close animates, a surviving card resizes and clips its content, which keeps its final
+                            // size (one resize, not one per frame); the entering card is already at its final size.
                             div()
                                 .size_full()
                                 .group(format!("pane-card-{index}"))
@@ -3726,13 +3743,12 @@ impl WorkspaceView {
                                 } else {
                                     theme.tokens.line
                                 }))
-                                .when(animating, |card| card.overflow_hidden())
+                                .when(animating && entering_axis.is_none(), |card| card.overflow_hidden())
                                 .child({
                                     let content = div().flex().flex_col();
-                                    let content = if animating {
-                                        let axis = entering.filter(|(new, _)| *new == leaf).map(|(_, axis)| axis);
+                                    let content = if animating && entering_axis.is_none() {
                                         let [left, top, w, h] =
-                                            content_frame(rect, end, axis, size.width.into(), size.height.into());
+                                            content_frame(end, size.width.into(), size.height.into());
                                         content.absolute().left(px(left)).top(px(top)).w(px(w)).h(px(h))
                                     } else {
                                         content.size_full()
@@ -4393,25 +4409,12 @@ mod tests {
 
     #[test]
     fn a_surviving_pane_keeps_its_content_top_left_at_its_final_size() {
-        let (drawn, end) = (Rect { w: 0.7, ..Rect::UNIT }, Rect { w: 0.5, ..Rect::UNIT });
-        let [left, top, w, h] = content_frame(drawn, end, None, 1000.0, 600.0);
+        let end = Rect { w: 0.5, ..Rect::UNIT };
+        let [left, top, w, h] = content_frame(end, 1000.0, 600.0);
         assert_eq!((left, top), (CARD_PAD, CARD_PAD));
         // What `size_full` gives inside the card at rest: the final box minus the gap, border and padding.
         assert_eq!(w, 500.0 - PANE_GAP - 2.0 * (CARD_BORDER + CARD_PAD));
         assert_eq!(h, 600.0 - PANE_GAP - 2.0 * (CARD_BORDER + CARD_PAD));
-    }
-
-    #[test]
-    fn an_entering_pane_keeps_its_content_pinned_to_the_entry_edge() {
-        let end = Rect { x: 0.5, w: 0.5, ..Rect::UNIT };
-        let drawn = Rect { x: 0.8, w: 0.2, ..Rect::UNIT };
-        let [left, _, w, _] = content_frame(drawn, end, Some(Axis::Horizontal), 1000.0, 600.0);
-        // The card's inner right edge, in its padding box.
-        assert!((left + w - (200.0 - PANE_GAP - 2.0 * CARD_BORDER - CARD_PAD)).abs() < 1e-3);
-        let end = Rect { y: 0.5, h: 0.5, ..Rect::UNIT };
-        let drawn = Rect { y: 0.9, h: 0.1, ..Rect::UNIT };
-        let [_, top, _, h] = content_frame(drawn, end, Some(Axis::Vertical), 1000.0, 600.0);
-        assert!((top + h - (60.0 - PANE_GAP - 2.0 * CARD_BORDER - CARD_PAD)).abs() < 1e-3);
     }
 
     #[test]

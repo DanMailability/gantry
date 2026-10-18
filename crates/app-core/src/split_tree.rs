@@ -101,13 +101,13 @@ pub fn tween(from: &[(NodeId, Rect)], to: &[(NodeId, Rect)], progress: f32) -> V
         .collect()
 }
 
-/// Offset (unit space) of a pane's content wrapper from its card's top-left, so an entering pane's content
-/// stays at its final size and is revealed instead of squeezed. `None` means not entering.
-pub fn anchor_offset(drawn: Rect, final_rect: Rect, entering: Option<Axis>) -> (f32, f32) {
-    match entering {
-        None => (0.0, 0.0),
-        Some(Axis::Horizontal) => (drawn.w - final_rect.w, 0.0),
-        Some(Axis::Vertical) => (0.0, drawn.h - final_rect.h),
+/// Where an entering pane's card is drawn while it slides in: its final size, with its leading edge (the left one for
+/// `Axis::Horizontal`, the top one for `Axis::Vertical`) at the edge of its `drawn` rectangle. The part beyond the
+/// tab's edge is clipped, so the whole card, text included, moves in as if it were already rendered outside the view.
+pub fn slide_rect(drawn: Rect, final_rect: Rect, axis: Axis) -> Rect {
+    match axis {
+        Axis::Horizontal => Rect { x: drawn.x, w: final_rect.w, ..final_rect },
+        Axis::Vertical => Rect { y: drawn.y, h: final_rect.h, ..final_rect },
     }
 }
 
@@ -459,14 +459,12 @@ mod tests {
     }
 
     #[test]
-    fn anchor_offset_cases() {
-        let drawn = rect(0.0, 0.0, 0.1, 0.1);
-        let fin = rect(0.0, 0.0, 0.5, 0.5);
-        assert_eq!(anchor_offset(drawn, fin, None), (0.0, 0.0));
-        let (x, y) = anchor_offset(drawn, fin, Some(Axis::Horizontal));
-        assert!((x + 0.4).abs() < 1e-6 && y == 0.0);
-        let (x, y) = anchor_offset(drawn, fin, Some(Axis::Vertical));
-        assert!(x == 0.0 && (y + 0.4).abs() < 1e-6);
+    fn slide_rect_keeps_the_final_size_and_follows_the_leading_edge() {
+        let fin = rect(0.5, 0.0, 0.5, 1.0);
+        assert_eq!(slide_rect(rect(0.9, 0.0, 0.1, 1.0), fin, Axis::Horizontal), rect(0.9, 0.0, 0.5, 1.0));
+        assert_eq!(slide_rect(fin, fin, Axis::Horizontal), fin);
+        let fin = rect(0.0, 0.5, 1.0, 0.5);
+        assert_eq!(slide_rect(rect(0.0, 0.8, 1.0, 0.2), fin, Axis::Vertical), rect(0.0, 0.8, 1.0, 0.5));
     }
 
     /// `1 | (2 over 3)`: leaf 1 on the left half, 2 above 3 on the right.

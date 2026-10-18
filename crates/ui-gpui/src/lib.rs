@@ -24,10 +24,10 @@ pub mod workspace_view;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use app_core::layout_store;
 use app_core::settings::WindowSettings;
 use app_core::split_tree::NodeId;
 use app_core::workspace::{HostLive, Launch, restore};
+use app_core::{layout_store, window_state};
 use daemon::client::{Connection, DaemonClient, StartError, restart_daemon};
 use daemon::launch::spawn_detached_daemon;
 use daemon::paths::{Paths, current_profile};
@@ -78,9 +78,17 @@ pub fn run(launch: Launch, resume_sessions: bool) {
         theme::load_fonts(cx);
         let paths = Paths::for_profile(&current_profile());
         SettingsStore::init(paths.settings_file.clone(), cx);
-        let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
+        let (width, height, maximized) = match window_state::load(&window_state::file_beside(&paths.layout_file)) {
+            Some(state) => (state.width, state.height, state.maximized),
+            None => (1000., 700., false),
+        };
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(if maximized {
+                WindowBounds::Maximized(bounds)
+            } else {
+                WindowBounds::Windowed(bounds)
+            }),
             titlebar: Some(TitlebarOptions { title: Some("Gantry".into()), ..Default::default() }),
             app_id: Some(APP_ID.into()),
             #[cfg(target_os = "linux")]
