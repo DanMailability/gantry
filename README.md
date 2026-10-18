@@ -1,4 +1,4 @@
-# Every Claude session. One frame.
+![Gantry: Every Claude session. One frame.](docs/images/banner.png)
 
 **A fast, cross-platform terminal for running and watching many [Claude Code](https://claude.com/claude-code) sessions at once.**
 
@@ -25,7 +25,9 @@ header: working, idle, needs input, done. Working rows glow.
 
 Split any pane right or down, with Claude or a plain shell. Layouts are saved and restored.
 
-![A split tab with three Claude panes](docs/images/split-view.png)
+Drag a tab from the sidebar onto a pane to split it, or drag a pane by its header onto another to swap them.
+
+![Dragging tabs into a view as panes, then swapping two panes](docs/images/pane-drag.gif)
 
 ### Recent sessions and search
 
