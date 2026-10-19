@@ -28,7 +28,7 @@ install -Dm0644 io.github.idogrf.Gantry.svg %{buildroot}%{_datadir}/icons/hicolo
 desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.idogrf.Gantry.desktop
 
 %files
-%license LICENSE-MIT LICENSE-APACHE LICENSE-FONT-FIGTREE
+%license LICENSE-MIT LICENSE-APACHE LICENSE-FONT-FIGTREE NOTICE THIRD_PARTY_LICENSES.html
 %{_bindir}/gantry
 %{_bindir}/gantryd
 %{_datadir}/applications/io.github.idogrf.Gantry.desktop

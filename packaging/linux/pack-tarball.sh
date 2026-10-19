@@ -12,7 +12,7 @@ mkdir -p "$stage"
 install -m0755 "${CARGO_TARGET_DIR:-target}/release/gantry" "${CARGO_TARGET_DIR:-target}/release/gantryd" \
   packaging/linux/install.sh "$stage/"
 install -m0644 packaging/linux/io.github.idogrf.Gantry.desktop packaging/linux/io.github.idogrf.Gantry.svg \
-  LICENSE-MIT LICENSE-APACHE "$stage/"
+  LICENSE-MIT LICENSE-APACHE NOTICE THIRD_PARTY_LICENSES.html "$stage/"
 # The embedded interface font's licence.
 install -m0644 crates/ui-gpui/assets/fonts/OFL.txt "$stage/LICENSE-FONT-FIGTREE"
 tar -C "$root/dist" -czf "$root/dist/gantry-$version-x86_64-linux.tar.gz" "gantry-$version"

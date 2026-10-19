@@ -21,7 +21,7 @@ done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/Gantry.icns"
 rm -rf "$iconset"
 mkdir -p "$app/Contents/Resources/licenses"
-cp LICENSE-MIT LICENSE-APACHE "$app/Contents/Resources/licenses/"
+cp LICENSE-MIT LICENSE-APACHE NOTICE THIRD_PARTY_LICENSES.html "$app/Contents/Resources/licenses/"
 cp crates/ui-gpui/assets/fonts/OFL.txt "$app/Contents/Resources/licenses/LICENSE-FONT-FIGTREE"
 # Ad-hoc signature (no account, no certificate): Apple Silicon refuses to run an unsigned bundle.
 codesign --force --deep --sign - "$app"
