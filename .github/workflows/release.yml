@@ -1,22 +1,115 @@
 name: Release
-# Manual only (Actions → Release → Run workflow): a macOS runner minute costs 10×.
+# A v* tag builds the Linux tarball and the macOS dmg, then publishes the GitHub Release with SHA256SUMS and build
+# attestations. Run by hand (Actions → Release → Run workflow) to build without publishing. The macOS job costs 10×
+# minutes in a private repo, so switch it off by hand when only the Linux job is being tested.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      linux:
+        description: Build the Linux tarball
+        type: boolean
+        default: true
+      macos:
+        description: Build the macOS dmg
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
 
 jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: The tag matches the workspace version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - name: CHANGELOG has a section for this version
+        if: github.ref_type == 'tag'
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          grep -q "^## \[$version\]" CHANGELOG.md
+
+  linux:
+    needs: check
+    if: github.event_name == 'push' || inputs.linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # Built in an Ubuntu 22.04 container so the binary needs glibc 2.35 and runs on Ubuntu 22.04 and newer.
+      - name: Build the tarball
+        run: sh packaging/linux/build-tarball.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gantry-linux
+          path: dist/gantry-*.tar.gz
+          if-no-files-found: error
+
   macos:
+    needs: check
+    if: github.event_name == 'push' || inputs.macos
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Toolchain from rust-toolchain.toml
         run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v0-rust-release
       - name: Build Gantry.app and the .dmg
         run: sh packaging/macos/build-dmg.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gantry-macos
           path: dist/*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, macos]
+    if: github.ref_type == 'tag' && needs.linux.result == 'success' && needs.macos.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum gantry-* > SHA256SUMS
+          cat SHA256SUMS
+      # Attestations need a public repository (or an Enterprise plan), so the private test run skips this step.
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        if: ${{ !github.event.repository.private }}
+        with:
+          subject-path: |
+            dist/gantry-*
+            dist/SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          awk -v v="$version" '/^## \[/ { p = index($0, "[" v "]") > 0; next } p' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/gantry-* dist/SHA256SUMS \
+            --title "Gantry ${GITHUB_REF_NAME#v}" --notes-file notes.md
