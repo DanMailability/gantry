@@ -8,7 +8,7 @@ Thanks for wanting to help. Gantry is maintained by one person, so a little care
 - For anything beyond a small fix, open an issue first and wait for a reply before writing code. A pull request for a
   change nobody agreed on may be closed, however good the code is.
 - Read the [AI policy](AI_POLICY.md) if any part of your change was written with an AI tool.
-- Be kind. The [code of conduct](CODE_OF_CONDUCT.md) applies everywhere in this project.
+- Be respectful. Harassment or abuse gets you blocked, in issues, discussions and pull requests alike.
 
 ## Sign your commits (DCO)
 
