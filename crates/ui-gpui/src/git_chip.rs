@@ -66,7 +66,7 @@ pub(crate) fn hover_lines(state: &GitState, now: i64) -> Vec<(String, String)> {
         lines.push(("More files".to_string(), format!("+{}", state.more)));
     }
     if state.filters_skipped {
-        lines.push(("Git filters".to_string(), "failed, skipped".to_string()));
+        lines.push(("Git filters".to_string(), "not run".to_string()));
     }
     let last = state.last_commit.map_or_else(|| "none yet".to_string(), |time| app_core::git_view::age(now, time));
     lines.push(("Last commit".to_string(), last));

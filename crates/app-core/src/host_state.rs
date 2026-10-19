@@ -367,24 +367,16 @@ pub fn classify_failure(
 /// How a prompt from ssh is asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptKind {
-    /// A password or passphrase: the field shows bullets.
+    /// Anything but a host-key question: the field shows bullets, since ssh does not say whether a prompt echoes.
     Masked,
     /// A host-key question: two buttons.
     YesNo,
-    /// Anything else: a plain text field.
-    Plain,
 }
 
 /// Which kind of prompt `prompt` is.
 pub fn prompt_kind(prompt: &str) -> PromptKind {
     let lower = prompt.to_lowercase();
-    if lower.contains("(yes/no") {
-        PromptKind::YesNo
-    } else if lower.contains("password") || lower.contains("passphrase") {
-        PromptKind::Masked
-    } else {
-        PromptKind::Plain
-    }
+    if lower.contains("(yes/no") { PromptKind::YesNo } else { PromptKind::Masked }
 }
 
 /// The dialog title for `prompt` asked on behalf of `host`.
@@ -393,8 +385,8 @@ pub fn prompt_title(host: &str, prompt: &str) -> String {
     match prompt_kind(prompt) {
         PromptKind::YesNo => format!("Trust {host}?"),
         PromptKind::Masked if lower.contains("passphrase") => format!("Key passphrase for {host}"),
-        PromptKind::Masked => format!("Password for {host}"),
-        PromptKind::Plain => format!("Sign in to {host}"),
+        PromptKind::Masked if lower.contains("password") => format!("Password for {host}"),
+        PromptKind::Masked => format!("Sign in to {host}"),
     }
 }
 
@@ -729,7 +721,9 @@ mod tests {
             prompt_kind("Are you sure you want to continue connecting (yes/no/[fingerprint])? "),
             PromptKind::YesNo
         );
-        assert_eq!(prompt_kind("Verification code: "), PromptKind::Plain);
+        for prompt in ["Verification code: ", "Passwort: ", "Mot de passe : ", "Enter PASSCODE: "] {
+            assert_eq!(prompt_kind(prompt), PromptKind::Masked, "{prompt}");
+        }
         assert_eq!(prompt_title("devbox", "me@devbox's password: "), "Password for devbox");
         assert_eq!(prompt_title("devbox", "Enter passphrase for key 'k':"), "Key passphrase for devbox");
         assert_eq!(prompt_title("devbox", "continue connecting (yes/no)?"), "Trust devbox?");

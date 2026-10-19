@@ -23,18 +23,11 @@ const TOO_LARGE_ALWAYS: u64 = 64 * 1024 * 1024;
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// A `git` command in `folder` that cannot write to the repo or run what the repo's config names: no optional locks
-/// (so Claude's own git never meets our index lock), no file system monitor daemon, no hooks, no colors, paths taken
-/// literally (a file called `[id].tsx` is not a glob), and none of the environment that points git elsewhere.
+/// (so Claude's own git never meets our index lock), no file system monitor daemon, no hooks, no signature checks (no
+/// `gpg.program`), no colors, paths taken literally (a file called `[id].tsx` is not a glob), none of the environment
+/// that points git elsewhere, and every filter the repo configures replaced by `cat` (`neutralized` sets them).
 fn git(folder: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(folder).args(["--no-optional-locks", "--literal-pathspecs"]).args([
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "color.ui=never",
-    ]);
+    let mut command = base(folder);
     NEUTRAL_FILTERS.with(|names| {
         for name in names.borrow().iter() {
             for (key, value) in [("clean", "cat"), ("smudge", "cat"), ("process", ""), ("required", "false")] {
@@ -42,6 +35,24 @@ fn git(folder: &Path) -> Command {
             }
         }
     });
+    command
+}
+
+/// `git()` without the filter override.
+fn base(folder: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(folder).args(["--no-optional-locks", "--literal-pathspecs"]).args([
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "gpg.program=false",
+        "-c",
+        "log.showSignature=false",
+        "-c",
+        "color.ui=never",
+    ]);
     command.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C");
     for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_EXTERNAL_DIFF", "GIT_PAGER"] {
         command.env_remove(name);
@@ -50,18 +61,28 @@ fn git(folder: &Path) -> Command {
 }
 
 thread_local! {
-    /// The clean/smudge filters `git()` replaces by `cat` on this thread; empty unless `retrying` set them.
+    /// The clean/smudge filters `git()` replaces by `cat` on this thread; set by `neutralized` for the length of a call.
     static NEUTRAL_FILTERS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The names of the repo's configured clean/smudge/process filters.
+/// The names of the clean/smudge/process filters the repo's own config sets (reads the config, runs nothing).
 fn filter_names(folder: &Path) -> Vec<String> {
-    let mut command = git(folder);
-    command.args(["config", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]);
+    let mut command = base(folder);
+    command.args(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]);
     let Ok(output) = run_allowing(command, &[0, 1]) else { return Vec::new() };
-    let mut names: Vec<String> = text(&output)
+    repo_filter_names(&text(&output))
+}
+
+/// The filter names in a `git config --show-scope --get-regexp` listing, leaving out the system and global ones: those
+/// are the user's own (git-lfs installs one), not the repo's, so they run as usual.
+fn repo_filter_names(listing: &str) -> Vec<String> {
+    let mut names: Vec<String> = listing
         .lines()
         .filter_map(|line| {
+            let (scope, line) = line.split_once('\t')?;
+            if scope == "system" || scope == "global" {
+                return None;
+            }
             let key = line.split_once(' ').map_or(line, |(key, _)| key);
             let (name, _) = key.strip_prefix("filter.")?.rsplit_once('.')?;
             Some(name.to_string())
@@ -72,22 +93,15 @@ fn filter_names(folder: &Path) -> Vec<String> {
     names
 }
 
-/// Run `attempt`; when it fails in a repo that configures filters (nbstripout, git-lfs, ...), one of them may be the
-/// cause, so run it once more with every filter replaced by `cat` and report that the filters were skipped. Read-only: nothing is written either way.
-fn retrying<T>(folder: &Path, attempt: impl Fn() -> Result<T, GitProblem>) -> Result<(T, bool), GitProblem> {
-    match attempt() {
-        Err(GitProblem::Failed { reason }) if !reason.starts_with("git took too long") => {
-            let names = filter_names(folder);
-            if names.is_empty() {
-                return Err(GitProblem::Failed { reason });
-            }
-            NEUTRAL_FILTERS.with(|cell| *cell.borrow_mut() = names);
-            let result = attempt();
-            NEUTRAL_FILTERS.with(|cell| cell.borrow_mut().clear());
-            result.map(|value| (value, true))
-        }
-        other => other.map(|value| (value, false)),
-    }
+/// Run `attempt` with every filter the repo configures (nbstripout, git-lfs, ...) replaced by `cat`, so a repo's own
+/// config never runs a program here, and report whether there were any to skip. Read-only: nothing is written.
+fn neutralized<T>(folder: &Path, attempt: impl Fn() -> Result<T, GitProblem>) -> Result<(T, bool), GitProblem> {
+    let names = filter_names(folder);
+    let skipped = !names.is_empty();
+    NEUTRAL_FILTERS.with(|cell| *cell.borrow_mut() = names);
+    let result = attempt();
+    NEUTRAL_FILTERS.with(|cell| cell.borrow_mut().clear());
+    result.map(|value| (value, skipped))
 }
 
 /// How long one git call may run before it is killed. Shorter than the GUI's 30 s wait for an answer, so a hung call
@@ -351,7 +365,7 @@ pub fn diff(
     commit: Option<&str>,
 ) -> Result<GitDiffBody, GitProblem> {
     let dir = expand(folder, home)?;
-    retrying(&dir, || diff_once(folder, home, path, old_path, full, commit)).map(|(body, _)| body)
+    neutralized(&dir, || diff_once(folder, home, path, old_path, full, commit)).map(|(body, _)| body)
 }
 
 fn diff_once(
@@ -505,7 +519,7 @@ pub fn commit(folder: &str, home: Option<&Path>, hash: &str) -> Result<GitCommit
     if !is_hash(hash) {
         return Err(GitProblem::Failed { reason: format!("not a commit: {hash}") });
     }
-    retrying(&dir, || commit_once(&dir, hash)).map(|(detail, _)| detail)
+    neutralized(&dir, || commit_once(&dir, hash)).map(|(detail, _)| detail)
 }
 
 fn commit_once(dir: &Path, hash: &str) -> Result<GitCommitDetail, GitProblem> {
@@ -565,7 +579,7 @@ fn cut(body: String, max_bytes: usize, max_lines: usize) -> GitDiffBody {
 pub fn status(folder: &str, home: Option<&Path>, known_head: Option<&str>) -> Result<GitState, GitProblem> {
     let started = Instant::now();
     let dir = expand(folder, home)?;
-    let (mut state, filters_skipped) = retrying(&dir, || status_once(&dir, known_head))?;
+    let (mut state, filters_skipped) = neutralized(&dir, || status_once(&dir, known_head))?;
     state.filters_skipped = filters_skipped;
     state.took_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
     Ok(state)
@@ -696,10 +710,78 @@ mod tests {
         assert!(matches!(body, GitDiffBody::Text { ref text, .. } if text.contains("+two")), "{body:?}");
     }
 
+    /// A repo with a tracked file modified under a filter whose clean command creates `marker`.
+    fn repo_with_marker_filter(marker: &Path) -> tempfile::TempDir {
+        let tmp = repo();
+        std::fs::write(tmp.path().join(".gitattributes"), "*.txt filter=spy\n").unwrap();
+        git(tmp.path(), &["config", "filter.spy.clean", &format!("sh -c 'touch {}; cat'", marker.display())]);
+        std::fs::write(tmp.path().join("a.txt"), "one\ntwo\n").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_repos_filter_never_runs() {
+        let out = tempfile::tempdir().unwrap();
+        let marker = out.path().join("ran");
+        let tmp = repo_with_marker_filter(&marker);
+        let state = state(tmp.path());
+        diff_of(tmp.path(), "a.txt", None, false).unwrap();
+        assert!(!marker.exists(), "the clean filter ran");
+        assert!(state.filters_skipped);
+    }
+
+    #[test]
+    fn a_repos_gpg_program_never_runs() {
+        let out = tempfile::tempdir().unwrap();
+        let marker = out.path().join("ran");
+        let tmp = repo();
+        let script = out.path().join("gpg.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch {}\nexit 1\n", marker.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // A commit carrying a (fake) signature header, which `log.showSignature` would verify with `gpg.program`.
+        let head = head_of(tmp.path());
+        let raw = Command::new("git").arg("-C").arg(tmp.path()).args(["cat-file", "commit", &head]).output().unwrap();
+        let raw = String::from_utf8(raw.stdout).unwrap();
+        let (headers, message) = raw.split_once("\n\n").unwrap();
+        let signed = format!(
+            "{headers}\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n x\n -----END PGP SIGNATURE-----\n\n{message}"
+        );
+        let signed_file = out.path().join("signed");
+        std::fs::write(&signed_file, signed).unwrap();
+        let hash = Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["hash-object", "-t", "commit", "-w", "--literally", "--stdin"])
+            .stdin(std::fs::File::open(&signed_file).unwrap())
+            .output()
+            .unwrap();
+        let hash = String::from_utf8(hash.stdout).unwrap().trim().to_string();
+        git(tmp.path(), &["update-ref", "HEAD", &hash]);
+        git(tmp.path(), &["config", "log.showSignature", "true"]);
+        git(tmp.path(), &["config", "gpg.program", script.to_str().unwrap()]);
+        state(tmp.path());
+        commit(tmp.path().to_str().unwrap(), None, &hash).unwrap();
+        assert!(!marker.exists(), "gpg.program ran");
+    }
+
     #[test]
     fn a_healthy_repo_does_not_skip_filters() {
         let tmp = repo();
         assert!(!state(tmp.path()).filters_skipped);
+    }
+
+    #[test]
+    fn only_the_repos_own_filters_count() {
+        let listing = "system\tfilter.lfs.clean git-lfs clean -- %f\n\
+                       global\tfilter.lfs.process git-lfs filter-process\n\
+                       local\tfilter.spy.clean sh -c 'touch x'\n\
+                       worktree\tfilter.wt.smudge cat\n\
+                       command\tfilter.cmd.clean cat\n";
+        assert_eq!(repo_filter_names(listing), ["cmd", "spy", "wt"]);
     }
 
     /// The full hash of `HEAD`.
