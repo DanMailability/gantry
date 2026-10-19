@@ -1,5 +1,5 @@
 Gantry
-Copyright (c) the Gantry authors
+Copyright (c) 2026 Ido Greenfeld
 
 Gantry is licensed under either of the Apache License 2.0 (LICENSE-APACHE) or the MIT license (LICENSE-MIT), at your
 option.
@@ -10,7 +10,7 @@ Bundled font: Figtree, Copyright 2022 The Figtree Project Authors, licensed unde
 license text is in crates/ui-gpui/assets/fonts/OFL.txt.
 
 Gantry is built on GPUI and other crates from the Zed project (Copyright 2022 - 2025 Zed Industries, Inc., Apache
-License 2.0). The Zed repository ships no NOTICE file. Gantry uses only its Apache-2.0 licensed crates.
+License 2.0). Gantry uses only its Apache-2.0 licensed crates.
 
 The licenses and copyright notices of all other dependencies are listed in THIRD_PARTY_LICENSES.html, which is shipped
 with every release.

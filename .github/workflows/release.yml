@@ -77,7 +77,7 @@ jobs:
 
   publish:
     needs: [linux, macos]
-    if: github.ref_type == 'tag' && needs.linux.result == 'success' && needs.macos.result == 'success'
+    if: github.event_name == 'push' && needs.linux.result == 'success' && needs.macos.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

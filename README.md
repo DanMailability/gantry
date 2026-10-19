@@ -129,7 +129,7 @@ the hosts you add.
 
    ```sh
    tar xf gantry-<version>-x86_64-linux.tar.gz
-   cd gantry-<version>-x86_64-linux
+   cd gantry-<version>
    ./install.sh
    ```
 

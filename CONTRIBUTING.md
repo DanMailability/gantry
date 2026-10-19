@@ -23,8 +23,16 @@ Contributions are licensed like the project: `MIT OR Apache-2.0`. There is no co
 
 ## Build and test
 
-You need a recent Rust toolchain (`rust-toolchain.toml` pins it). On Linux you also need the ALSA development package
-(`libasound2-dev` on Ubuntu, `alsa-lib-devel` on Fedora).
+You need a recent Rust toolchain (`rust-toolchain.toml` pins it). On Linux you also need development packages:
+
+```sh
+# Ubuntu
+sudo apt install clang cmake libasound2-dev libfontconfig-dev libfreetype-dev libwayland-dev libxcb1-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev
+# Fedora
+sudo dnf install clang cmake alsa-lib-devel fontconfig-devel freetype-devel wayland-devel libxcb-devel \
+  libxkbcommon-devel libxkbcommon-x11-devel vulkan-loader-devel libzstd-devel
+```
 
 ```sh
 cargo fmt --all

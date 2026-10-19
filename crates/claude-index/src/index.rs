@@ -33,7 +33,7 @@ pub struct SessionRecord {
     pub id: String,
     /// Directory it runs (ran) in.
     pub cwd: PathBuf,
-    /// Title by the spec's rule; empty for a live session without a transcript yet.
+    /// Title by the transcript's own rule; empty for a live session without a transcript yet.
     pub title: String,
     /// Last activity, ms since the Unix epoch (transcript mtime, else the pid file's `updatedAt`).
     pub last_active_ms: u64,

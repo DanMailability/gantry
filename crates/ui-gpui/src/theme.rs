@@ -355,7 +355,7 @@ mod tests {
     }
 
     // macOS only creates its platform on the main thread, which a test thread is not; on Windows the font is not
-    // listed after loading (deferred #126).
+    // listed after loading (not handled yet).
     #[cfg(not(any(target_os = "macos", windows)))]
     #[test]
     fn the_embedded_interface_font_loads() {
