@@ -105,6 +105,13 @@ pub enum SidebarEvent {
     ConnectHost(HostId),
     /// "Add SSH host…" was clicked.
     AddSshHost,
+    /// The update pill of an SSH host was clicked, at this window position.
+    UpdateHost {
+        /// The host.
+        host: HostId,
+        /// Where the click was, for the card.
+        position: Point<Pixels>,
+    },
 }
 
 /// A configured SSH host in the SSH hosts block.
@@ -118,6 +125,10 @@ pub struct HostRow {
     pub label: Option<String>,
     /// Connected or on its way: the row has an × and a click does nothing.
     pub up: bool,
+    /// The update pill's text (`↑ 0.9.1`) while its daemon is older than this Gantry; `None` = no pill.
+    pub update: Option<String>,
+    /// Its daemon is being updated: "updating…" replaces the pill and the ×.
+    pub updating: bool,
 }
 
 /// The session sidebar.
@@ -338,7 +349,31 @@ impl SidebarView {
                 let name = div().flex_1().truncate().text_color(rgb(name_color)).child(host.name().to_string());
                 let label = row.label.clone().map(|label| div().text_color(rgb(theme.tokens.muted)).child(label));
                 if row.up {
-                    row_base(("ssh-host", index)).child(dot).child(name).children(label).child(
+                    let update = row.update.clone().filter(|_| !row.updating).map(|text| {
+                        let host = host.clone();
+                        div()
+                            .id(("update-host", index))
+                            .flex_none()
+                            .h(theme.ui(18.))
+                            .px(theme.ui(7.))
+                            .flex()
+                            .items_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(theme.tokens.accent))
+                            .text_size(theme.ui(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.tokens.accent))
+                            .cursor_pointer()
+                            .child(text)
+                            .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::UpdateHost { host: host.clone(), position: event.position() });
+                            }))
+                    });
+                    let updating =
+                        row.updating.then(|| div().flex_none().text_color(rgb(theme.tokens.muted)).child("updating…"));
+                    let close = (!row.updating).then(|| {
                         div()
                             .id(("disconnect-host", index))
                             .size(theme.ui(18.))
@@ -353,8 +388,15 @@ impl SidebarView {
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
                                 cx.emit(SidebarEvent::DisconnectHost(host.clone()));
-                            })),
-                    )
+                            }))
+                    });
+                    row_base(("ssh-host", index))
+                        .child(dot)
+                        .child(name)
+                        .children(label)
+                        .children(update)
+                        .children(updating)
+                        .children(close)
                 } else {
                     row_base(("ssh-host", index))
                         .cursor_pointer()

@@ -160,7 +160,7 @@ impl WorkspaceView {
                 let host = HostId::named(&entry.name);
                 let state = self.host_state(&host);
                 let label = (state != HostState::Connected).then(|| state.label());
-                HostRow { dot: state.dot(), label, up: state.in_connected_list(), host }
+                HostRow { dot: state.dot(), label, up: state.in_connected_list(), host, update: None, updating: false }
             })
             .collect();
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_hosts(rows, cx));
