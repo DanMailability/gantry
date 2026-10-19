@@ -746,6 +746,9 @@ impl WorkspaceView {
                     return;
                 }
             }
+            let _ = this.update_in(cx, |view, window, cx| {
+                view.update_failed(&host_for_task, "The update stopped unexpectedly.".into(), window, cx)
+            });
         });
         self.host_update
             .insert(host.clone(), HostUpdate { phase: UpdatePhase::Uploading, handle, task, share, position });
@@ -759,7 +762,9 @@ impl WorkspaceView {
         if self.host_update.get(host).is_none_or(|update| update.phase != UpdatePhase::Uploading) {
             return;
         }
-        let Some(client) = self.client(host).cloned() else { return };
+        let Some(client) = self.client(host).cloned() else {
+            return self.update_failed(host, "The connection to the host is gone.".into(), window, cx);
+        };
         // The thread's clone keeps the connection open until the request is written.
         std::thread::spawn(move || client.stop_all_and_wait(Duration::from_secs(2)));
         let host_for_task = host.clone();
