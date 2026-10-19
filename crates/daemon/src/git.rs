@@ -65,14 +65,24 @@ thread_local! {
     static NEUTRAL_FILTERS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The names of the repo's configured clean/smudge/process filters (reads the config, runs nothing).
+/// The names of the clean/smudge/process filters the repo's own config sets (reads the config, runs nothing).
 fn filter_names(folder: &Path) -> Vec<String> {
     let mut command = base(folder);
-    command.args(["config", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]);
+    command.args(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]);
     let Ok(output) = run_allowing(command, &[0, 1]) else { return Vec::new() };
-    let mut names: Vec<String> = text(&output)
+    repo_filter_names(&text(&output))
+}
+
+/// The filter names in a `git config --show-scope --get-regexp` listing, leaving out the system and global ones: those
+/// are the user's own (git-lfs installs one), not the repo's, so they run as usual.
+fn repo_filter_names(listing: &str) -> Vec<String> {
+    let mut names: Vec<String> = listing
         .lines()
         .filter_map(|line| {
+            let (scope, line) = line.split_once('\t')?;
+            if scope == "system" || scope == "global" {
+                return None;
+            }
             let key = line.split_once(' ').map_or(line, |(key, _)| key);
             let (name, _) = key.strip_prefix("filter.")?.rsplit_once('.')?;
             Some(name.to_string())
@@ -762,6 +772,16 @@ mod tests {
     fn a_healthy_repo_does_not_skip_filters() {
         let tmp = repo();
         assert!(!state(tmp.path()).filters_skipped);
+    }
+
+    #[test]
+    fn only_the_repos_own_filters_count() {
+        let listing = "system\tfilter.lfs.clean git-lfs clean -- %f\n\
+                       global\tfilter.lfs.process git-lfs filter-process\n\
+                       local\tfilter.spy.clean sh -c 'touch x'\n\
+                       worktree\tfilter.wt.smudge cat\n\
+                       command\tfilter.cmd.clean cat\n";
+        assert_eq!(repo_filter_names(listing), ["cmd", "spy", "wt"]);
     }
 
     /// The full hash of `HEAD`.
