@@ -1,10 +1,11 @@
 use super::layout::pane_progress;
-use super::{PANE_GAP, SIDEBAR_EDGE, WorkspaceView};
+use super::{CardKind, HostUpdateCard, PANE_GAP, SIDEBAR_EDGE, WorkspaceView};
 
-use app_core::version::Note;
+use app_core::host_update::ask_note;
+use app_core::version::{Note, Version};
 use gpui::{
-    Context, CursorStyle, FontWeight, IntoElement, MouseButton, MouseDownEvent, Render, Window, canvas, div,
-    prelude::*, px, rgb, rgba,
+    Context, CursorStyle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, Render, StyledText,
+    Window, canvas, div, prelude::*, px, rgb, rgba,
 };
 
 use app_core::menus::MenuAction;
@@ -12,13 +13,14 @@ use app_core::session_tree::Tone;
 
 use crate::context_menu::{self};
 use crate::settings_store::SettingsStore;
-use crate::theme::{FadeKind, RADIUS, RADIUS_SMALL, UI_FONT, fade_in, theme};
+use crate::theme::{FadeKind, RADIUS, RADIUS_SMALL, Theme, UI_FONT, fade_in, theme};
 use crate::window_frame;
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let animate = cx.global::<SettingsStore>().settings().animate_working && window.is_window_active();
         let theme = theme(cx).clone();
+        let viewport = window.viewport_size();
         let fade = cx.global::<SettingsStore>().settings().animate_ui;
         // A split or close moves only while animations are on and the window is active; else it is at its end.
         if !(fade && window.is_window_active()) {
@@ -333,6 +335,9 @@ impl Render for WorkspaceView {
                         ),
                 )
             })
+            .when_some(self.update_host_card.as_ref(), |root, card| {
+                root.child(self.render_host_update_card(card, viewport, &theme, cx))
+            })
             .when_some(self.release_card.as_ref().zip(self.online_notice()), |root, (focus, online)| {
                 root.child(self.render_release_card(focus, &online, &theme, cx))
             })
@@ -401,4 +406,151 @@ impl Render for WorkspaceView {
             });
         window_frame::frame(window, theme.tokens.line, root)
     }
+}
+
+impl WorkspaceView {
+    /// The card of an SSH host's update: the question before a restart that ends sessions, or why the update cannot
+    /// start or failed. Opens at the click on the pill, kept inside the window.
+    fn render_host_update_card(
+        &self,
+        card: &HostUpdateCard,
+        viewport: gpui::Size<gpui::Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let name = card.host.name().to_string();
+        let width = theme.ui(330.);
+        // An estimate of the card's height, enough to keep it above the window's bottom edge.
+        let height = theme.ui(230.);
+        let left = card.position.x.min(viewport.width - width - theme.ui(8.)).max(theme.ui(8.));
+        let top = card.position.y.min(viewport.height - height - theme.ui(8.)).max(theme.ui(8.));
+        let close = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            this.update_host_card = None;
+            this.focus_current(window, cx);
+            cx.notify();
+        };
+        let (close_on_key, close_outside) = (cx.listener(move |this, _: &(), window, cx| close(this, window, cx)), {
+            cx.listener(move |this, _: &(), window, cx| close(this, window, cx))
+        });
+        let bold = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            color: Some(rgb(theme.tokens.accent).into()),
+            ..HighlightStyle::default()
+        };
+        let (title, body, buttons) = match &card.kind {
+            CardKind::Ask { running } => {
+                let remote = self.hosts.get(&card.host).and_then(|conn| conn.daemon_version);
+                let remote = remote.map(|version| version.to_string()).unwrap_or_default();
+                let local = Version::parse(protocol::build::VERSION).map(|v| v.to_string()).unwrap_or_default();
+                let lead = format!("{name} runs ");
+                let middle = format!(". This Gantry is {local}");
+                let text = format!("{lead}{remote}{middle}. It still works, but misses the daemon fixes since then.");
+                let first = lead.len()..lead.len() + remote.len();
+                let second_start = first.end + middle.len() - local.len();
+                let second = second_start..second_start + local.len();
+                let colors = theme.tone(Tone::NeedsInput);
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.ui(12.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child(StyledText::new(text).with_highlights([(first, bold), (second, bold)])),
+                    )
+                    .child(
+                        div()
+                            .p(theme.ui(10.))
+                            .rounded(px(RADIUS_SMALL))
+                            .text_xs()
+                            .text_color(rgb(colors.ink))
+                            .when_some(colors.fill, |note, fill| note.bg(rgb(fill)))
+                            .child(ask_note(&name, *running)),
+                    );
+                (format!("Update Gantry on {name}"), body, true)
+            }
+            CardKind::Blocked(reason) => {
+                (format!("Cannot update {name}"), reason_text(reason, theme.tokens.muted), false)
+            }
+            CardKind::Failed(reason) => {
+                (format!("Update failed on {name}"), reason_text(reason, theme.tokens.danger), true)
+            }
+        };
+        let (host, position) = (card.host.clone(), card.position);
+        let go_label = if matches!(card.kind, CardKind::Ask { .. }) { "Update and restart" } else { "Try again" };
+        let go = buttons.then(|| {
+            div()
+                .id("update-host-go")
+                .h(theme.ui(32.))
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_SMALL))
+                .bg(rgb(theme.tokens.accent))
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.tokens.on_accent))
+                .cursor_pointer()
+                .child(go_label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.update_host_card = None;
+                    this.focus_current(window, cx);
+                    this.retry_host_update(&host, position, window, cx);
+                    cx.notify();
+                }))
+        });
+        let later = div()
+            .id("update-host-later")
+            .h(theme.ui(32.))
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(RADIUS_SMALL))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(theme.tokens.text))
+            .cursor_pointer()
+            .child("Later")
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.update_host_card = None;
+                this.focus_current(window, cx);
+                cx.notify();
+            }));
+        div()
+            .id("update-host-card")
+            .occlude()
+            .absolute()
+            .left(left)
+            .top(top)
+            .w(width)
+            .p(theme.ui(16.))
+            .flex()
+            .flex_col()
+            .gap(theme.ui(12.))
+            .bg(rgb(theme.tokens.raised))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .rounded(px(RADIUS))
+            .track_focus(&card.focus)
+            .on_key_down(move |event, window, cx| {
+                if event.keystroke.key == "escape" {
+                    close_on_key(&(), window, cx);
+                }
+                cx.stop_propagation();
+            })
+            .on_mouse_down_out(move |_, window, cx| close_outside(&(), window, cx))
+            .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(rgb(theme.tokens.text)).child(title))
+            .child(body)
+            .child(div().flex().gap(theme.ui(8.)).children(go).child(later))
+    }
+}
+
+/// A card's reason line in `color`.
+fn reason_text(reason: &str, color: u32) -> gpui::Div {
+    div().text_xs().text_color(rgb(color)).child(reason.to_string())
 }

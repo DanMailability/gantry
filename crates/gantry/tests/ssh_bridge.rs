@@ -587,6 +587,25 @@ fn stop_remote_daemon_ends_the_daemon_over_the_bridge() {
 }
 
 #[test]
+fn stopping_through_the_open_client_ends_the_stream_without_taken_over() {
+    let env = setup("sshinst7", Fake::default());
+    let first = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).unwrap();
+    assert!(first.daemon_version.is_some(), "the daemon says which version it is");
+    first.client.spawn(1, sh("sleep 30"));
+    // The sidebar update stops the old daemon like this, not over a second bridge (which would take this one over).
+    first.client.stop_all_and_wait(Duration::from_secs(2));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the connection never ended");
+        match first.events.recv_blocking() {
+            Ok(ClientEvent::TakenOver) => panic!("a stop through the open client must not look like a take-over"),
+            Ok(ClientEvent::Disconnected) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
+#[test]
 fn enable_linger_reports_stderr() {
     let env = remote_env("sshinst7", None);
     write_script(&env.path("fakebin/loginctl"), "#!/bin/sh\necho 'Interactive authentication required.' >&2\nexit 1\n");

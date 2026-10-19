@@ -3,7 +3,7 @@
 //! host (NotInstalled card) and updates it (UpdateNeeded card: upload, then a restart question). It saves nothing
 //! itself; its steps are `daemon::remote_install` runs (`run.rs`), and its logic is `app-core::host_install`.
 
-mod run;
+pub(crate) mod run;
 
 use std::path::Path;
 
@@ -198,8 +198,24 @@ fn headless_binary() -> Result<std::path::PathBuf, String> {
     }
 }
 
+/// Why this Gantry cannot upload itself to a host whose remote command is `command`, if it cannot.
+pub(crate) fn upload_block(command: &str) -> Option<String> {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return Some("This Gantry cannot be uploaded to a Linux x86_64 host: install it by hand.".into());
+    }
+    upload_path(command).err()
+}
+
+/// The file to upload to a host whose remote command is `command`, or why nothing can be uploaded.
+pub(crate) fn upload_preflight(command: &str) -> Result<std::path::PathBuf, String> {
+    match upload_block(command) {
+        Some(reason) => Err(reason),
+        None => headless_binary(),
+    }
+}
+
 /// What a failed step says.
-fn describe(kind: &FailKind) -> String {
+pub(crate) fn describe(kind: &FailKind) -> String {
     match kind {
         FailKind::NeedsInput => "Sign-in was cancelled or refused.".into(),
         FailKind::NotInstalled => "A command was not found on the host.".into(),
@@ -335,10 +351,7 @@ impl SshWizard {
 
     /// Why the upload cannot start, if it cannot.
     fn install_block(&self) -> Option<String> {
-        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            return Some("This Gantry cannot be uploaded to a Linux x86_64 host: install it by hand.".into());
-        }
-        upload_path(self.command.text().trim()).err()
+        upload_block(self.command.text().trim())
     }
 
     /// Replace the running step with `job`, listening to its messages.
@@ -1075,6 +1088,21 @@ impl Render for SshWizard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The upload needs a Linux x86_64 Gantry; elsewhere `upload_block` refuses every command.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn upload_block_refuses_a_command_with_shell_syntax() {
+        assert!(upload_block("env X=1 gantryd").is_some());
+        assert!(upload_block("$HOME/gantryd").is_some());
+    }
+
+    // As above: Linux x86_64 only.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn upload_block_accepts_a_plain_path() {
+        assert_eq!(upload_block("~/.local/bin/gantryd"), None);
+    }
 
     #[test]
     fn the_suggested_name_is_the_alias_or_the_host_part() {

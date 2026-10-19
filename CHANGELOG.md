@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Update remote Gantry** - A connected SSH host that runs an older Gantry than this one shows `↑ <version>` in the SSH hosts list; one click uploads the new `gantryd` and restarts the host's daemon, after asking when sessions are running there.
+
 ## [0.9.1] - 2026-10-19
 
 ### Fixed

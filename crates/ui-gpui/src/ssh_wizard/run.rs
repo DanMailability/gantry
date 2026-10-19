@@ -10,7 +10,7 @@ use daemon::remote_install;
 use daemon::ssh::{Attempt, AttemptHandle, SshHostSpec};
 
 /// What a running step reports.
-pub(super) enum Msg {
+pub(crate) enum Msg {
     /// The probe ended.
     Probed(Result<Probe, FailKind>),
     /// Bytes of the upload sent so far.
@@ -24,16 +24,16 @@ pub(super) enum Msg {
 }
 
 /// A running step: its cancel handle and its messages.
-pub(super) struct Job {
-    pub(super) handle: AttemptHandle,
-    pub(super) messages: async_channel::Receiver<Msg>,
+pub(crate) struct Job {
+    pub(crate) handle: AttemptHandle,
+    pub(crate) messages: async_channel::Receiver<Msg>,
 }
 
 /// Where a step's sign-in questions go.
 #[derive(Clone)]
-pub(super) struct Questions {
-    pub(super) prompts: async_channel::Sender<AskPrompt>,
-    pub(super) runtime_dir: PathBuf,
+pub(crate) struct Questions {
+    pub(crate) prompts: async_channel::Sender<AskPrompt>,
+    pub(crate) runtime_dir: PathBuf,
 }
 
 impl Questions {
@@ -51,7 +51,7 @@ fn spawn(work: impl FnOnce(&AttemptHandle, &async_channel::Sender<Msg>) + Send +
 }
 
 /// Look at the remote.
-pub(super) fn probe(spec: SshHostSpec, questions: &Questions) -> Job {
+pub(crate) fn probe(spec: SshHostSpec, questions: &Questions) -> Job {
     let questions = questions.clone();
     spawn(move |handle, tx| {
         let result = remote_install::probe("ssh", &spec, questions.attempt(), handle);
@@ -60,7 +60,7 @@ pub(super) fn probe(spec: SshHostSpec, questions: &Questions) -> Job {
 }
 
 /// Upload this binary, then ask the remote for its version.
-pub(super) fn install(spec: SshHostSpec, questions: &Questions, local: PathBuf) -> Job {
+pub(crate) fn install(spec: SshHostSpec, questions: &Questions, local: PathBuf) -> Job {
     let questions = questions.clone();
     spawn(move |handle, tx| {
         let progress = tx.clone();
@@ -73,7 +73,7 @@ pub(super) fn install(spec: SshHostSpec, questions: &Questions, local: PathBuf) 
 }
 
 /// Turn lingering on for the remote user.
-pub(super) fn linger(spec: SshHostSpec, questions: &Questions) -> Job {
+pub(crate) fn linger(spec: SshHostSpec, questions: &Questions) -> Job {
     let questions = questions.clone();
     spawn(move |handle, tx| {
         let result = remote_install::enable_linger("ssh", &spec, questions.attempt(), handle);
@@ -82,7 +82,7 @@ pub(super) fn linger(spec: SshHostSpec, questions: &Questions) -> Job {
 }
 
 /// Stop the remote daemon.
-pub(super) fn stop(spec: SshHostSpec, questions: &Questions) -> Job {
+pub(crate) fn stop(spec: SshHostSpec, questions: &Questions) -> Job {
     let questions = questions.clone();
     spawn(move |handle, tx| {
         let result = remote_install::stop_remote_daemon("ssh", &spec, questions.attempt(), handle);

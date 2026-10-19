@@ -239,7 +239,9 @@ fn open_with_hash(local: &Path) -> Result<(std::fs::File, u64, String), FailKind
 /// fails the check and removes `<file>.new`. `size` and `hash` are digits and hex only.
 fn upload_command(dir: &str, file: &str, size: u64, hash: &str) -> String {
     format!(
-        "mkdir -p {dir} && cat > {file}.new && [ \"$(wc -c < {file}.new)\" -eq {size} ] && \
+        "{{ mkdir -p {dir} && cat > {file}.new; }} || \
+         {{ rm -f {file}.new; echo 'the file could not be written on the host' >&2; exit 1; }}; \
+         [ \"$(wc -c < {file}.new)\" -eq {size} ] && \
          {{ ! command -v sha256sum >/dev/null 2>&1 || [ \"$(sha256sum < {file}.new | cut -d' ' -f1)\" = {hash} ]; }} && \
          chmod 755 {file}.new && mv -f {file}.new {file} || \
          {{ rm -f {file}.new; echo 'the upload was cut or did not match' >&2; exit 1; }}"
@@ -373,4 +375,45 @@ pub fn stop_remote_daemon(
             Ok(status) => Err(failure(started, status.ok().and_then(|status| status.code())).await),
         }
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::upload_command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// Run the upload script with `sh` in `dir`, feeding `data`; the last line of its stderr.
+    fn run(dir: &std::path::Path, setup: &str, data: &[u8], size: u64) -> (bool, String) {
+        let file = dir.join("gantryd");
+        let command = upload_command(dir.to_str().unwrap(), file.to_str().unwrap(), size, "0");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{setup}\n{command}"))
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(data).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), stderr.lines().last().unwrap_or_default().to_string())
+    }
+
+    #[test]
+    fn a_write_error_is_not_reported_as_a_cut_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = format!("mkdir {}/gantryd.new", dir.path().display());
+        let (ok, last) = run(dir.path(), &setup, b"abc", 3);
+        assert!(!ok);
+        assert_eq!(last, "the file could not be written on the host");
+    }
+
+    #[test]
+    fn a_size_mismatch_still_reads_as_a_cut_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ok, last) = run(dir.path(), ":", b"abc", 10);
+        assert!(!ok);
+        assert_eq!(last, "the upload was cut or did not match");
+    }
 }

@@ -264,6 +264,7 @@ impl WorkspaceView {
             SidebarEvent::DisconnectHost(host) => self.disconnect_host(&host, window, cx),
             SidebarEvent::ConnectHost(host) => self.run_host_action(&host, window, cx),
             SidebarEvent::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
+            SidebarEvent::UpdateHost { host, position } => self.click_host_update(&host, position, window, cx),
         }
     }
 
