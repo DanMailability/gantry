@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use app_core::host_install::check;
 use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
 use app_core::host_update::{Click, click_plan, needs_update};
 use app_core::split_tree::NodeId;
@@ -694,9 +695,38 @@ impl WorkspaceView {
             share: share.clone(),
         };
         let questions = Questions { prompts: self.askpass_prompts.clone(), runtime_dir };
-        let run::Job { handle, messages } = run::install(spec, &questions, local);
+        let run::Job { handle, messages: probed } = run::probe(spec.clone(), &questions);
         let host_for_task = host.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
+            // The wizard's check: a remote that is not Linux x86_64 keeps its working binary.
+            let probe = match probed.recv().await {
+                Ok(Msg::Probed(Ok(probe))) => probe,
+                Ok(Msg::Probed(Err(kind))) => {
+                    let _ = this.update_in(cx, |view, window, cx| {
+                        view.update_failed(&host_for_task, describe(&kind), window, cx)
+                    });
+                    return;
+                }
+                _ => return,
+            };
+            if !check(&probe, protocol::build::VERSION).supported {
+                let reason =
+                    format!("Gantry installs on Linux x86_64 hosts only ({}). Nothing was uploaded.", probe.os_arch);
+                let _ = this.update_in(cx, |view, window, cx| view.update_failed(&host_for_task, reason, window, cx));
+                return;
+            }
+            let run::Job { handle, messages } = run::install(spec, &questions, local);
+            let installing = this.update(cx, |view, _| match view.host_update.get_mut(&host_for_task) {
+                Some(update) => {
+                    update.handle = handle.clone();
+                    true
+                }
+                None => false,
+            });
+            if !installing.unwrap_or(false) {
+                handle.cancel();
+                return;
+            }
             while let Ok(message) = messages.recv().await {
                 if let Msg::Installed(result) = message {
                     let _ = this.update_in(cx, |view, window, cx| match result {
