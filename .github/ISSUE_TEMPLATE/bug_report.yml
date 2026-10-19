@@ -1,0 +1,35 @@
+name: Bug report
+description: Something in Gantry does not work as expected
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that show the problem on a real Gantry install.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Gantry version
+      description: Output of `gantry --version`, or Settings > the footer of the left menu.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: For example Ubuntu 24.04 (Wayland), Fedora 44 (X11), macOS 15 (Apple Silicon).
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, logs (`~/.local/share/gantry/default/logs/`), whether it happens over SSH or in a dev container.

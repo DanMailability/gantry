@@ -1,0 +1,44 @@
+# Contributing to Gantry
+
+Thanks for wanting to help. Gantry is maintained by one person, so a little care up front saves everyone time.
+
+## Before you start
+
+- Questions and ideas go in GitHub Discussions. Bugs go in an issue.
+- For anything beyond a small fix, open an issue first and wait for a reply before writing code. A pull request for a
+  change nobody agreed on may be closed, however good the code is.
+- Read the [AI policy](AI_POLICY.md) if any part of your change was written with an AI tool.
+- Be kind. The [code of conduct](CODE_OF_CONDUCT.md) applies everywhere in this project.
+
+## Sign your commits (DCO)
+
+Every commit needs a `Signed-off-by` line, which says you wrote the change or have the right to submit it under the
+project's license (the [Developer Certificate of Origin](https://developercertificate.org/)). Add it with:
+
+```sh
+git commit -s
+```
+
+Contributions are licensed like the project: `MIT OR Apache-2.0`. There is no contributor license agreement.
+
+## Build and test
+
+You need a recent Rust toolchain (`rust-toolchain.toml` pins it). On Linux you also need the ALSA development package
+(`libasound2-dev` on Ubuntu, `alsa-lib-devel` on Fedora).
+
+```sh
+cargo fmt --all
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check
+```
+
+CI runs the same checks. `scripts/cargo` is a wrapper that limits CPU and memory and allows one build at a time; plain
+`cargo` works too.
+
+## Pull requests
+
+- Keep a pull request to one change, with tests for new behavior.
+- Public items need `///` docs, and new dependencies must pass `cargo deny check` (permissive licenses only).
+- User-visible changes add a line under `## [Unreleased]` in `CHANGELOG.md`.
+- Fill in the pull request template, including the sign-off and AI-use boxes.
