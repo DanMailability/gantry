@@ -60,6 +60,33 @@ pub fn row_order(row: &[CellView]) -> Option<RowOrder> {
     Some(RowOrder { to_logical, to_visual, rtl })
 }
 
+/// Display order of one line of text outside the terminal grid (the diff view): for each position drawn from left to
+/// right, the logical character index and the character to draw (brackets inside right-to-left runs are mirrored).
+/// `None` when the line has no right-to-left letters.
+pub fn display_line(text: &str) -> Option<Vec<(usize, char)>> {
+    use crate::snapshot::{CellStyle, Rgb};
+    let style = CellStyle {
+        fg: Rgb::hex(0),
+        bg: Rgb::hex(0),
+        bold: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
+    };
+    let cells: Vec<CellView> =
+        text.chars().map(|ch| CellView { ch, combining: None, style, wide: false, spacer: false }).collect();
+    let order = row_order(&cells)?;
+    Some(
+        (0..cells.len())
+            .map(|visual| {
+                let logical = order.logical(visual);
+                let ch = if order.is_rtl(logical) { mirrored(cells[logical].ch) } else { cells[logical].ch };
+                (logical, ch)
+            })
+            .collect(),
+    )
+}
+
 /// The cells of `row` in display order; brackets inside right-to-left runs are mirrored.
 pub fn reorder_row(row: &[CellView], order: &RowOrder) -> Vec<CellView> {
     (0..row.len())
@@ -197,6 +224,18 @@ mod tests {
         let cells = row(text, cols);
         let order = row_order(&cells).expect("row has RTL text");
         reorder_row(&cells, &order).iter().map(|cell| if cell.spacer { '_' } else { cell.ch }).collect()
+    }
+
+    #[test]
+    fn display_line_reorders_a_text_line() {
+        let shown = |text: &str| display_line(text).map(|line| line.into_iter().map(|(_, ch)| ch).collect::<String>());
+        assert_eq!(shown("abc (d)"), None);
+        assert_eq!(shown("שלום world").as_deref(), Some("world םולש"));
+        assert_eq!(
+            display_line("a שלום").map(|line| line.into_iter().map(|(logical, _)| logical).collect::<Vec<_>>()),
+            Some(vec![0, 1, 5, 4, 3, 2])
+        );
+        assert_eq!(shown("(שלום)").as_deref(), Some("(םולש)"));
     }
 
     #[test]

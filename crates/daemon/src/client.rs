@@ -125,6 +125,36 @@ pub enum ClientEvent {
         /// Why.
         reason: String,
     },
+    /// The answer to `git_status`.
+    GitStatus {
+        /// Echoed request id.
+        request: u64,
+        /// The repo's state.
+        state: protocol::message::GitState,
+    },
+    /// The answer to `git_diff`.
+    GitDiff {
+        /// Echoed request id.
+        request: u64,
+        /// The file asked for.
+        path: String,
+        /// Its diff.
+        body: protocol::message::GitDiffBody,
+    },
+    /// The answer to `git_commit`.
+    GitCommit {
+        /// Echoed request id.
+        request: u64,
+        /// The commit.
+        detail: protocol::message::GitCommitDetail,
+    },
+    /// A git request could not be answered.
+    GitUnavailable {
+        /// Echoed request id.
+        request: u64,
+        /// Why.
+        problem: protocol::message::GitProblem,
+    },
     /// Another GUI took over the daemon.
     TakenOver,
     /// The connection to the daemon was lost.
@@ -252,6 +282,43 @@ impl DaemonClient {
         self.send(&ClientMessage::ListDir { request, path: path.into() });
     }
 
+    /// Ask for the git state of the repo containing `folder` (absolute or starting with `~`); answered by `GitStatus`
+    /// or `GitUnavailable`. `known_head` is the `HEAD` whose commits the caller already has.
+    pub fn git_status(&self, request: u64, folder: &str, known_head: Option<&str>) {
+        self.send(&ClientMessage::GitStatus {
+            request,
+            folder: folder.into(),
+            known_head: known_head.map(String::from),
+        });
+    }
+
+    /// Ask for one file's diff against `HEAD` in the repo containing `folder`; answered by `GitDiff` or
+    /// `GitUnavailable`. `old_path` is where a renamed file came from; `full` lifts the "too large" limit; `commit`
+    /// asks for the file as that commit changed it instead.
+    pub fn git_diff(
+        &self,
+        request: u64,
+        folder: &str,
+        path: &str,
+        old_path: Option<&str>,
+        full: bool,
+        commit: Option<&str>,
+    ) {
+        self.send(&ClientMessage::GitDiff {
+            request,
+            folder: folder.into(),
+            path: path.into(),
+            old_path: old_path.map(String::from),
+            full,
+            commit: commit.map(String::from),
+        });
+    }
+
+    /// Ask for commit `hash` of the repo containing `folder`; answered by `GitCommit` or `GitUnavailable`.
+    pub fn git_commit(&self, request: u64, folder: &str, hash: &str) {
+        self.send(&ClientMessage::GitCommit { request, folder: folder.into(), hash: hash.into() });
+    }
+
     /// Send keyboard/paste input to a pane.
     pub fn input(&self, pane: PaneId, bytes: &[u8]) {
         let _ = self.outgoing.send(Outgoing::Frame(Frame::Data { pane, bytes: bytes.to_vec() }));
@@ -374,6 +441,14 @@ where
                 }
                 Some(Ok(DaemonMessage::DirListingFailed { request, reason })) => {
                     ClientEvent::DirListingFailed { request, reason }
+                }
+                Some(Ok(DaemonMessage::GitStatus { request, state })) => ClientEvent::GitStatus { request, state },
+                Some(Ok(DaemonMessage::GitDiff { request, path, body })) => {
+                    ClientEvent::GitDiff { request, path, body }
+                }
+                Some(Ok(DaemonMessage::GitCommit { request, detail })) => ClientEvent::GitCommit { request, detail },
+                Some(Ok(DaemonMessage::GitUnavailable { request, problem })) => {
+                    ClientEvent::GitUnavailable { request, problem }
                 }
                 Some(Ok(DaemonMessage::TakenOver)) => ClientEvent::TakenOver,
                 Some(Ok(other)) => {

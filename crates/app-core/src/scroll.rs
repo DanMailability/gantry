@@ -57,6 +57,26 @@ pub fn thumb(track: f32, rows: usize, history: usize, offset: usize, min_len: f3
     Some(Thumb { top: (track - len) * from_top as f32 / history as f32, len })
 }
 
+/// The thumb of a view `viewport` long over `content` long content, `offset` from the start, on a track `track` long.
+/// `None` when the content fits. The pixel form of `thumb`, for either axis of a scrolled list.
+pub fn thumb_for_extent(track: f32, viewport: f32, content: f32, offset: f32, min_len: f32) -> Option<Thumb> {
+    if content <= viewport + 0.5 || track <= 0.0 {
+        return None;
+    }
+    let len = (track * viewport / content).max(min_len).min(track);
+    let room = content - viewport;
+    Some(Thumb { top: (track - len) * (offset / room).clamp(0.0, 1.0), len })
+}
+
+/// The offset for a thumb whose start is at `top`: the inverse of `thumb_for_extent`.
+pub fn offset_for_extent(top: f32, track: f32, len: f32, viewport: f32, content: f32) -> f32 {
+    let room = track - len;
+    if room <= 0.0 {
+        return 0.0;
+    }
+    (top / room).clamp(0.0, 1.0) * (content - viewport).max(0.0)
+}
+
 /// How long after the last scroll movement the thumb stays in its active color.
 pub const ACTIVE_HOLD_MS: u64 = 600;
 /// How long the thumb then takes to fade back to its idle color.
@@ -111,6 +131,21 @@ pub fn offset_for_thumb_top(top: f32, track: f32, len: f32, history: usize) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_extent_thumb_sits_by_the_offset_and_round_trips() {
+        assert_eq!(thumb_for_extent(100.0, 100.0, 100.0, 0.0, 10.0), None, "fits");
+        let top = thumb_for_extent(100.0, 100.0, 400.0, 0.0, 10.0).unwrap();
+        assert_eq!((top.top, top.len), (0.0, 25.0));
+        let end = thumb_for_extent(100.0, 100.0, 400.0, 300.0, 10.0).unwrap();
+        assert_eq!(end.top, 75.0);
+        let short = thumb_for_extent(100.0, 100.0, 100_000.0, 0.0, 12.0).unwrap();
+        assert_eq!(short.len, 12.0, "never shorter than the minimum");
+        let mid = thumb_for_extent(100.0, 100.0, 400.0, 150.0, 10.0).unwrap();
+        assert!((offset_for_extent(mid.top, 100.0, mid.len, 100.0, 400.0) - 150.0).abs() < 0.01);
+        assert_eq!(offset_for_extent(-5.0, 100.0, 25.0, 100.0, 400.0), 0.0);
+        assert_eq!(offset_for_extent(500.0, 100.0, 25.0, 100.0, 400.0), 300.0);
+    }
 
     #[test]
     fn no_thumb_without_history() {

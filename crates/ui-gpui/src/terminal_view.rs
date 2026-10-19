@@ -72,7 +72,7 @@ const MONOSPACE_FAMILIES: &[&str] =
     &[FONT_FAMILY, "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", "Adwaita Mono", "Menlo", "Consolas"];
 
 /// `wanted` (else the platform's family) when it is installed, else the first installed of [`MONOSPACE_FAMILIES`].
-fn installed_family<'a>(wanted: Option<&'a str>, installed: &[String]) -> &'a str {
+pub(crate) fn installed_family<'a>(wanted: Option<&'a str>, installed: &[String]) -> &'a str {
     let wanted = wanted.unwrap_or(FONT_FAMILY);
     let has = |family: &str| installed.iter().any(|name| name == family);
     if has(wanted) {
@@ -82,7 +82,7 @@ fn installed_family<'a>(wanted: Option<&'a str>, installed: &[String]) -> &'a st
 }
 
 /// The installed font families, read once (the text system loads them at start).
-fn installed_families(cx: &App) -> &'static [String] {
+pub(crate) fn installed_families(cx: &App) -> &'static [String] {
     static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     FAMILIES.get_or_init(|| cx.text_system().all_font_names())
 }

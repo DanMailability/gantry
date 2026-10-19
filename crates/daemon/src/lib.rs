@@ -4,6 +4,7 @@ pub mod askpass;
 pub mod bridge;
 pub mod client;
 pub mod containers;
+pub mod git;
 pub mod launch;
 pub mod list_dir;
 pub mod outbox;

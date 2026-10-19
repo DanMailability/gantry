@@ -693,6 +693,13 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             search_conversations(shared, request, query, limit)
         }
         ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
+        ClientMessage::GitStatus { request, folder, known_head } => {
+            git_status_request(shared, request, folder, known_head)
+        }
+        ClientMessage::GitDiff { request, folder, path, old_path, full, commit } => {
+            git_diff_request(shared, request, folder, path, old_path, full, commit)
+        }
+        ClientMessage::GitCommit { request, folder, hash } => git_commit_request(shared, request, folder, hash),
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             let inside = state
@@ -838,6 +845,52 @@ fn list_dir_request(shared: &Arc<Shared>, request: u64, path: String) {
         let reply = match crate::list_dir::list_dir(&path, std::env::home_dir().as_deref()) {
             Ok((path, dirs)) => DaemonMessage::DirListing { request, path: path.to_string_lossy().into_owned(), dirs },
             Err(reason) => DaemonMessage::DirListingFailed { request, reason },
+        };
+        shared.lock().control(&reply);
+    });
+}
+
+/// Answer `GitStatus` off the async threads.
+fn git_status_request(shared: &Arc<Shared>, request: u64, folder: String, known_head: Option<String>) {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let reply = match crate::git::status(&folder, std::env::home_dir().as_deref(), known_head.as_deref()) {
+            Ok(state) => DaemonMessage::GitStatus { request, state },
+            Err(problem) => DaemonMessage::GitUnavailable { request, problem },
+        };
+        shared.lock().control(&reply);
+    });
+}
+
+/// Answer `GitDiff` off the async threads.
+fn git_diff_request(
+    shared: &Arc<Shared>,
+    request: u64,
+    folder: String,
+    path: String,
+    old_path: Option<String>,
+    full: bool,
+    commit: Option<String>,
+) {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let home = std::env::home_dir();
+        let reply =
+            match crate::git::diff(&folder, home.as_deref(), &path, old_path.as_deref(), full, commit.as_deref()) {
+                Ok(body) => DaemonMessage::GitDiff { request, path, body },
+                Err(problem) => DaemonMessage::GitUnavailable { request, problem },
+            };
+        shared.lock().control(&reply);
+    });
+}
+
+/// Answer `GitCommit` off the async threads.
+fn git_commit_request(shared: &Arc<Shared>, request: u64, folder: String, hash: String) {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let reply = match crate::git::commit(&folder, std::env::home_dir().as_deref(), &hash) {
+            Ok(detail) => DaemonMessage::GitCommit { request, detail },
+            Err(problem) => DaemonMessage::GitUnavailable { request, problem },
         };
         shared.lock().control(&reply);
     });

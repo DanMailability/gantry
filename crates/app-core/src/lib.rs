@@ -4,6 +4,8 @@ pub mod attention;
 pub mod bidi;
 pub mod dir_complete;
 pub mod fuzzy;
+pub mod git_diff;
+pub mod git_view;
 pub mod host_install;
 pub mod host_state;
 pub mod input;

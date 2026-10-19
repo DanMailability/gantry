@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::host::HostId;
 
 /// Protocol version; bump on any incompatible change to non-frozen messages.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
@@ -277,6 +277,41 @@ pub enum ClientMessage {
         /// The folder to list.
         path: String,
     },
+    /// Git state of the repo containing `folder` (absolute, or starting with `~`); answered by `GitStatus` or
+    /// `GitUnavailable`.
+    GitStatus {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// A folder inside the repo.
+        folder: String,
+        /// The `HEAD` the client already has the commits for; the reply skips them when it is unchanged.
+        known_head: Option<String>,
+    },
+    /// One file's diff against `HEAD` (staged and unstaged together); answered by `GitDiff` or `GitUnavailable`.
+    GitDiff {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// A folder inside the repo.
+        folder: String,
+        /// The file, relative to the repo root.
+        path: String,
+        /// Where a renamed file came from.
+        old_path: Option<String>,
+        /// Lift the "too large" limit (the line and byte caps stay, raised).
+        full: bool,
+        /// Diff the file as that commit changed it (against its first parent) instead of against `HEAD`.
+        #[serde(default)]
+        commit: Option<String>,
+    },
+    /// One commit's message and changed files; answered by `GitCommit` or `GitUnavailable`.
+    GitCommit {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// A folder inside the repo.
+        folder: String,
+        /// The commit (a hash as listed in `GitState.commits`).
+        hash: String,
+    },
     /// Terminate every pane and stop the daemon (frozen).
     StopAll,
 }
@@ -288,6 +323,143 @@ pub struct DirEntry {
     pub name: String,
     /// It is a symlink to a folder.
     pub symlink: bool,
+}
+
+/// How a file differs from `HEAD` in a `GitState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFileStatus {
+    /// Content changed.
+    Modified,
+    /// New and tracked (staged).
+    Added,
+    /// Removed.
+    Deleted,
+    /// Moved; `GitFile.old_path` is where from.
+    Renamed,
+    /// Not tracked.
+    Untracked,
+    /// Unmerged paths of a conflict.
+    Conflicted,
+}
+
+/// One changed file in a `GitState`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitFile {
+    /// Path relative to the repo root.
+    pub path: String,
+    /// The old path of a rename.
+    pub old_path: Option<String>,
+    /// How it changed.
+    pub status: GitFileStatus,
+    /// Lines added; `None` for an untracked or binary file.
+    pub added: Option<u32>,
+    /// Lines removed; `None` for an untracked or binary file.
+    pub removed: Option<u32>,
+}
+
+/// One commit in a `GitState`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommit {
+    /// Abbreviated hash (7 characters).
+    pub hash: String,
+    /// First line of the message.
+    pub subject: String,
+    /// Author name.
+    pub author: String,
+    /// Commit time, seconds since the Unix epoch.
+    pub time: i64,
+    /// Not on the upstream yet (every commit when there is no upstream).
+    pub unpushed: bool,
+}
+
+/// One commit in full, in a `GitCommit` answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommitDetail {
+    /// The full hash.
+    pub hash: String,
+    /// The whole message, subject and body.
+    pub message: String,
+    /// Author name.
+    pub author: String,
+    /// Commit time, seconds since the Unix epoch.
+    pub time: i64,
+    /// Abbreviated hashes of the parents (two or more for a merge).
+    pub parents: Vec<String>,
+    /// Files the commit changed (against its first parent), at most 2,000.
+    pub files: Vec<GitFile>,
+    /// Changed files beyond `files`.
+    pub more: u32,
+}
+
+/// What `git status` found for one repo.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitState {
+    /// The repo's top folder.
+    pub root: String,
+    /// The branch; `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// Abbreviated hash of `HEAD`; `None` before the first commit.
+    pub head: Option<String>,
+    /// The upstream branch, if any.
+    pub upstream: Option<String>,
+    /// Commits ahead of the upstream.
+    pub ahead: u32,
+    /// Commits behind the upstream.
+    pub behind: u32,
+    /// Changed files, at most 2,000.
+    pub files: Vec<GitFile>,
+    /// Changed files beyond `files`.
+    pub more: u32,
+    /// The latest commits; `None` when `known_head` in the request still is `HEAD`.
+    pub commits: Option<Vec<GitCommit>>,
+    /// How long the daemon's git calls took, in milliseconds.
+    pub took_ms: u32,
+    /// Time of the latest commit, seconds since the Unix epoch.
+    pub last_commit: Option<i64>,
+    /// A configured git filter (nbstripout, git-lfs, ...) failed, so `files` was read with the filters skipped.
+    #[serde(default)]
+    pub filters_skipped: bool,
+    /// `commits` are the ones this branch has beyond the default branch; false = the latest commits of `HEAD`.
+    #[serde(default)]
+    pub own_commits: bool,
+}
+
+/// Why a git request has no answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitProblem {
+    /// The folder is not inside a git repo.
+    NotRepo,
+    /// `git` is not installed on that host.
+    NoGit,
+    /// Anything else.
+    Failed {
+        /// Git's first line of complaint, readable.
+        reason: String,
+    },
+}
+
+/// A file's diff in a `GitDiff` answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitDiffBody {
+    /// Unified diff text.
+    Text {
+        /// The diff.
+        text: String,
+        /// Cut at the size caps.
+        truncated: bool,
+    },
+    /// A binary file.
+    Binary,
+    /// A submodule pointer changed.
+    Submodule,
+    /// Bigger than the cap; ask again with `full`.
+    TooLarge {
+        /// The file's size in bytes.
+        bytes: u64,
+    },
 }
 
 /// Who wrote the message a search hit shows.
@@ -444,6 +616,36 @@ pub enum DaemonMessage {
         request: u64,
         /// Why, readable.
         reason: String,
+    },
+    /// The answer to `GitStatus`.
+    GitStatus {
+        /// Echoed request id.
+        request: u64,
+        /// The repo's state.
+        state: GitState,
+    },
+    /// The answer to `GitDiff`.
+    GitDiff {
+        /// Echoed request id.
+        request: u64,
+        /// The file asked for.
+        path: String,
+        /// Its diff.
+        body: GitDiffBody,
+    },
+    /// The answer to `GitCommit`.
+    GitCommit {
+        /// Echoed request id.
+        request: u64,
+        /// The commit.
+        detail: GitCommitDetail,
+    },
+    /// A git request could not be answered.
+    GitUnavailable {
+        /// Echoed request id.
+        request: u64,
+        /// Why.
+        problem: GitProblem,
     },
     /// Another GUI connected; this connection is closed next.
     TakenOver,
@@ -687,7 +889,7 @@ mod tests {
         assert_eq!((spec.claude, spec.env.len(), spec.scrollback), (false, 0, None));
         let pane = r#"{"pane":1,"program":"sh","args":[],"cwd":"/","last_focused":0}"#;
         assert!(!serde_json::from_str::<PaneInfo>(pane).unwrap().claude);
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     #[test]
@@ -707,6 +909,93 @@ mod tests {
         ];
         for reply in replies {
             assert_eq!(serde_json::from_str::<DaemonMessage>(&serde_json::to_string(&reply).unwrap()).unwrap(), reply);
+        }
+    }
+
+    #[test]
+    fn git_messages_round_trip() {
+        let requests = [
+            ClientMessage::GitStatus { request: 3, folder: "~/work/app".into(), known_head: Some("abc1234".into()) },
+            ClientMessage::GitDiff {
+                request: 4,
+                folder: "/home/me/app".into(),
+                path: "src/new name.rs".into(),
+                old_path: Some("src/old.rs".into()),
+                full: true,
+                commit: Some("abc1234".into()),
+            },
+            ClientMessage::GitCommit { request: 5, folder: "/home/me/app".into(), hash: "abc1234".into() },
+        ];
+        for request in requests {
+            let json = serde_json::to_string(&request).unwrap();
+            assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), request);
+        }
+        let state = GitState {
+            root: "/home/me/app".into(),
+            branch: Some("fix/x".into()),
+            head: Some("abc1234".into()),
+            upstream: Some("origin/fix/x".into()),
+            ahead: 2,
+            behind: 0,
+            files: vec![GitFile {
+                path: "src/new name.rs".into(),
+                old_path: Some("src/old.rs".into()),
+                status: GitFileStatus::Renamed,
+                added: Some(3),
+                removed: None,
+            }],
+            more: 0,
+            commits: Some(vec![GitCommit {
+                hash: "abc1234".into(),
+                subject: "Add backoff".into(),
+                author: "Me".into(),
+                time: 1_760_000_000,
+                unpushed: true,
+            }]),
+            took_ms: 31,
+            last_commit: Some(1_760_000_000),
+            filters_skipped: false,
+            own_commits: false,
+        };
+        let replies = [
+            DaemonMessage::GitStatus { request: 3, state },
+            DaemonMessage::GitDiff {
+                request: 4,
+                path: "src/new name.rs".into(),
+                body: GitDiffBody::Text { text: "@@ -1 +1 @@\n-a\n+b\n".into(), truncated: false },
+            },
+            DaemonMessage::GitDiff { request: 5, path: "x.png".into(), body: GitDiffBody::Binary },
+            DaemonMessage::GitDiff { request: 6, path: "vendor".into(), body: GitDiffBody::Submodule },
+            DaemonMessage::GitDiff {
+                request: 7,
+                path: "big.bin".into(),
+                body: GitDiffBody::TooLarge { bytes: 9_999_999 },
+            },
+            DaemonMessage::GitCommit {
+                request: 5,
+                detail: GitCommitDetail {
+                    hash: "abc1234def".into(),
+                    message: "fix: a\n\nbody".into(),
+                    author: "Ido".into(),
+                    time: 1_760_000_000,
+                    parents: vec!["1111111".into()],
+                    files: vec![GitFile {
+                        path: "a.rs".into(),
+                        old_path: None,
+                        status: GitFileStatus::Modified,
+                        added: Some(1),
+                        removed: None,
+                    }],
+                    more: 0,
+                },
+            },
+            DaemonMessage::GitUnavailable { request: 8, problem: GitProblem::NotRepo },
+            DaemonMessage::GitUnavailable { request: 9, problem: GitProblem::NoGit },
+            DaemonMessage::GitUnavailable { request: 10, problem: GitProblem::Failed { reason: "boom".into() } },
+        ];
+        for reply in replies {
+            let json = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
         }
     }
 

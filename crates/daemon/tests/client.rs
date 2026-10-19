@@ -156,3 +156,115 @@ fn spawn_failure_is_an_event() {
         ClientEvent::SpawnFailed { request: 3, .. }
     ));
 }
+
+#[test]
+fn git_status_round_trip_over_a_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "t");
+    let repo = tempfile::tempdir().unwrap();
+    let init = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["init", "-b", "fix/x"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(init.status.success());
+    let conn = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
+    conn.client.git_status(1, repo.path().to_str().unwrap(), None);
+    conn.client.git_status(2, dir.path().to_str().unwrap(), None);
+    let mut state = None;
+    let mut problem = None;
+    while state.is_none() || problem.is_none() {
+        match next_event(&conn.events, |e| {
+            matches!(e, ClientEvent::GitStatus { .. } | ClientEvent::GitUnavailable { .. })
+        }) {
+            ClientEvent::GitStatus { request: 1, state: found } => state = Some(found),
+            ClientEvent::GitUnavailable { request: 2, problem: found } => problem = Some(found),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(state.unwrap().branch.as_deref(), Some("fix/x"));
+    assert_eq!(problem, Some(protocol::message::GitProblem::NotRepo));
+}
+
+#[test]
+fn git_diff_round_trip_over_a_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "t");
+    let repo = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["-c", "user.name=T", "-c", "user.email=t@e.com"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+    };
+    run(&["init", "-b", "main"]);
+    std::fs::write(repo.path().join("f.txt"), "old\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "first"]);
+    std::fs::write(repo.path().join("f.txt"), "new\n").unwrap();
+    let conn = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
+    conn.client.git_diff(1, repo.path().to_str().unwrap(), "f.txt", None, false, None);
+    conn.client.git_diff(2, repo.path().to_str().unwrap(), "missing.txt", None, false, None);
+    let mut body = None;
+    let mut problem = None;
+    while body.is_none() || problem.is_none() {
+        match next_event(&conn.events, |e| {
+            matches!(e, ClientEvent::GitDiff { .. } | ClientEvent::GitUnavailable { .. })
+        }) {
+            ClientEvent::GitDiff { request: 1, path, body: found } => {
+                assert_eq!(path, "f.txt");
+                body = Some(found);
+            }
+            ClientEvent::GitUnavailable { request: 2, problem: found } => problem = Some(found),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    match body.unwrap() {
+        protocol::message::GitDiffBody::Text { text, truncated } => {
+            assert!(text.contains("-old") && text.contains("+new") && !truncated, "{text}");
+        }
+        other => panic!("not text: {other:?}"),
+    }
+    assert!(matches!(problem, Some(protocol::message::GitProblem::Failed { .. })));
+}
+
+#[test]
+fn git_commit_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "t");
+    let repo = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["-c", "user.name=T", "-c", "user.email=t@e.com"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["init", "-b", "main"]);
+    std::fs::write(repo.path().join("f.txt"), "old\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "first", "-m", "details"]);
+    let hash = run(&["rev-parse", "HEAD"]).trim().to_string();
+    let conn = DaemonClient::connect(&paths, daemon_spawner(paths.clone())).unwrap();
+    conn.client.git_commit(1, repo.path().to_str().unwrap(), &hash[..7]);
+    match next_event(&conn.events, |e| matches!(e, ClientEvent::GitCommit { .. } | ClientEvent::GitUnavailable { .. }))
+    {
+        ClientEvent::GitCommit { request: 1, detail } => {
+            assert_eq!(detail.message, "first\n\ndetails");
+            assert_eq!(detail.files.len(), 1);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}

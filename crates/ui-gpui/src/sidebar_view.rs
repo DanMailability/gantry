@@ -97,6 +97,8 @@ pub enum SidebarEvent {
     ShowSettings,
     /// The × of the Settings row was clicked: close Settings.
     CloseSettings,
+    /// The × of the Git row was clicked: close the git page.
+    CloseGit,
     /// The × of an SSH host in the SSH hosts block was clicked.
     DisconnectHost(HostId),
     /// A host row that is not up was clicked: connect it, or open its Install / Update.
@@ -151,6 +153,8 @@ pub struct SidebarView {
     /// The Settings tab is open (a row above the list), and is the visible tab.
     settings_open: bool,
     settings_active: bool,
+    /// The git page is open: the label of its row (the repo's folder name).
+    git_row: Option<String>,
     /// The SSH hosts block above Recent sessions: every configured host.
     hosts: Vec<HostRow>,
     /// The block is expanded by hand (it starts collapsed with more than `COLLAPSE_ABOVE` hosts).
@@ -208,6 +212,7 @@ impl SidebarView {
             roots: ProjectRoots::new(std::env::home_dir()),
             settings_open: false,
             settings_active: false,
+            git_row: None,
             hosts: Vec::new(),
             hosts_open: false,
             middle_pressed: None,
@@ -252,6 +257,14 @@ impl SidebarView {
         if (open, active) != (self.settings_open, self.settings_active) {
             self.settings_open = open;
             self.settings_active = active;
+            cx.notify();
+        }
+    }
+
+    /// Whether the git page is open: its row (labelled `label`) sits under the Settings row.
+    pub fn set_git(&mut self, label: Option<String>, cx: &mut Context<Self>) {
+        if label != self.git_row {
+            self.git_row = label;
             cx.notify();
         }
     }
@@ -1160,6 +1173,61 @@ impl Render for SidebarView {
                                 }),
                             ),
                     ),
+                )
+            })
+            .when_some(self.git_row.clone(), |this, label| {
+                let out = RING + RING_GAP;
+                this.child(
+                    div()
+                        .relative()
+                        .h(theme.ui(ROW_HEIGHT - 4.))
+                        .flex_none()
+                        .mx_3()
+                        .mb_1()
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(-out))
+                                .bottom(px(-out))
+                                .left(px(-out))
+                                .right(px(-out))
+                                .rounded(px(RADIUS + out))
+                                .border_2()
+                                .border_color(rgb(theme.selection())),
+                        )
+                        .child(
+                            div()
+                                .id("git-row")
+                                .size_full()
+                                .px(theme.ui(12.))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_sm()
+                                .rounded(px(RADIUS))
+                                .bg(rgb(theme.tokens.text))
+                                .text_color(rgb(theme.tokens.ground))
+                                .child("⎇")
+                                .child(div().flex_1().min_w_0().truncate().child(format!("Git · {label}")))
+                                .child(
+                                    div()
+                                        .id("close-git")
+                                        .flex_none()
+                                        .size(theme.ui(20.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgba(0x00000026)))
+                                        .child("×")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(SidebarEvent::CloseGit);
+                                        })),
+                                ),
+                        ),
                 )
             })
             .child(
