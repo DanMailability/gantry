@@ -132,16 +132,6 @@ impl Render for AskpassView {
         let focused = self.focus_handle.is_focused(window);
         let input = match self.kind {
             PromptKind::YesNo => None,
-            PromptKind::Plain => Some(field::render(
-                &self.field,
-                "",
-                focused,
-                &theme,
-                field::on_press(cx, |this, offset, clicks, _, cx| {
-                    this.field.press(offset, clicks);
-                    cx.notify();
-                }),
-            )),
             PromptKind::Masked => {
                 // Bullets with the caret at the end; the real text stays in `self.field`.
                 let mut hidden = TextField::default();
