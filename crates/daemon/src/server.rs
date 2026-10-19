@@ -206,8 +206,12 @@ impl State {
             .iter()
             .map(|(id, pane)| PaneSession { pane: *id, pid: pane.pty.pid(), session_arg: pane.session_arg.clone() })
             .collect();
-        let view =
-            ContainerView { registry: &self.registry, marked: &self.marked, dir_exists: &|dir: &Path| dir.is_dir() };
+        let view = ContainerView {
+            registry: &self.registry,
+            marked: &self.marked,
+            dir_exists: &|dir: &Path| dir.is_dir(),
+            checks_processes: cfg!(target_os = "linux"),
+        };
         let sessions = resolve(&records, &panes, &self.gone, &view);
         if full {
             self.control(&DaemonMessage::Sessions { sessions: sessions.clone() });

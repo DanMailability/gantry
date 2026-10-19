@@ -50,6 +50,9 @@ pub struct ContainerView<'a> {
     pub marked: &'a HashMap<u32, PaneId>,
     /// Whether a host directory exists.
     pub dir_exists: &'a dyn Fn(&Path) -> bool,
+    /// Whether this OS can tell if a pid file's process still runs. Without it a running record no pane owns may be
+    /// a stale file, so it is shown as closed.
+    pub checks_processes: bool,
 }
 
 /// Combine index records with panes. A running record whose process is a pane's process — or, in a container,
@@ -86,6 +89,7 @@ pub fn resolve(
         .map(|r| {
             let state = match (index_state(r), running_pane(index_state(r))) {
                 (_, Some(pane)) => SessionState::Managed { pane },
+                (IndexState::Running { .. }, None) if !view.checks_processes => SessionState::Closed,
                 (IndexState::Running { pid }, None) => SessionState::External { pid: Some(pid) },
                 (IndexState::InContainer { pid }, None) => SessionState::External { pid },
                 (IndexState::Closed, None) => match by_arg.get(r.id.as_str()) {
@@ -198,7 +202,12 @@ mod tests {
     /// `resolve` with no containers known and no container processes marked.
     fn plain(records: &[SessionRecord], panes: &[PaneSession], gone: &[Gone]) -> Vec<SessionInfo> {
         let (registry, marked) = (Registry::default(), HashMap::new());
-        resolve(records, panes, gone, &ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true })
+        resolve(
+            records,
+            panes,
+            gone,
+            &ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true, checks_processes: true },
+        )
     }
 
     fn record(id: &str, state: IndexState) -> SessionRecord {
@@ -294,6 +303,21 @@ mod tests {
     }
 
     #[test]
+    fn without_process_checks_an_outside_running_record_is_closed_but_a_pane_keeps_its_own() {
+        let records =
+            [record("outside", IndexState::Running { pid: 100 }), record("mine", IndexState::Running { pid: 7 })];
+        let panes = [PaneSession { pane: 1, pid: Some(7), session_arg: None }];
+        let registry = Registry::default();
+        let marked = HashMap::new();
+        let view =
+            ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true, checks_processes: false };
+        assert_eq!(
+            states(&resolve(&records, &panes, &[], &view)),
+            vec![("outside", SessionState::Closed), ("mine", SessionState::Managed { pane: 1 })]
+        );
+    }
+
+    #[test]
     fn a_process_seen_exiting_is_closed_until_the_index_catches_up() {
         let mut running = record("s", IndexState::Running { pid: 100 });
         running.proc_start = Some("5".into());
@@ -344,7 +368,8 @@ mod tests {
             record("launched", IndexState::Closed),
         ];
         let (registry, marked) = (Registry::default(), HashMap::from([(9007, 4)]));
-        let view = ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true };
+        let view =
+            ContainerView { registry: &registry, marked: &marked, dir_exists: &|_| true, checks_processes: true };
         // Pane 4 was started as `launched`, then `/clear`ed into `boxed`: the launch session is closed.
         let sessions = resolve(&records, &[pane(4, 100, Some("launched"))], &[], &view);
         assert_eq!(
@@ -384,9 +409,13 @@ mod tests {
         boxed.cwd = "/workspaces/app/src".into();
         let marked = HashMap::new();
         let exists = |path: &std::path::Path| path == std::path::Path::new("/home/u/app/src");
-        let info =
-            resolve(&[boxed], &[], &[], &ContainerView { registry: &registry, marked: &marked, dir_exists: &exists })
-                .remove(0);
+        let info = resolve(
+            &[boxed],
+            &[],
+            &[],
+            &ContainerView { registry: &registry, marked: &marked, dir_exists: &exists, checks_processes: true },
+        )
+        .remove(0);
         assert_eq!((info.cwd.as_path(), info.cwd_exists), (std::path::Path::new("/home/u/app/src"), true));
         assert_eq!(
             info.container,

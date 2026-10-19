@@ -320,7 +320,7 @@ impl PaneLaunch {
 pub struct Launch {
     /// Explicitly requested command (`gantry -- cmd` or `--cwd`); always opens a new tab.
     pub explicit: Option<PaneLaunch>,
-    /// What to open when there is nothing to restore.
+    /// Where new tabs start when no pane gives a folder; nothing is opened from it at start.
     pub default: PaneLaunch,
 }
 
@@ -1116,7 +1116,7 @@ pub fn without_killed_offline(
 /// pane is gone (or belongs to another daemon instance) become dead; leaves of a host that is not connected keep their
 /// saved pane and instance until `reconcile` runs for it (and are never dropped, even without `restore_layout`); live panes
 /// missing from the layout become new tabs (most recently focused last, and active); an explicit launch opens a new
-/// focused tab; an empty result opens the default. Without `restore_layout`, leaves whose pane is gone are dropped
+/// focused tab; an empty result stays empty (the GUI shows its empty state). Without `restore_layout`, leaves whose pane is gone are dropped
 /// from the workspace (live panes still reattach) but kept aside for `saveable`; leaves in `keep` (the ones that
 /// were running when an update stopped everything) stay in the workspace as finished leaves instead.
 pub fn restore(
@@ -1148,9 +1148,6 @@ pub fn restore(
     let mut spawn = Vec::new();
     if let Some(explicit) = &launch.explicit {
         spawn.push(workspace.new_tab(explicit.clone()));
-    }
-    if workspace.tabs.is_empty() {
-        spawn.push(workspace.new_tab(launch.default.clone()));
     }
     Restored { workspace, attach, spawn }
 }
@@ -2363,10 +2360,10 @@ mod tests {
     }
 
     #[test]
-    fn restore_with_nothing_spawns_the_default() {
+    fn restore_with_nothing_stays_empty() {
         let restored = restore_local(None, "i1", &[], &launch(), true, &HashSet::new());
-        assert_eq!(restored.workspace.tabs.len(), 1);
-        assert_eq!(restored.spawn, vec![restored.workspace.focused().unwrap()]);
+        assert!(restored.workspace.tabs.is_empty());
+        assert!(restored.spawn.is_empty());
         assert!(restored.attach.is_empty());
         assert_eq!(restored.workspace.instances[&HostId::local()], "i1");
     }
@@ -2624,7 +2621,7 @@ mod tests {
         assert_eq!(restored.workspace.tabs.len(), 1);
         assert!(restored.spawn.is_empty() && restored.workspace.is_consistent());
         let none = restore_local(Some(workspace_on("i1")), "i1", &[], &launch(), false, &HashSet::new());
-        assert_eq!(none.spawn.len(), 1, "no tab left: one new tab");
+        assert!(none.spawn.is_empty() && none.workspace.tabs.is_empty(), "no tab left: stays empty");
     }
 
     #[test]

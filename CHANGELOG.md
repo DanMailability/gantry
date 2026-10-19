@@ -15,6 +15,8 @@ First public release.
 
 ### Changed
 - **macOS install** - The README opens the app with one `xattr` command instead of the long Privacy & Security steps.
+- **Empty start** - When there is nothing to restore (the first start, or after every pane was closed), Gantry opens on its empty screen with the New Claude session and New shell buttons, not a shell in the folder it was started from. `gantry --cwd DIR` and `gantry -- program` still open their tab.
+- **Sessions outside Gantry on macOS** - On macOS and Windows a Claude running outside Gantry shows as a closed session, not as "running elsewhere", since those systems cannot yet check whether its process still runs. Take over is not offered there. Needs a daemon restart.
 
 ## [0.8.0] - 2026-10-19
 
