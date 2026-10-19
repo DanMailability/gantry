@@ -59,7 +59,7 @@ impl WorkspaceView {
             handle.cancel();
         }
         self.close_share(host, false);
-        self.drop_host_update(host);
+        self.drop_host_update(host, cx);
         if self.update_host_card.as_ref().is_some_and(|card| card.host == *host) {
             self.update_host_card = None;
         }
@@ -456,7 +456,7 @@ impl WorkspaceView {
         match self.host_update.get(host).map(|update| update.phase) {
             // The old daemon is gone, as asked: the update owns the next connect, not the retry timer.
             Some(UpdatePhase::Restarting) => return self.finish_restart(host, window, cx),
-            Some(UpdatePhase::Uploading) => self.drop_host_update(host),
+            Some(UpdatePhase::Uploading) => self.drop_host_update(host, cx),
             None => {}
         }
         self.close_update_card(host);
@@ -494,7 +494,7 @@ impl WorkspaceView {
             return;
         }
         // Taken over wins over a running update.
-        self.drop_host_update(host);
+        self.drop_host_update(host, cx);
         self.close_update_card(host);
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
@@ -670,10 +670,11 @@ impl WorkspaceView {
         }
     }
 
-    /// Cancel `host`'s running update, if any, and close its ssh connection.
-    fn drop_host_update(&mut self, host: &HostId) {
+    /// Cancel `host`'s running update, if any, close its ssh connection and take down its sign-in dialog.
+    fn drop_host_update(&mut self, host: &HostId, cx: &mut Context<Self>) {
         let Some(update) = self.host_update.remove(host) else { return };
         update.handle.cancel();
+        self.withdraw_questions(host, cx);
         if let Some(share) = update.share {
             self.close_update_share(host, share);
         }
@@ -801,6 +802,7 @@ impl WorkspaceView {
     /// A step of `host`'s update failed: the host stays as it was, the pill is back and a card says why.
     fn update_failed(&mut self, host: &HostId, reason: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(update) = self.host_update.remove(host) else { return };
+        self.withdraw_questions(host, cx);
         if let Some(share) = update.share {
             self.close_update_share(host, share);
         }
