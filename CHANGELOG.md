@@ -5,6 +5,17 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-19
+
+First public release.
+
+### Added
+- **License notices** - Every download now includes `NOTICE` and `THIRD_PARTY_LICENSES.html`, the license texts of everything Gantry is built from.
+- **Checksums** - Each release lists a `SHA256SUMS` file for its downloads.
+
+### Changed
+- **macOS install** - The README opens the app with one `xattr` command instead of the long Privacy & Security steps.
+
 ## [0.8.0] - 2026-10-19
 
 ### Added
