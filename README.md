@@ -2,8 +2,10 @@
 
 **A fast, cross-platform terminal for running and watching many [Claude Code](https://claude.com/claude-code) sessions at once.**
 
-Gantry is a GPU-rendered terminal (built on [GPUI](https://www.gpui.rs/)) that knows what Claude is doing. Every pane
+Gantry is a GPU-rendered terminal that knows what Claude is doing. Every pane
 that runs Claude shows its status, so you can run as many sessions as you like and still know which one needs you.
+
+Independent project, not affiliated with or endorsed by Anthropic.
 
 https://github.com/user-attachments/assets/c8f1c7a0-12ba-4c0c-a482-666c805bba7f
 
@@ -65,8 +67,6 @@ A "need input" pill in the title bar jumps to the next session waiting for you.
 
 Close the window and your sessions continue, on this machine or on any SSH host.
 
-<!-- visual: close and reopen -->
-
 - **Sessions that outlive the window.** A per-profile daemon owns every PTY, so closing the GUI does not end your
   sessions. Reopen it and it reattaches. Finished panes offer Continue (`claude --resume`) or Restart.
 - **SSH hosts.** Connect to remote SSH hosts (currently Linux). Their sessions sit in the same sidebar, with the same
@@ -89,6 +89,21 @@ in a hand-editable `settings.json` that applies live.
 
 - **Right-to-left text.** Hebrew and Arabic display in the right order, as a display-only layer (selection, copy and
   links stay logical).
+
+## Requirements and limits
+
+- Linux x86_64 (glibc 2.35 or newer: Ubuntu 22.04+, Fedora) and macOS on Apple Silicon. Windows is not available yet.
+- Gantry is GPU-rendered, so it needs working graphics drivers.
+- Claude Code must be installed. Gantry runs your own `claude` and does not replace it.
+- SSH hosts must be Linux x86_64.
+- The macOS build is not notarized (see Install).
+
+## Privacy
+
+Gantry reads Claude's session files on your machine, read-only, to show status and search. It has no telemetry and
+sends nothing about you or your sessions anywhere. The only network call it makes itself is a daily check of this
+project's GitHub releases for a newer version; turn it off in Settings > Window > Updates. SSH connections go only to
+the hosts you add.
 
 ## Install
 
@@ -128,15 +143,9 @@ Gantry needs glibc 2.35 or newer (Ubuntu 22.04+, Fedora).
 ### macOS
 
 Apple Silicon only. Download `gantry-<version>-aarch64-macos.dmg` from the
-[releases page](https://github.com/idogrf/gantry/releases). The app is ad-hoc signed and not
-notarized, so macOS blocks it the first time ("Apple can't verify..."). To open it:
-
-1. Open the DMG and drag `Gantry.app` into Applications. Don't run it from inside the DMG.
-2. macOS 15 Sequoia or newer: double-click it and dismiss the dialog with Done. Then open System Settings > Privacy &
-   Security, scroll to the Security section, click Open Anyway next to Gantry, authenticate and confirm. Once only.
-3. macOS 14 or older: right-click it in Applications, choose Open, then click Open.
-
-Or, on any version, remove the quarantine flag instead of steps 2-3:
+[releases page](https://github.com/idogrf/gantry/releases), open it and drag `Gantry.app` into Applications (don't run
+it from inside the DMG). The app is ad-hoc signed and not notarized, so macOS blocks it the first time. Remove the
+quarantine flag once, then open it as usual:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Gantry.app
@@ -182,4 +191,10 @@ Everything you can change lives in the Settings panel: theme, fonts, colors, sho
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option. Third-party
+notices are in [NOTICE](NOTICE).
+
+## AI disclosure
+
+Gantry is built with substantial help from AI coding tools. A human directs the work, reviews and tests every change,
+and is responsible for the result.
