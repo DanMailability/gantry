@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
-use app_core::host_update::needs_update;
+use app_core::host_update::{Click, click_plan, needs_update};
 use app_core::split_tree::NodeId;
 use app_core::theme_colors::terminal_palette;
 use app_core::version::Version;
@@ -22,7 +22,7 @@ use crate::settings_store::SettingsStore;
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::sidebar_view::HostRow;
 use crate::ssh_wizard::run::{self, Msg, Questions};
-use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart, describe};
+use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart, describe, upload_preflight};
 
 /// Tries (one second apart) a connect makes after an update's restart while the old daemon still answers.
 const RESTART_RETRIES: u8 = 3;
@@ -591,6 +591,69 @@ impl WorkspaceView {
         self.forget_host(host, cx);
     }
 
+    /// The file to upload for `host`'s update, or why nothing can be; `None` when the host is not listed.
+    fn host_update_file(&self, host: &HostId) -> Option<Result<PathBuf, String>> {
+        let entry = self.ssh_hosts.iter().find(|entry| entry.name == host.name())?;
+        Some(upload_preflight(&entry.command).map_err(|reason| blocked_text(&reason)))
+    }
+
+    /// Open the update card of `host`, focused.
+    fn open_host_update_card(
+        &mut self,
+        host: &HostId,
+        position: Point<Pixels>,
+        kind: CardKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.update_host_card = Some(HostUpdateCard { host: host.clone(), position, focus, kind });
+        cx.notify();
+    }
+
+    /// The update pill of `host` was clicked at `position`: the card says why nothing can be done, or asks before
+    /// ending running sessions, or the update starts at once.
+    pub(super) fn click_host_update(
+        &mut self,
+        host: &HostId,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host_state(host) != HostState::Connected || self.host_update.contains_key(host) {
+            return;
+        }
+        let local = match self.host_update_file(host) {
+            None => return,
+            Some(Err(reason)) => {
+                return self.open_host_update_card(host, position, CardKind::Blocked(reason), window, cx);
+            }
+            Some(Ok(local)) => local,
+        };
+        let leaves: Vec<NodeId> =
+            self.workspace.leaves.iter().filter(|(_, leaf)| leaf.host == *host).map(|(id, _)| *id).collect();
+        match click_plan(self.running_panes(&leaves, cx)) {
+            Click::Start => self.start_host_update(host, local, position, window, cx),
+            Click::Ask { running } => self.open_host_update_card(host, position, CardKind::Ask { running }, window, cx),
+        }
+    }
+
+    /// The card's Update and restart / Try again: check the file again, then start.
+    pub(super) fn retry_host_update(
+        &mut self,
+        host: &HostId,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.host_update_file(host) {
+            None => {}
+            Some(Err(reason)) => self.open_host_update_card(host, position, CardKind::Blocked(reason), window, cx),
+            Some(Ok(local)) => self.start_host_update(host, local, position, window, cx),
+        }
+    }
+
     /// Close the ssh connection an update's upload ran through (it never was in `shares`).
     fn close_update_share(&self, host: &HostId, share: Share) {
         let target = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).map(|entry| entry.target.clone());
@@ -608,7 +671,6 @@ impl WorkspaceView {
 
     /// Update the daemon of connected SSH host `host` with the `gantryd` at `local`: upload and verify it while the
     /// old daemon keeps running, then restart. `position` is where the card of a failure opens.
-    #[allow(dead_code)] // called by the update card in the next commit
     pub(super) fn start_host_update(
         &mut self,
         host: &HostId,
@@ -653,7 +715,6 @@ impl WorkspaceView {
 
     /// The new `gantryd` is in place: ask the old daemon to stop through the connection already open (a second bridge
     /// would take that connection over), and finish the restart when it ends, or after 5 s.
-    #[allow(dead_code)] // reached through start_host_update
     fn begin_restart(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
         if self.host_update.get(host).is_none_or(|update| update.phase != UpdatePhase::Uploading) {
             return;
@@ -699,7 +760,6 @@ impl WorkspaceView {
     }
 
     /// A step of `host`'s update failed: the host stays as it was, the pill is back and a card says why.
-    #[allow(dead_code)] // reached through start_host_update
     fn update_failed(&mut self, host: &HostId, reason: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(update) = self.host_update.remove(host) else { return };
         if let Some(share) = update.share {
@@ -768,5 +828,38 @@ impl WorkspaceView {
         view.focus_handle(cx).focus(window, cx);
         self.ssh_wizard = Some((view, subscription));
         cx.notify();
+    }
+}
+
+/// A preflight reason as the card shows it: a sentence, and for a Gantry that cannot be uploaded at all, what to do.
+fn blocked_text(reason: &str) -> String {
+    let mut text: String = reason.chars().take(1).flat_map(char::to_uppercase).chain(reason.chars().skip(1)).collect();
+    if !text.ends_with('.') {
+        text.push('.');
+    }
+    if text.ends_with("install it by hand.") {
+        text.push_str(" Update it by hand, then reconnect.");
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blocked_text;
+
+    #[test]
+    fn a_blocked_update_reads_as_sentences() {
+        assert_eq!(
+            blocked_text("This Gantry cannot be uploaded to a Linux x86_64 host: install it by hand."),
+            "This Gantry cannot be uploaded to a Linux x86_64 host: install it by hand. Update it by hand, then reconnect."
+        );
+        assert_eq!(
+            blocked_text("the command is not a plain path; install Gantry on that host by hand"),
+            "The command is not a plain path; install Gantry on that host by hand."
+        );
+        assert_eq!(
+            blocked_text("/opt/gantryd is missing: install Gantry again."),
+            "/opt/gantryd is missing: install Gantry again."
+        );
     }
 }

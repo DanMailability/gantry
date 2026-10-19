@@ -199,7 +199,6 @@ struct HostConn {
 
 /// Where an SSH host's daemon update stands.
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // read by the update card in the next commit
 enum UpdatePhase {
     /// `gantryd` is being uploaded and verified; the old daemon keeps running.
     Uploading,
@@ -208,7 +207,6 @@ enum UpdatePhase {
 }
 
 /// A running update of one SSH host's daemon. The entry exists only while the update runs: a failure or a drop removes it.
-#[allow(dead_code)] // read by the update card in the next commit
 struct HostUpdate {
     phase: UpdatePhase,
     /// Cancels the upload.
@@ -222,7 +220,6 @@ struct HostUpdate {
 }
 
 /// What the host update card says.
-#[allow(dead_code)] // read by the update card in the next commit
 enum CardKind {
     /// Asks before restarting: this many running panes end.
     Ask {
@@ -236,7 +233,6 @@ enum CardKind {
 }
 
 /// The open card of an SSH host's update; its focus handle takes Esc.
-#[allow(dead_code)] // read by the update card in the next commit
 struct HostUpdateCard {
     host: HostId,
     /// Where the pill was clicked.

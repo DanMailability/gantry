@@ -207,7 +207,6 @@ pub(crate) fn upload_block(command: &str) -> Option<String> {
 }
 
 /// The file to upload to a host whose remote command is `command`, or why nothing can be uploaded.
-#[allow(dead_code)] // used by the sidebar update in a later commit
 pub(crate) fn upload_preflight(command: &str) -> Result<std::path::PathBuf, String> {
     match upload_block(command) {
         Some(reason) => Err(reason),
