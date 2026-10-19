@@ -22,7 +22,7 @@ pub(crate) const CLOSE_ICON: &str = "icons/close.svg";
 /// The jump to bottom chip's icon (an arrow pointing down), drawn by `terminal_view`.
 pub(crate) const ARROW_DOWN_ICON: &str = "icons/arrow-down.svg";
 
-/// The last prompt card's icon (a chat bubble), drawn by `workspace_view::prompt_card`.
+/// The last prompt card's icon (a chat bubble), drawn by `workspace_view::tab_content::prompt_card`.
 pub(crate) const PROMPT_ICON: &str = "icons/prompt.svg";
 
 /// The pin on a row marked unread (a bookmark), drawn by `theme::pin_icon`.
