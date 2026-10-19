@@ -1,15 +1,18 @@
-use super::{HostConn, WorkspaceView};
+use super::{CardKind, HostConn, HostUpdate, HostUpdateCard, UpdatePhase, WorkspaceView};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use app_core::host_state::{DisconnectPlan, FailKind, HostEvent, HostState, reconnect_delay};
+use app_core::host_state::{DisconnectPlan, FailKind, HostDot, HostEvent, HostState, reconnect_delay};
+use app_core::host_update::needs_update;
 use app_core::split_tree::NodeId;
 use app_core::theme_colors::terminal_palette;
+use app_core::version::Version;
 use app_core::workspace::{HostLive, reconcile, without_killed_offline};
 use daemon::client::Connection;
 use daemon::paths::{Paths, current_profile};
-use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, SshHostSpec, connect as ssh_connect};
-use gpui::{Context, Focusable, PromptLevel, Window, prelude::*};
+use daemon::ssh::{Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, Share, SshHostSpec, connect as ssh_connect};
+use gpui::{Context, Focusable, Pixels, Point, PromptLevel, Window, prelude::*};
 use protocol::host::HostId;
 use protocol::message::PaletteColors;
 
@@ -18,7 +21,8 @@ use app_core::settings::add_ssh_host;
 use crate::settings_store::SettingsStore;
 use crate::settings_view::ssh_hosts::{HostStatus, HostStatuses};
 use crate::sidebar_view::HostRow;
-use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart};
+use crate::ssh_wizard::run::{self, Msg, Questions};
+use crate::ssh_wizard::{SshWizard, WizardEvent, WizardStart, describe};
 
 /// Tries (one second apart) a connect makes after an update's restart while the old daemon still answers.
 const RESTART_RETRIES: u8 = 3;
@@ -54,6 +58,10 @@ impl WorkspaceView {
             handle.cancel();
         }
         self.close_share(host, false);
+        self.drop_host_update(host);
+        if self.update_host_card.as_ref().is_some_and(|card| card.host == *host) {
+            self.update_host_card = None;
+        }
         self.withdraw_questions(host, cx);
         self.hosts.remove(host);
         for (id, leaf) in &self.workspace.leaves {
@@ -160,7 +168,14 @@ impl WorkspaceView {
                 let host = HostId::named(&entry.name);
                 let state = self.host_state(&host);
                 let label = (state != HostState::Connected).then(|| state.label());
-                HostRow { dot: state.dot(), label, up: state.in_connected_list(), host, update: None, updating: false }
+                let updating = self.host_update.contains_key(&host);
+                let local = Version::parse(protocol::build::VERSION);
+                let remote = self.hosts.get(&host).and_then(|conn| conn.daemon_version);
+                let update =
+                    local.filter(|local| needs_update(&state, remote, *local)).map(|local| format!("↑ {local}"));
+                // The row shows the Busy dot while the update runs, as the wizard's steps do.
+                let dot = if updating { HostDot::Busy } else { state.dot() };
+                HostRow { dot, label, up: state.in_connected_list(), host, update, updating }
             })
             .collect();
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_hosts(rows, cx));
@@ -370,7 +385,7 @@ impl WorkspaceView {
     /// `host` is connected (first time, or again after a drop): reattach its panes, adopt what runs there, and spawn
     /// the leaves that were waiting for it.
     fn host_connected(&mut self, host: &HostId, connection: Connection, window: &mut Window, cx: &mut Context<Self>) {
-        let Connection { client, events, instance, panes, .. } = connection;
+        let Connection { client, events, instance, panes, daemon_version, .. } = connection;
         self.retries.remove(host);
         self.restart_retries.remove(host);
         // Panes closed while the host was away are killed now, and not adopted as tabs again.
@@ -383,6 +398,7 @@ impl WorkspaceView {
             HostConn {
                 client: client.clone(),
                 connected: true,
+                daemon_version: daemon_version.as_deref().and_then(Version::parse),
                 _events: Self::listen(host.clone(), events, window, cx),
             },
         );
@@ -436,6 +452,12 @@ impl WorkspaceView {
         if self.host_state(host) != HostState::Connected {
             return; // a stale event of an older connection
         }
+        match self.host_update.get(host).map(|update| update.phase) {
+            // The old daemon is gone, as asked: the update owns the next connect, not the retry timer.
+            Some(UpdatePhase::Restarting) => return self.finish_restart(host, window, cx),
+            Some(UpdatePhase::Uploading) => self.drop_host_update(host),
+            None => {}
+        }
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
@@ -469,6 +491,8 @@ impl WorkspaceView {
         if self.host_state(host) != HostState::Connected {
             return;
         }
+        // Taken over wins over a running update.
+        self.drop_host_update(host);
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
@@ -565,6 +589,132 @@ impl WorkspaceView {
             self.push_search_state(cx);
         }
         self.forget_host(host, cx);
+    }
+
+    /// Close the ssh connection an update's upload ran through (it never was in `shares`).
+    fn close_update_share(&self, host: &HostId, share: Share) {
+        let target = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).map(|entry| entry.target.clone());
+        std::thread::spawn(move || share.close("ssh", &target.unwrap_or_default(), false));
+    }
+
+    /// Cancel `host`'s running update, if any, and close its ssh connection.
+    fn drop_host_update(&mut self, host: &HostId) {
+        let Some(update) = self.host_update.remove(host) else { return };
+        update.handle.cancel();
+        if let Some(share) = update.share {
+            self.close_update_share(host, share);
+        }
+    }
+
+    /// Update the daemon of connected SSH host `host` with the `gantryd` at `local`: upload and verify it while the
+    /// old daemon keeps running, then restart. `position` is where the card of a failure opens.
+    #[allow(dead_code)] // called by the update card in the next commit
+    pub(super) fn start_host_update(
+        &mut self,
+        host: &HostId,
+        local: PathBuf,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host_state(host) != HostState::Connected || self.host_update.contains_key(host) {
+            return;
+        }
+        let Some(entry) = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).cloned() else { return };
+        let runtime_dir = Paths::for_profile(&current_profile()).runtime_dir;
+        let share = Share::new(&runtime_dir);
+        let spec = SshHostSpec {
+            name: entry.name,
+            target: entry.target,
+            command: entry.command,
+            auth: entry.auth,
+            port: entry.port,
+            share: share.clone(),
+        };
+        let questions = Questions { prompts: self.askpass_prompts.clone(), runtime_dir };
+        let run::Job { handle, messages } = run::install(spec, &questions, local);
+        let host_for_task = host.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(message) = messages.recv().await {
+                if let Msg::Installed(result) = message {
+                    let _ = this.update_in(cx, |view, window, cx| match result {
+                        Ok(_) => view.begin_restart(&host_for_task, window, cx),
+                        Err(kind) => view.update_failed(&host_for_task, describe(&kind), window, cx),
+                    });
+                    return;
+                }
+            }
+        });
+        self.host_update
+            .insert(host.clone(), HostUpdate { phase: UpdatePhase::Uploading, handle, task, share, position });
+        self.publish_hosts(cx);
+        cx.notify();
+    }
+
+    /// The new `gantryd` is in place: ask the old daemon to stop through the connection already open (a second bridge
+    /// would take that connection over), and finish the restart when it ends, or after 5 s.
+    #[allow(dead_code)] // reached through start_host_update
+    fn begin_restart(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host_update.get(host).is_none_or(|update| update.phase != UpdatePhase::Uploading) {
+            return;
+        }
+        let Some(client) = self.client(host).cloned() else { return };
+        // The thread's clone keeps the connection open until the request is written.
+        std::thread::spawn(move || client.stop_all_and_wait(Duration::from_secs(2)));
+        let host_for_task = host.clone();
+        let timer = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            let _ = this.update_in(cx, |view, window, cx| view.finish_restart(&host_for_task, window, cx));
+        });
+        if let Some(update) = self.host_update.get_mut(host) {
+            update.phase = UpdatePhase::Restarting;
+            update.task = timer;
+        }
+    }
+
+    /// The old daemon is gone (or 5 s passed): drop the old connection and connect again, on the update's ssh
+    /// connection. Runs once; the first of the closed connection and the timer wins.
+    fn finish_restart(&mut self, host: &HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(update) = self.host_update.remove(host) else { return };
+        self.take_overs.retain(|(taking, _), _| taking != host);
+        if self.search_answers.remove(host).is_some() {
+            self.push_search_hits(cx);
+            self.push_search_state(cx);
+        }
+        for (id, leaf) in &self.workspace.leaves {
+            if &leaf.host == host
+                && let Some(slot) = self.slots.get(id)
+            {
+                slot.view.update(cx, |view, cx| view.disconnected(cx));
+            }
+        }
+        // `forget_host` closes the host's shared ssh connection: the update's goes in only after it.
+        self.forget_host(host, cx);
+        if let Some(share) = update.share {
+            self.shares.insert(host.clone(), share);
+        }
+        // The old daemon may still answer for a moment after its stop.
+        self.restart_retries.insert(host.clone(), RESTART_RETRIES);
+        self.connect_host(host, true, window, cx);
+    }
+
+    /// A step of `host`'s update failed: the host stays as it was, the pill is back and a card says why.
+    #[allow(dead_code)] // reached through start_host_update
+    fn update_failed(&mut self, host: &HostId, reason: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(update) = self.host_update.remove(host) else { return };
+        if let Some(share) = update.share {
+            self.close_update_share(host, share);
+        }
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.update_host_card = Some(HostUpdateCard {
+            host: host.clone(),
+            position: update.position,
+            focus,
+            kind: CardKind::Failed(reason),
+        });
+        self.publish_hosts(cx);
+        cx.notify();
     }
 
     /// Open the SSH install wizard for `start`; one at a time, a second request focuses the open one.

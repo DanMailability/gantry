@@ -19,8 +19,8 @@ use daemon::askpass::AskPrompt;
 use daemon::client::{ClientEvent, Connection, DaemonClient, batch_events};
 use daemon::ssh::{AttemptHandle, Share};
 use gpui::{
-    Bounds, Context, Entity, FocusHandle, Pixels, SharedString, Subscription, Task, UniformListScrollHandle, Window,
-    prelude::*,
+    Bounds, Context, Entity, FocusHandle, Pixels, Point, SharedString, Subscription, Task, UniformListScrollHandle,
+    Window, prelude::*,
 };
 use notify::RecommendedWatcher;
 use protocol::host::{HostId, PaneKey};
@@ -191,8 +191,58 @@ struct HostConn {
     client: DaemonClient,
     /// False once the connection ended; it is not re-established.
     connected: bool,
+    /// The daemon's app version, if it sent one (`None` for this machine and the debug seam's hosts: no update pill).
+    daemon_version: Option<Version>,
     /// Keeps routing this host's events to the view.
     _events: Task<()>,
+}
+
+/// Where an SSH host's daemon update stands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // read by the update card in the next commit
+enum UpdatePhase {
+    /// `gantryd` is being uploaded and verified; the old daemon keeps running.
+    Uploading,
+    /// The old daemon was asked to stop; the next connect starts the new one.
+    Restarting,
+}
+
+/// A running update of one SSH host's daemon. The entry exists only while the update runs: a failure or a drop removes it.
+#[allow(dead_code)] // read by the update card in the next commit
+struct HostUpdate {
+    phase: UpdatePhase,
+    /// Cancels the upload.
+    handle: AttemptHandle,
+    /// Reads the upload's messages, then (restarting) waits out the 5 s cap for the old connection to end.
+    task: Task<()>,
+    /// The ssh connection the upload ran through, handed to the connect that follows; not in `shares` before that.
+    share: Option<Share>,
+    /// Where the pill was clicked, for the card that reports a failure.
+    position: Point<Pixels>,
+}
+
+/// What the host update card says.
+#[allow(dead_code)] // read by the update card in the next commit
+enum CardKind {
+    /// Asks before restarting: this many running panes end.
+    Ask {
+        /// Running panes of the host when the pill was clicked.
+        running: usize,
+    },
+    /// The update cannot start, and why.
+    Blocked(String),
+    /// The update failed, and why.
+    Failed(String),
+}
+
+/// The open card of an SSH host's update; its focus handle takes Esc.
+#[allow(dead_code)] // read by the update card in the next commit
+struct HostUpdateCard {
+    host: HostId,
+    /// Where the pill was clicked.
+    position: Point<Pixels>,
+    focus: FocusHandle,
+    kind: CardKind,
 }
 
 /// Root view of the Gantry window.
@@ -273,6 +323,10 @@ pub struct WorkspaceView {
     /// Hosts whose daemon was just stopped for an update: how many more times a connect that meets the old daemon
     /// (VersionMismatch) is tried again before the card is shown.
     restart_retries: HashMap<HostId, u8>,
+    /// The daemon updates running from the sidebar's pill.
+    host_update: HashMap<HostId, HostUpdate>,
+    /// The open card of a host's update.
+    update_host_card: Option<HostUpdateCard>,
     /// The open SSH install wizard overlay.
     ssh_wizard: Option<(Entity<SshWizard>, Subscription)>,
     /// The Settings page, while its tab is open.
@@ -410,13 +464,19 @@ impl WorkspaceView {
         let mut hosts = HashMap::new();
         hosts.insert(
             HostId::local(),
-            HostConn { client, connected: true, _events: Self::listen(HostId::local(), events, window, cx) },
+            HostConn {
+                client,
+                connected: true,
+                daemon_version: None,
+                _events: Self::listen(HostId::local(), events, window, cx),
+            },
         );
         let seam_hosts: HashSet<HostId> = extra.iter().map(|(host, _)| host.clone()).collect();
         for (host, connection) in extra {
             let conn = HostConn {
                 client: connection.client,
                 connected: true,
+                daemon_version: None,
                 _events: Self::listen(host.clone(), connection.events, window, cx),
             };
             hosts.insert(host, conn);
@@ -508,6 +568,8 @@ impl WorkspaceView {
             setup: None,
             shares: HashMap::new(),
             restart_retries: HashMap::new(),
+            host_update: HashMap::new(),
+            update_host_card: None,
             ssh_wizard: None,
             settings: None,
             _settings_events: None,
