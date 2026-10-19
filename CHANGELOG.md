@@ -5,6 +5,10 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- **Git filters in untrusted repos** - A repo's own git filters (and a signed commit's `gpg.program`) can no longer run a program when Gantry reads its status, diffs or commits. Every configured filter is skipped on every call, so the panel notes that filters are not run in a repo that has them. Needs a daemon restart.
+- **SSH sign-in prompts** - Every sign-in question except the host-key one is now masked, so codes and passwords in other languages (Passwort, Mot de passe, one-time codes) are never shown while typed.
+
 ## [0.9.0] - 2026-10-19
 
 First public release.

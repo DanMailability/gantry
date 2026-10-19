@@ -417,7 +417,7 @@ pub struct GitState {
     pub took_ms: u32,
     /// Time of the latest commit, seconds since the Unix epoch.
     pub last_commit: Option<i64>,
-    /// A configured git filter (nbstripout, git-lfs, ...) failed, so `files` was read with the filters skipped.
+    /// The repo configures git filters (nbstripout, git-lfs, ...); they are never run, so `files` was read with them skipped.
     #[serde(default)]
     pub filters_skipped: bool,
     /// `commits` are the ones this branch has beyond the default branch; false = the latest commits of `HEAD`.

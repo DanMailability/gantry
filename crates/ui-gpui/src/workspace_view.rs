@@ -4409,7 +4409,8 @@ impl WorkspaceView {
                             .flex_col()
                             .when(state.filters_skipped, |list| {
                                 list.child(git_panel::message(
-                                    "A git filter in this repo failed, so some files may show as changed.".into(),
+                                    "This repo's git filters are not run here, so some files may show as changed."
+                                        .into(),
                                     theme,
                                 ))
                             })
