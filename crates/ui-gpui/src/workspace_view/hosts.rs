@@ -459,6 +459,7 @@ impl WorkspaceView {
             Some(UpdatePhase::Uploading) => self.drop_host_update(host),
             None => {}
         }
+        self.close_update_card(host);
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
@@ -494,6 +495,7 @@ impl WorkspaceView {
         }
         // Taken over wins over a running update.
         self.drop_host_update(host);
+        self.close_update_card(host);
         if let Some(conn) = self.hosts.get_mut(host) {
             conn.connected = false;
         }
@@ -659,6 +661,13 @@ impl WorkspaceView {
     fn close_update_share(&self, host: &HostId, share: Share) {
         let target = self.ssh_hosts.iter().find(|entry| entry.name == host.name()).map(|entry| entry.target.clone());
         std::thread::spawn(move || share.close("ssh", &target.unwrap_or_default(), false));
+    }
+
+    /// Close the update card if it is `host`'s.
+    fn close_update_card(&mut self, host: &HostId) {
+        if self.update_host_card.as_ref().is_some_and(|card| card.host == *host) {
+            self.update_host_card = None;
+        }
     }
 
     /// Cancel `host`'s running update, if any, and close its ssh connection.
