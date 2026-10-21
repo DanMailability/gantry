@@ -74,6 +74,8 @@ struct Pane {
     container: Option<PathBuf>,
     /// That container's id (when it started).
     container_id: Option<String>,
+    /// The user it runs as in that container (`docker exec -u`).
+    container_user: Option<String>,
     last_focused: u64,
     needs_resync: bool,
 }
@@ -865,21 +867,12 @@ fn list_dir_request(shared: &Arc<Shared>, request: u64, path: String) {
 /// Answer `SavePasteImage` off the async threads: a container pane's image goes into its container, any other
 /// pane's into the paste folder beside the socket.
 fn paste_image_request(shared: &Arc<Shared>, pane: PaneId, format: ImageFormat, data: Vec<u8>) {
-    // The container's id and user, looked up while the lock is held; `Err` = no such pane.
-    let target = {
-        let state = shared.lock();
-        state.panes.get(&pane).map(|p| {
-            p.container_id.as_ref().map(|id| {
-                let user = state
-                    .registry
-                    .containers()
-                    .iter()
-                    .find(|c| c.id.starts_with(id.as_str()) || id.starts_with(&c.id))
-                    .and_then(|c| c.remote_user.clone());
-                (id.clone(), user)
-            })
-        })
-    };
+    // The pane's container id and user, read while the lock is held; `None` = no such pane.
+    let target = shared
+        .lock()
+        .panes
+        .get(&pane)
+        .map(|p| p.container_id.as_ref().map(|id| (id.clone(), p.container_user.clone())));
     let shared = shared.clone();
     tokio::task::spawn_blocking(move || {
         let saved = match (target, &shared.paste_dir, &shared.docker) {
@@ -1019,7 +1012,7 @@ fn spawn_in_container(shared: Arc<Shared>, client_id: u64, request: u64, spec: S
             spec,
             cwd,
             |id| containers::exec_command(&container, &inner_cwd, &program, &args, &marker(&instance, id)),
-            Some((folder, container.id.clone())),
+            Some((folder, container.id.clone(), container.remote_user.clone())),
         );
     });
 }
@@ -1032,7 +1025,7 @@ fn start_pane(
     spec: SpawnRequest,
     cwd: PathBuf,
     command: impl FnOnce(PaneId) -> (String, Vec<String>),
-    container: Option<(PathBuf, String)>,
+    container: Option<(PathBuf, String, Option<String>)>,
 ) {
     let session_arg = claude_session(spec.claude, &spec.program, &spec.args).map(String::from);
     let mut state = shared.lock();
@@ -1072,8 +1065,9 @@ fn start_pane(
         session_arg,
         claude: spec.claude,
         start,
-        container_id: container.as_ref().map(|(_, id)| id.clone()),
-        container: container.map(|(folder, _)| folder),
+        container_id: container.as_ref().map(|(_, id, _)| id.clone()),
+        container_user: container.as_ref().and_then(|(_, _, user)| user.clone()),
+        container: container.map(|(folder, _, _)| folder),
         last_focused: state.focus_seq,
         needs_resync: false,
     };
