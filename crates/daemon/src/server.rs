@@ -443,6 +443,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             claude_dir: shared.claude_dir.clone(),
             app_version: Some(protocol::build::VERSION.into()),
             app_commit: Some(protocol::build::COMMIT.into()),
+            paste_image: false,
         }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id
@@ -697,6 +698,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             search_conversations(shared, request, query, limit)
         }
         ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
+        ClientMessage::SavePasteImage { .. } => {}
         ClientMessage::GitStatus { request, folder, known_head } => {
             git_status_request(shared, request, folder, known_head)
         }

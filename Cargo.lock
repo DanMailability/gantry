@@ -4824,6 +4824,7 @@ dependencies = [
 name = "protocol"
 version = "0.9.1"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "tokio",

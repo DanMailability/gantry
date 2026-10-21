@@ -33,6 +33,7 @@ ui-gpui = { path = "crates/ui-gpui" }
 claude-index = { path = "crates/claude-index" }
 notify = "8.2"
 nucleo-matcher = "0.3.1"
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 notify-rust = "4.18"
 rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
