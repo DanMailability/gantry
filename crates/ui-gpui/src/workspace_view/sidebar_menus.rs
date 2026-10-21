@@ -38,9 +38,7 @@ impl WorkspaceView {
                 }
             }
             MenuAction::NewLocal { claude } => self.show_launcher(claude, HostId::local(), window, cx),
-            MenuAction::NewOnHost { host, claude } => {
-                self.new_session_on_host(&HostId::named(&host), claude, window, cx)
-            }
+            MenuAction::NewOnHost { host, claude } => self.show_launcher(claude, HostId::named(&host), window, cx),
             MenuAction::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
