@@ -462,17 +462,6 @@ impl WorkspaceView {
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_panes(panes, tabs, cx));
     }
 
-    /// A new Claude session (else a shell) on SSH host `host`, in its home folder; connects first when needed.
-    pub(super) fn new_session_on_host(
-        &mut self,
-        host: &HostId,
-        claude: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_on_host(host, claude, "~".into(), window, cx);
-    }
-
     /// Start a new Claude session (or shell) in the folder `dir` of a remote host in a new tab; connects the host when
     /// it is not connected. No container lookup and no Claude config dir: the remote uses its own.
     pub(super) fn open_on_host(
