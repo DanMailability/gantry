@@ -48,6 +48,8 @@ pub struct Paths {
     pub containers_file: PathBuf,
     /// Conversation search index (daemon-owned, beside the layout).
     pub search_dir: PathBuf,
+    /// Where pasted images are saved (beside the socket).
+    pub paste_dir: PathBuf,
     /// User settings, shared by every profile.
     pub settings_file: PathBuf,
     socket: SocketLocation,
@@ -108,6 +110,7 @@ impl Paths {
         let socket = SocketLocation::Pipe(format!("gantry-{profile}-{unique}"));
         let containers_file = layout_file.with_file_name("containers.json");
         let search_dir = layout_file.with_file_name("search");
+        let paste_dir = runtime_dir.join("paste");
         Paths {
             profile: profile.into(),
             lock_file: runtime_dir.join("daemon.lock"),
@@ -116,6 +119,7 @@ impl Paths {
             layout_file,
             containers_file,
             search_dir,
+            paste_dir,
             settings_file,
             socket,
         }
@@ -145,6 +149,13 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_have_a_paste_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::in_dir(tmp.path(), "p");
+        assert_eq!(paths.paste_dir, paths.runtime_dir.join("paste"));
+    }
 
     #[cfg(unix)]
     #[test]

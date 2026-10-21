@@ -30,6 +30,7 @@ async fn start_server(idle_timeout: Duration) -> Harness {
         containers_file: None,
         search_dir: None,
         docker: None,
+        paste_dir: Some(paths.paste_dir.clone()),
     };
     let server = tokio::spawn(serve(listener, options));
     Harness { paths, server, _dir: dir }
@@ -360,6 +361,7 @@ async fn start_search_server(claude: &std::path::Path, data: &std::path::Path) -
         containers_file: None,
         docker: None,
         search_dir: Some(data.join("search")),
+        paste_dir: None,
     };
     let server = tokio::spawn(serve(listener, options));
     Harness { paths, server, _dir: dir }
@@ -419,4 +421,73 @@ async fn a_tilde_cwd_starts_in_the_home_folder() {
     let (pane, cwd) = c.spawn_request(spec).await;
     assert_eq!(cwd, home);
     c.output_until(pane, &home.to_string_lossy()).await;
+}
+
+/// The `paste_image` flag of the `Welcome` a fresh connection gets.
+async fn welcome_paste_image(paths: &Paths) -> bool {
+    let stream = Stream::connect(paths.socket_name().unwrap()).await.unwrap();
+    let (mut recv, mut send) = stream.split();
+    write_frame(&mut send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.unwrap();
+    match read_frame(&mut recv).await.unwrap().unwrap().parse::<DaemonMessage>().unwrap().unwrap() {
+        DaemonMessage::Welcome { paste_image, .. } => paste_image,
+        other => panic!("unexpected handshake reply {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn welcome_advertises_image_paste() {
+    let h = start_server(Duration::from_secs(10)).await;
+    assert!(welcome_paste_image(&h.paths).await);
+}
+
+#[tokio::test]
+async fn pasted_images_are_saved_beside_the_socket() {
+    let h = start_server(Duration::from_secs(10)).await;
+    let mut c = TestClient::connect(&h.paths).await;
+    let pane = c.spawn("sleep 5").await;
+    c.send(&ClientMessage::SavePasteImage { pane, format: ImageFormat::Png, data: vec![1, 2, 3] }).await;
+    loop {
+        match c.control().await {
+            DaemonMessage::PasteImageSaved { pane: p, path } => {
+                assert_eq!(p, pane);
+                let path = std::path::PathBuf::from(path);
+                assert!(path.starts_with(&h.paths.paste_dir), "{path:?}");
+                assert_eq!(std::fs::read(&path).unwrap(), [1, 2, 3]);
+                break;
+            }
+            DaemonMessage::PasteImageFailed { reason, .. } => panic!("not saved: {reason}"),
+            _ => {}
+        }
+    }
+    c.send(&ClientMessage::SavePasteImage { pane: pane + 100, format: ImageFormat::Png, data: vec![1] }).await;
+    loop {
+        match c.control().await {
+            DaemonMessage::PasteImageFailed { pane: p, reason } => {
+                assert_eq!((p, reason.as_str()), (pane + 100, "no such pane"));
+                break;
+            }
+            DaemonMessage::PasteImageSaved { .. } => panic!("saved for an unknown pane"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_paste_is_off_without_a_paste_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path(), "test");
+    std::fs::create_dir_all(&paths.runtime_dir).unwrap();
+    let listener = ListenerOptions::new().name(paths.socket_name().unwrap()).create_tokio().unwrap();
+    let options = ServerOptions {
+        base_env: std::env::vars().collect(),
+        owner_uid: None,
+        idle_timeout: Duration::from_secs(10),
+        claude_dir: None,
+        containers_file: None,
+        search_dir: None,
+        docker: None,
+        paste_dir: None,
+    };
+    let _server = tokio::spawn(serve(listener, options));
+    assert!(!welcome_paste_image(&paths).await);
 }

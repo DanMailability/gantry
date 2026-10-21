@@ -15,6 +15,48 @@ pub const PROTOCOL_VERSION: u32 = 10;
 /// Daemon-assigned identifier of a pane (one PTY session).
 pub type PaneId = u64;
 
+/// The image formats `SavePasteImage` carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    /// PNG.
+    Png,
+    /// JPEG.
+    Jpeg,
+    /// GIF.
+    Gif,
+    /// WebP.
+    Webp,
+}
+
+impl ImageFormat {
+    /// The file extension for this format, without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpeg => "jpg",
+            ImageFormat::Gif => "gif",
+            ImageFormat::Webp => "webp",
+        }
+    }
+}
+
+/// Serde adapter: bytes as one standard base64 string.
+mod base64_bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(data))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// What to run in a new pane. The daemon supplies the environment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnRequest {
@@ -277,6 +319,17 @@ pub enum ClientMessage {
         /// The folder to list.
         path: String,
     },
+    /// Save a pasted image where `pane`'s Claude can read it; answered by `PasteImageSaved` or `PasteImageFailed`.
+    /// Only sent to a daemon whose `Welcome.paste_image` is true (no protocol bump: older daemons never see it).
+    SavePasteImage {
+        /// The pane the image is pasted into.
+        pane: PaneId,
+        /// The image's format.
+        format: ImageFormat,
+        /// The image file's bytes (a base64 string on the wire).
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
     /// Git state of the repo containing `folder` (absolute, or starting with `~`); answered by `GitStatus` or
     /// `GitUnavailable`.
     GitStatus {
@@ -509,6 +562,9 @@ pub enum DaemonMessage {
         /// The daemon's git commit (`protocol::build::COMMIT`); older daemons send none.
         #[serde(default)]
         app_commit: Option<String>,
+        /// The daemon answers `SavePasteImage`; older daemons send none.
+        #[serde(default)]
+        paste_image: bool,
     },
     /// Handshake rejected; only `StopAll` is accepted afterwards.
     VersionMismatch {
@@ -617,6 +673,20 @@ pub enum DaemonMessage {
         /// Why, readable.
         reason: String,
     },
+    /// The answer to `SavePasteImage`: the image is saved at `path`, as the pane's Claude sees it.
+    PasteImageSaved {
+        /// The pane that asked.
+        pane: PaneId,
+        /// Absolute path of the saved file.
+        path: String,
+    },
+    /// `SavePasteImage` failed.
+    PasteImageFailed {
+        /// The pane that asked.
+        pane: PaneId,
+        /// Why, readable.
+        reason: String,
+    },
     /// The answer to `GitStatus`.
     GitStatus {
         /// Echoed request id.
@@ -717,6 +787,7 @@ mod tests {
                 claude_dir: Some("/home/u/.claude".into()),
                 app_version: Some("0.3.0".into()),
                 app_commit: Some("a1b2c3d".into()),
+                paste_image: true,
             },
             DaemonMessage::Welcome {
                 protocol: PROTOCOL_VERSION,
@@ -724,6 +795,7 @@ mod tests {
                 claude_dir: None,
                 app_version: None,
                 app_commit: None,
+                paste_image: false,
             },
             DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
         ] {
@@ -853,7 +925,8 @@ mod tests {
                 instance: "x".into(),
                 claude_dir: None,
                 app_version: None,
-                app_commit: None
+                app_commit: None,
+                paste_image: false
             }
         );
         let new = DaemonMessage::Welcome {
@@ -862,6 +935,7 @@ mod tests {
             claude_dir: None,
             app_version: Some("0.3.0".into()),
             app_commit: Some("a1b2c3d".into()),
+            paste_image: true,
         };
         let json = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), new);
@@ -881,7 +955,8 @@ mod tests {
                 instance: "x".into(),
                 claude_dir: None,
                 app_version: None,
-                app_commit: None
+                app_commit: None,
+                paste_image: false
             }
         );
         let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
@@ -890,6 +965,40 @@ mod tests {
         let pane = r#"{"pane":1,"program":"sh","args":[],"cwd":"/","last_focused":0}"#;
         assert!(!serde_json::from_str::<PaneInfo>(pane).unwrap().claude);
         assert_eq!(PROTOCOL_VERSION, 10);
+    }
+
+    #[test]
+    fn save_paste_image_round_trips() {
+        let msg = ClientMessage::SavePasteImage { pane: 4, format: ImageFormat::Png, data: vec![0x89, b'P', 0, 255] };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""data":"iVAA/w==""#), "{json}");
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn paste_image_answers_round_trip() {
+        for reply in [
+            DaemonMessage::PasteImageSaved { pane: 4, path: "/run/user/1000/gantry-dev/paste/a.png".into() },
+            DaemonMessage::PasteImageFailed { pane: 4, reason: "no such pane".into() },
+        ] {
+            let json = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
+        }
+    }
+
+    #[test]
+    fn welcome_without_paste_image_is_false() {
+        let old = r#"{"type":"welcome","protocol":10,"instance":"x"}"#;
+        match serde_json::from_str::<DaemonMessage>(old).unwrap() {
+            DaemonMessage::Welcome { paste_image, .. } => assert!(!paste_image),
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_format_extensions() {
+        let all = [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Gif, ImageFormat::Webp];
+        assert_eq!(all.map(ImageFormat::extension), ["png", "jpg", "gif", "webp"]);
     }
 
     #[test]

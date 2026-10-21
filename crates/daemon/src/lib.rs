@@ -8,6 +8,7 @@ pub mod git;
 pub mod launch;
 pub mod list_dir;
 pub mod outbox;
+pub mod paste_image;
 pub mod paths;
 pub mod pty;
 pub mod remote_install;

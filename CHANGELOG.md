@@ -7,6 +7,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 - **Update remote Gantry** - A connected SSH host that runs an older Gantry than this one shows `↑ <version>` in the SSH hosts list; one click uploads the new `gantryd` and restarts the host's daemon, after asking when sessions are running there.
+- **Paste images on SSH hosts and in dev containers** - Ctrl+V with an image on the clipboard now works in a Claude pane on an SSH host or in a dev container, as it does on this machine. Needs a daemon restart; SSH hosts need the new `gantryd`.
 
 ### Fixed
 - **New on an SSH host asks where** - Picking an SSH host after New Claude session or New shell now opens the launcher on that host, so you choose the folder as you do on this machine, instead of starting in the host's home folder.

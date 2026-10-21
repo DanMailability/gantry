@@ -8,6 +8,7 @@ use crate::settings_store::SettingsStore;
 use crate::theme::{RADIUS, Theme, UI_FONT, theme};
 use app_core::bidi::{RowOrder, logical_hit, to_display};
 use app_core::host_state::HostCard;
+use app_core::image_paste;
 use app_core::input::{KeyInput, encode_key};
 use app_core::layout::grid_dims;
 use app_core::mouse::{self, MouseAction, MouseMods, encode_mouse};
@@ -29,8 +30,8 @@ use gpui::{
     fill, font, outline, point, prelude::*, px, rgb, size, svg,
 };
 use gpui::{
-    ClipboardItem, ElementInputHandler, EntityInputHandler, KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, UTF16Selection,
+    ClipboardEntry, ClipboardItem, ElementInputHandler, EntityInputHandler, KeyBinding, KeyDownEvent, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, UTF16Selection,
 };
 use protocol::message::PaneId;
 
@@ -215,6 +216,8 @@ pub struct TerminalView {
     client: Option<DaemonClient>,
     pane: Option<PaneId>,
     launch: PaneLaunch,
+    /// Whether this pane lives on an SSH host (its leaf's host is not this machine).
+    remote: bool,
     state: PaneState,
     title: Option<String>,
     cell: (u16, u16),
@@ -254,13 +257,20 @@ impl Focusable for TerminalView {
 
 impl TerminalView {
     /// A pane that will show `launch` once `attach` is called.
-    pub fn new(client: Option<DaemonClient>, launch: PaneLaunch, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        client: Option<DaemonClient>,
+        launch: PaneLaunch,
+        remote: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         TerminalView {
             focus_handle: cx.focus_handle(),
             term: new_term(80, 24, cx),
             client,
             pane: None,
             launch,
+            remote,
             state: PaneState::Starting,
             title: None,
             cell: (0, 0),
@@ -341,6 +351,8 @@ impl TerminalView {
                     cx.emit(PaneEvent::TitleChanged);
                 }
             }
+            ClientEvent::PasteImageSaved { path, .. } => self.paste_text(path, cx),
+            ClientEvent::PasteImageFailed { reason, .. } => tracing::warn!("pasted image not saved: {reason}"),
             ClientEvent::Resync { cols, rows, .. } => {
                 self.term = new_term(*cols, *rows, cx);
                 // The next layout pass resizes to the window if it differs.
@@ -498,6 +510,10 @@ impl TerminalView {
             shift: keystroke.modifiers.shift,
             platform: keystroke.modifiers.platform,
         };
+        if self.paste_image(&input, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(bytes) = encode_key(&input, self.term.key_modes()) {
             tracing::debug!(key = %keystroke.key, kitty = self.term.key_modes().kitty_disambiguate, "encoded key");
             self.send_input(&bytes, cx);
@@ -513,9 +529,35 @@ impl TerminalView {
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let bytes = encode_paste(&text, self.term.bracketed_paste());
-            self.send_input(&bytes, cx);
+            self.paste_text(&text, cx);
         }
+    }
+
+    fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let bytes = encode_paste(text, self.term.bracketed_paste());
+        self.send_input(&bytes, cx);
+    }
+
+    /// Image paste (Ctrl+V with an image on the clipboard) in a Claude pane on an SSH host or in a dev container:
+    /// the image goes to the pane's daemon, which saves it where Claude can read it and answers with the path.
+    /// Returns whether the key was taken; anything else (a local pane, text on the clipboard, an older daemon) is
+    /// left to the key encoding as before.
+    fn paste_image(&mut self, key: &KeyInput, cx: &mut Context<Self>) -> bool {
+        if !image_paste::is_paste_key(&key.key, key.ctrl, key.alt, key.shift, key.platform) {
+            return false;
+        }
+        let (Some(pane), Some(client)) = (self.pane, &self.client) else { return false };
+        if !image_paste::eligible(
+            self.launch.is_claude(),
+            self.remote,
+            self.launch.container.is_some(),
+            client.paste_image(),
+        ) {
+            return false;
+        }
+        let Some((format, bytes)) = cx.read_from_clipboard().as_ref().and_then(image_for_paste) else { return false };
+        client.save_paste_image(pane, format, bytes);
+        true
     }
 
     /// Zoom every pane: `size` is the terminal font size, kept in the settings file.
@@ -1272,6 +1314,26 @@ fn paint_text(
     }
 }
 
+/// The first image on the clipboard that the daemon can save: PNG, JPEG, GIF or WebP, within the size cap. A
+/// clipboard that also offers text is a text paste, left to the program.
+fn image_for_paste(item: &ClipboardItem) -> Option<(protocol::message::ImageFormat, Vec<u8>)> {
+    use protocol::message::ImageFormat;
+    if item.text().is_some() {
+        return None;
+    }
+    item.entries().iter().find_map(|entry| {
+        let ClipboardEntry::Image(image) = entry else { return None };
+        let format = match image.format {
+            gpui::ImageFormat::Png => ImageFormat::Png,
+            gpui::ImageFormat::Jpeg => ImageFormat::Jpeg,
+            gpui::ImageFormat::Gif => ImageFormat::Gif,
+            gpui::ImageFormat::Webp => ImageFormat::Webp,
+            _ => return None,
+        };
+        image_paste::fits(image.bytes.len()).then(|| (format, image.bytes.clone()))
+    })
+}
+
 fn to_hsla(color: Rgb) -> Hsla {
     rgb(((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32).into()
 }
@@ -1296,6 +1358,22 @@ mod tests {
             key: key.into(),
             key_char: key_char.map(Into::into),
         }
+    }
+
+    fn image_item(format: gpui::ImageFormat, len: usize) -> ClipboardItem {
+        ClipboardItem { entries: vec![ClipboardEntry::Image(gpui::Image { format, bytes: vec![7; len], id: 1 })] }
+    }
+
+    #[test]
+    fn only_saveable_images_go_to_the_daemon() {
+        let (format, bytes) = image_for_paste(&image_item(gpui::ImageFormat::Png, 3)).unwrap();
+        assert_eq!((format, bytes), (protocol::message::ImageFormat::Png, vec![7; 3]));
+        assert!(image_for_paste(&ClipboardItem::new_string("text".into())).is_none());
+        assert!(image_for_paste(&image_item(gpui::ImageFormat::Bmp, 3)).is_none());
+        let mut with_text = image_item(gpui::ImageFormat::Png, 3);
+        with_text.entries.push(ClipboardEntry::String(gpui::ClipboardString::new("alt text".into())));
+        assert!(image_for_paste(&with_text).is_none());
+        assert!(image_for_paste(&image_item(gpui::ImageFormat::Png, image_paste::MAX_BYTES + 1)).is_none());
     }
 
     #[test]

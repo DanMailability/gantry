@@ -23,8 +23,10 @@ use crate::theme::theme;
 impl WorkspaceView {
     pub(super) fn add_slot(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let launch = self.workspace.leaves[&leaf].launch.clone();
-        let client = self.client(&self.workspace.leaves[&leaf].host).cloned();
-        let view = cx.new(|cx| TerminalView::new(client, launch, window, cx));
+        let host = self.workspace.leaves[&leaf].host.clone();
+        let client = self.client(&host).cloned();
+        let remote = !host.is_local();
+        let view = cx.new(|cx| TerminalView::new(client, launch, remote, window, cx));
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &PaneEvent, window, cx| {
             this.on_pane_event(leaf, *event, window, cx)
         });
