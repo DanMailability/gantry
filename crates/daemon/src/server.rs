@@ -15,13 +15,14 @@ use claude_index::index::{IndexState, SessionRecord};
 use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
 use protocol::frame::{Frame, read_frame, write_frame};
 use protocol::message::{
-    ClientMessage, ContainerChoice, DaemonMessage, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo, SpawnRequest,
-    TakeOverOutcome, claude_session,
+    ClientMessage, ContainerChoice, DaemonMessage, ImageFormat, PROTOCOL_VERSION, PaneId, PaneInfo, SessionInfo,
+    SpawnRequest, TakeOverOutcome, claude_session,
 };
 use tokio::sync::Notify;
 
 use crate::containers::{self, PANE_MARKER, Registry, marker};
 use crate::outbox::Outbox;
+use crate::paste_image;
 use crate::pty::{PtyProcess, SpawnSpec, drain_batch, spawn_output_reader};
 use crate::search::{Search, SearchEvent};
 use crate::sessions::{ContainerView, Gone, PaneSession, diff, merge_records, resolve, spawn_indexer, still_claimed};
@@ -53,6 +54,8 @@ pub struct ServerOptions {
     pub search_dir: Option<PathBuf>,
     /// The `docker` program; `None` turns dev container features off.
     pub docker: Option<String>,
+    /// Where pasted images are saved; `None` turns image paste off.
+    pub paste_dir: Option<PathBuf>,
 }
 
 struct Pane {
@@ -140,6 +143,8 @@ struct Shared {
     claude_dir: Option<PathBuf>,
     /// Conversation search; `None` = off.
     search: Option<Search>,
+    /// Where pasted images are saved; `None` = image paste off.
+    paste_dir: Option<PathBuf>,
 }
 
 impl Shared {
@@ -323,6 +328,7 @@ pub async fn serve(listener: Listener, options: ServerOptions) -> anyhow::Result
         docker: options.docker,
         claude_dir: claude_dir.clone(),
         search,
+        paste_dir: options.paste_dir,
     });
     refresh_containers(&shared);
     let probes = shared.docker.is_some().then(|| {
@@ -443,7 +449,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             claude_dir: shared.claude_dir.clone(),
             app_version: Some(protocol::build::VERSION.into()),
             app_commit: Some(protocol::build::COMMIT.into()),
-            paste_image: false,
+            paste_image: shared.paste_dir.is_some(),
         }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id
@@ -698,7 +704,7 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             search_conversations(shared, request, query, limit)
         }
         ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
-        ClientMessage::SavePasteImage { .. } => {}
+        ClientMessage::SavePasteImage { pane, format, data } => paste_image_request(shared, pane, format, data),
         ClientMessage::GitStatus { request, folder, known_head } => {
             git_status_request(shared, request, folder, known_head)
         }
@@ -851,6 +857,47 @@ fn list_dir_request(shared: &Arc<Shared>, request: u64, path: String) {
         let reply = match crate::list_dir::list_dir(&path, std::env::home_dir().as_deref()) {
             Ok((path, dirs)) => DaemonMessage::DirListing { request, path: path.to_string_lossy().into_owned(), dirs },
             Err(reason) => DaemonMessage::DirListingFailed { request, reason },
+        };
+        shared.lock().control(&reply);
+    });
+}
+
+/// Answer `SavePasteImage` off the async threads: a container pane's image goes into its container, any other
+/// pane's into the paste folder beside the socket.
+fn paste_image_request(shared: &Arc<Shared>, pane: PaneId, format: ImageFormat, data: Vec<u8>) {
+    // The container's id and user, looked up while the lock is held; `Err` = no such pane.
+    let target = {
+        let state = shared.lock();
+        state.panes.get(&pane).map(|p| {
+            p.container_id.as_ref().map(|id| {
+                let user = state
+                    .registry
+                    .containers()
+                    .iter()
+                    .find(|c| c.id.starts_with(id.as_str()) || id.starts_with(&c.id))
+                    .and_then(|c| c.remote_user.clone());
+                (id.clone(), user)
+            })
+        })
+    };
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let saved = match (target, &shared.paste_dir, &shared.docker) {
+            (None, _, _) => Err("no such pane".to_string()),
+            (_, None, _) => Err("image paste is off".to_string()),
+            (Some(Some(_)), _, None) => Err("dev containers are off".to_string()),
+            (Some(Some((id, user))), _, Some(docker)) => {
+                paste_image::save_in_container(docker, &id, user.as_deref(), format, &data)
+            }
+            (Some(None), Some(dir), _) => paste_image::save_local(dir, format, &data, std::time::SystemTime::now())
+                .map(|path| path.to_string_lossy().into_owned()),
+        };
+        let reply = match saved {
+            Ok(path) => DaemonMessage::PasteImageSaved { pane, path },
+            Err(reason) => {
+                tracing::warn!(pane, "pasted image not saved: {reason}");
+                DaemonMessage::PasteImageFailed { pane, reason }
+            }
         };
         shared.lock().control(&reply);
     });
@@ -1166,6 +1213,7 @@ mod tests {
             docker: None,
             claude_dir: None,
             search: None,
+            paste_dir: None,
         });
         let spec = || SpawnRequest {
             program: "sleep".into(),
@@ -1206,6 +1254,7 @@ mod tests {
             docker: None,
             claude_dir: None,
             search: None,
+            paste_dir: None,
         });
         let spec = SpawnRequest {
             program: "sh".into(),
@@ -1251,6 +1300,7 @@ mod tests {
             docker: None,
             claude_dir: None,
             search: None,
+            paste_dir: None,
         });
         let poisoner = shared.clone();
         let _ = std::thread::spawn(move || {

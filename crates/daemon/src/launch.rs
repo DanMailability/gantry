@@ -80,6 +80,7 @@ pub fn run_daemon(options: DaemonOptions) -> anyhow::Result<DaemonOutcome> {
                 containers_file,
                 search_dir: Some(paths.search_dir.clone()),
                 docker,
+                paste_dir: Some(paths.paste_dir.clone()),
             },
         )
         .await

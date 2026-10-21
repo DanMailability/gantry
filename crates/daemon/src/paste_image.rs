@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use protocol::message::ImageFormat;
@@ -46,6 +47,61 @@ pub fn save_local(dir: &Path, format: ImageFormat, data: &[u8], now: SystemTime)
     Ok(path)
 }
 
+/// Where pasted images go inside a dev container.
+pub const CONTAINER_DIR: &str = "/tmp/gantry-paste";
+
+/// The `docker exec` command line that saves stdin as `name` in the container's paste folder, as the container's
+/// user: it sweeps files older than a day, writes `<name>.tmp` and moves it into place.
+pub fn container_command(
+    docker: &str,
+    container_id: &str,
+    remote_user: Option<&str>,
+    name: &str,
+) -> (String, Vec<String>) {
+    let dir = CONTAINER_DIR;
+    let script = format!(
+        "umask 077 && mkdir -p {dir} && find {dir} -type f -mmin +{} -delete; cat > {dir}/{name}.tmp && mv {dir}/{name}.tmp {dir}/{name}",
+        MAX_AGE.as_secs() / 60
+    );
+    let mut args: Vec<String> = vec!["exec".into(), "-i".into()];
+    if let Some(user) = remote_user {
+        args.extend(["-u".into(), user.into()]);
+    }
+    args.extend([container_id.into(), "sh".into(), "-c".into(), script]);
+    (docker.into(), args)
+}
+
+/// Save `data` in the paste folder of the container `container_id` through `docker exec` and return the path inside
+/// the container. Errors carry the last line of docker's stderr.
+pub fn save_in_container(
+    docker: &str,
+    container_id: &str,
+    remote_user: Option<&str>,
+    format: ImageFormat,
+    data: &[u8],
+) -> Result<String, String> {
+    let name = file_name(format);
+    let (program, args) = container_command(docker, container_id, remote_user, &name);
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot run docker: {error}"))?;
+    let written = child.stdin.take().map(|mut stdin| stdin.write_all(data));
+    let output = child.wait_with_output().map_err(|error| format!("docker exec failed: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("no output");
+        return Err(format!("docker exec failed: {last}"));
+    }
+    if let Some(Err(error)) = written {
+        return Err(format!("cannot send the image to the container: {error}"));
+    }
+    Ok(format!("{CONTAINER_DIR}/{name}"))
+}
+
 /// Delete the regular files in `dir` last modified more than `MAX_AGE` before `now`.
 fn sweep(dir: &Path, now: SystemTime) {
     let Some(limit) = now.checked_sub(MAX_AGE) else { return };
@@ -64,6 +120,27 @@ mod tests {
 
     fn hours(n: u64) -> Duration {
         Duration::from_secs(n * 3600)
+    }
+
+    #[test]
+    fn container_command_runs_as_the_user() {
+        let (program, args) = container_command("docker", "abc", Some("node"), "x.png");
+        assert_eq!(program, "docker");
+        assert_eq!(&args[..5], ["exec", "-i", "-u", "node", "abc"]);
+        assert_eq!(&args[5..7], ["sh", "-c"]);
+        assert_eq!(
+            args[7],
+            "umask 077 && mkdir -p /tmp/gantry-paste && find /tmp/gantry-paste -type f -mmin +1440 -delete; \
+             cat > /tmp/gantry-paste/x.png.tmp && mv /tmp/gantry-paste/x.png.tmp /tmp/gantry-paste/x.png"
+        );
+        assert_eq!(args.len(), 8);
+    }
+
+    #[test]
+    fn container_command_without_a_user() {
+        let (_, args) = container_command("docker", "abc", None, "x.png");
+        assert_eq!(&args[..3], ["exec", "-i", "abc"]);
+        assert!(!args.contains(&"-u".to_string()));
     }
 
     #[test]
