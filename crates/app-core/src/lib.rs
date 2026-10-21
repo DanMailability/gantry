@@ -9,6 +9,7 @@ pub mod git_view;
 pub mod host_install;
 pub mod host_state;
 pub mod host_update;
+pub mod image_paste;
 pub mod input;
 pub mod launcher;
 pub mod layout;
