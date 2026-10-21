@@ -11,7 +11,7 @@ use daemon::remote_install::{self, Timeouts};
 use daemon::ssh::{
     Attempt, AttemptHandle, HANDSHAKE_TIMEOUT, Share, SshHostSpec, connect as connect_with, ssh_args_for,
 };
-use protocol::message::SpawnRequest;
+use protocol::message::{ImageFormat, SpawnRequest};
 
 const GANTRY: &str = env!("CARGO_BIN_EXE_gantry");
 
@@ -167,6 +167,36 @@ fn a_remote_daemon_lists_folders() {
     let (path, dirs) = listing.unwrap();
     assert_eq!((path, dirs.len(), dirs[0].name.as_str()), (tree, 1, "alpha"));
     assert!(failure.unwrap().contains("absolute"));
+    stop_daemon(&connection);
+}
+
+#[test]
+fn a_remote_daemon_saves_pasted_images() {
+    let env = setup("sshbridgepaste", Fake::default());
+    let connection = connect(env.fake.to_str().unwrap(), &spec(), Attempt::Background).unwrap();
+    assert!(connection.client.paste_image());
+    connection.client.spawn(1, sh("sleep 30"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let pane = loop {
+        assert!(Instant::now() < deadline, "timed out waiting for the pane");
+        if let Ok(ClientEvent::Spawned { pane, .. }) = connection.events.recv_blocking() {
+            break pane;
+        }
+    };
+    let bytes = vec![0x89, b'P', b'N', b'G', 0, 255];
+    connection.client.save_paste_image(pane, ImageFormat::Png, bytes.clone());
+    let path = loop {
+        assert!(Instant::now() < deadline, "timed out waiting for the saved image");
+        match connection.events.recv_blocking() {
+            Ok(ClientEvent::PasteImageSaved { pane: p, path }) => {
+                assert_eq!(p, pane);
+                break path;
+            }
+            Ok(ClientEvent::PasteImageFailed { reason, .. }) => panic!("not saved: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
     stop_daemon(&connection);
 }
 

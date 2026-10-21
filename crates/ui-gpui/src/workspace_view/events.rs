@@ -26,7 +26,10 @@ impl WorkspaceView {
     ) {
         for event in events {
             match &event {
-                ClientEvent::Output { pane, .. } | ClientEvent::Resync { pane, .. } => {
+                ClientEvent::Output { pane, .. }
+                | ClientEvent::Resync { pane, .. }
+                | ClientEvent::PasteImageSaved { pane, .. }
+                | ClientEvent::PasteImageFailed { pane, .. } => {
                     if let Some(slot) = self
                         .workspace
                         .leaf_for_pane(&PaneKey::new(host.clone(), *pane))
