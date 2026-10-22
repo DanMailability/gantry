@@ -6,6 +6,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- **Welcome screen** - With no tabs open, Gantry shows what a session is and your recent folders from every host; one click starts Claude in one, or continue a past conversation, or open a terminal.
 - **Update remote Gantry** - A connected SSH host that runs an older Gantry than this one shows `↑ <version>` in the SSH hosts list; one click uploads the new `gantryd` and restarts the host's daemon, after asking when sessions are running there.
 
 ### Changed
