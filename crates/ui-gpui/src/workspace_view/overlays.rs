@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use app_core::host_state::HostState;
-use app_core::launcher::{self, OpenFolder, OpenPane};
+use app_core::launcher::{self, OpenFolder, OpenPane, RecentFolder};
 use app_core::recents;
 use app_core::release::CheckStatus;
 use app_core::search_merge::{self};
@@ -141,16 +141,39 @@ impl WorkspaceView {
         std::iter::once(local).chain(hosts).collect()
     }
 
+    /// The recent folders of this machine and every listed SSH host, for the launcher and the welcome screen.
+    pub(super) fn recent_folders(&self, cx: &Context<Self>) -> Vec<RecentFolder> {
+        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let listed: Vec<HostId> = self.ssh_hosts.iter().map(|entry| HostId::named(&entry.name)).collect();
+        launcher::recent_folders(&refs, &self.workspace.host_folders, &listed)
+    }
+
+    /// Start a session in `dir` of `host` in a new tab: through the lazy connect on an SSH host, with the config dir
+    /// pick on this machine.
+    pub(super) fn open_folder(
+        &mut self,
+        host: HostId,
+        dir: PathBuf,
+        claude: bool,
+        dir_pick: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if host.is_local() {
+            self.open_launcher_pick(claude, dir, dir_pick, cx);
+        } else {
+            self.open_on_host(&host, claude, dir, window, cx);
+        }
+    }
+
     /// Open the launcher; `claude_first`: Enter starts Claude and Alt+Enter a terminal, false swaps them.
     pub(super) fn show_launcher(&mut self, claude_first: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.setup.is_some() || self.ssh_wizard.is_some() {
             return;
         }
         self.recents = None;
-        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let listed: Vec<HostId> = self.ssh_hosts.iter().map(|entry| HostId::named(&entry.name)).collect();
-        let recent = launcher::recent_folders(&refs, &self.workspace.host_folders, &listed);
+        let recent = self.recent_folders(cx);
         let open = self.open_folders(cx);
         let hosts = self.launcher_hosts();
         let view = cx.new(|cx| LauncherView::new(open, recent, claude_first, hosts, cx));
@@ -319,10 +342,9 @@ impl WorkspaceView {
         }
         self.launcher = None;
         match event {
-            LauncherEvent::Open { host, dir, claude, .. } if !host.is_local() => {
-                self.open_on_host(&host, claude, dir, window, cx)
+            LauncherEvent::Open { host, dir, claude, dir_pick } => {
+                self.open_folder(host, dir, claude, dir_pick, window, cx)
             }
-            LauncherEvent::Open { dir, claude, dir_pick, .. } => self.open_launcher_pick(claude, dir, dir_pick, cx),
             LauncherEvent::ListDir { .. } => {}
             LauncherEvent::Browse { claude } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions {
