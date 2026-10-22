@@ -13,7 +13,7 @@ const RESTORE: [(bool, &str, &str); 2] = [
     (true, "Restore", "Reattach running sessions; finished ones offer Continue."),
     (
         false,
-        "One new tab",
+        "Running only",
         "Running sessions stay as tabs; finished ones are not reopened. The saved layout is kept, so you can switch back.",
     ),
 ];
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn the_restore_copy_says_what_the_spec_says() {
-        assert_eq!(RESTORE[1].1, "One new tab");
+        assert_eq!(RESTORE[1].1, "Running only");
         assert!(RESTORE[1].2.starts_with("Running sessions stay as tabs; finished ones are not reopened."));
     }
 

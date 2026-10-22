@@ -128,20 +128,19 @@ impl WorkspaceView {
     }
 
     /// Open a new Claude or shell pane — as a new tab, or splitting the focused pane along `axis` —
-    /// in the focused pane's current directory.
+    /// in the focused pane's current directory, on its host.
     pub(super) fn open(&mut self, claude: bool, axis: Option<Axis>, window: &mut Window, cx: &mut Context<Self>) {
         if axis.is_some() && (self.settings_active() || !self.workspace.can_split()) {
             return;
         }
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
-        let source = source.filter(|leaf| axis.is_some() || leaf.host.is_local());
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.key());
         let host = source.map(|leaf| leaf.host.clone()).unwrap_or_default();
         if host.is_local() {
             self.open_new(claude, cwd, axis, cwd_from, host, None);
         } else {
-            // A split of a remote pane: no container lookup and no local Claude dir or shell settings.
+            // A new tab or split of a remote pane: no container lookup and no local Claude dir or shell settings.
             let launch =
                 if claude { PaneLaunch::claude(cwd) } else { PaneLaunch::shell(cwd, &ShellSettings::default()) };
             self.open_launch(launch, axis, cwd_from, host, window, cx);

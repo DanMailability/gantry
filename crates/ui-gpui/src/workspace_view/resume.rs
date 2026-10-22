@@ -60,8 +60,23 @@ impl WorkspaceView {
                 let takeable = session.as_deref().and_then(|id| sessions.get(&host, id)).is_some_and(|info| {
                     matches!(info.state, SessionState::External { pid: Some(_) }) && info.cwd_exists
                 });
-                if let (true, Some(session)) = (takeable, session) {
-                    self.confirm_take_over(host, session, TakeOverTarget::Leaf(leaf), window, cx);
+                match (takeable, session) {
+                    (true, Some(session)) => {
+                        self.confirm_take_over(host, session, TakeOverTarget::Leaf(leaf), window, cx)
+                    }
+                    _ => {
+                        let answer = window.prompt(
+                            PromptLevel::Info,
+                            "Can't continue this session",
+                            Some("This session is running outside Gantry and can't be taken over from here."),
+                            &["OK"],
+                            cx,
+                        );
+                        cx.spawn(async move |_, _| {
+                            let _ = answer.await;
+                        })
+                        .detach();
+                    }
                 }
             }
         }

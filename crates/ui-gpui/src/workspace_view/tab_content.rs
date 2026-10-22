@@ -188,7 +188,7 @@ impl WorkspaceView {
                         .text_color(rgb(theme.tokens.muted))
                         .cursor_pointer()
                         .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
-                        .child("New shell")
+                        .child("New terminal")
                         .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
                             this.new_pressed(false, event.position(), window, cx)
                         })),

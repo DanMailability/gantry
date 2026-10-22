@@ -1375,6 +1375,14 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                             .child(">_")
+                            .tooltip(hover_card::tooltip(HoverCard {
+                                title: "New terminal".into(),
+                                status: None,
+                                dir: None,
+                                container: false,
+                                host: None,
+                                folder: None,
+                            }))
                             .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
                                 cx.emit(SidebarEvent::New { claude: false, position: event.position() })
                             })),
