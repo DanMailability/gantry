@@ -170,13 +170,14 @@ Default shortcuts. All of them can be changed in Settings.
 
 | Action | Linux and Windows | macOS |
 | --- | --- | --- |
-| New Claude tab | `Ctrl+Shift+T` | `Cmd+T` |
-| Launcher (open a folder) | `Ctrl+Shift+O` | `Cmd+O` |
+| New Claude session (same folder) | `Ctrl+Shift+T` | `Cmd+T` |
+| New Claude session… (launcher) | `Ctrl+Shift+O` | `Cmd+O` |
 | Find session | `Ctrl+Shift+F` | `Cmd+F` |
 | Recent sessions | `Ctrl+Shift+R` | `Cmd+R` |
 | Split right (Claude) | `Ctrl+Shift+D` | `Cmd+D` |
 | Split down (Claude) | `Ctrl+Shift+E` | `Cmd+E` |
-| Split with a shell | add `Alt` | add `Option` |
+| Split with a terminal | add `Alt` | add `Option` |
+| New terminal (same folder) | `Ctrl+Shift+Alt+T` | `Cmd+Option+T` |
 | Move focus between panes | `Ctrl+Shift+Arrows` | `Cmd+Arrows` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` | `Cmd+Shift+]` / `Cmd+Shift+[` |
 | Close pane | `Ctrl+Shift+W` | `Cmd+W` |
