@@ -735,7 +735,7 @@ fn entry_row(entry: &Entry<'_>, input: &ActiveInput<'_>) -> Row {
                 (true, true) => (Tone::Closed, "Exited · tab open"),
                 (true, false) => (Tone::Idle, "Idle"),
                 (false, true) => (Tone::Closed, "Exited"),
-                (false, false) => (Tone::Idle, "shell"),
+                (false, false) => (Tone::Idle, "Terminal"),
             };
             Row::new(RowKind::Pane { entry: (*pane).clone(), tone, note: note.into() })
         }
@@ -1037,7 +1037,7 @@ mod tests {
             vec![
                 "▾ app",
                 "  gone (Exited · tab open)",
-                "  leaf 3 (shell)",
+                "  leaf 3 (Terminal)",
                 "  leaf 2 (Idle)",
                 "  m (Working · 1m)",
                 "▾ web",
@@ -1178,9 +1178,9 @@ mod tests {
     fn a_collapsed_project_hides_its_rows_until_filtering() {
         let mut fixture = Fixture::of(vec![], vec![shell_pane(1, "/r/p"), shell_pane(2, "/r/q")]);
         fixture.toggled.insert("/r/p".into());
-        assert_eq!(fixture.outline(), vec!["▸ p", "▾ q", "  leaf 2 (shell)"]);
+        assert_eq!(fixture.outline(), vec!["▸ p", "▾ q", "  leaf 2 (Terminal)"]);
         fixture.filter = "pane 1".into();
-        assert_eq!(fixture.outline(), vec!["▾ p", "  leaf 1 (shell)"]);
+        assert_eq!(fixture.outline(), vec!["▾ p", "  leaf 1 (Terminal)"]);
     }
 
     #[test]

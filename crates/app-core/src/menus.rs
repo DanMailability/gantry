@@ -457,6 +457,10 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
                     if session.container.is_none() {
                         items.extend(claude_with_on(&session.cwd, context, &session.host));
                     }
+                    items.push(entry(
+                        "New terminal here",
+                        MenuAction::NewHere { dir: session.cwd.clone(), claude: false, host: session.host.clone() },
+                    ));
                     items.push(MenuItem::Separator);
                 }
             }
@@ -475,13 +479,19 @@ pub fn row_menu(row: &Row, alone: &dyn Fn(NodeId) -> bool, context: &MenuContext
             match (pane.claude, pane.ended) {
                 (true, true) => items.push(accented("Continue", MenuAction::Continue(pane.leaf))),
                 (claude, _) => {
-                    let label = if claude { "New Claude here" } else { "New shell here" };
+                    let label = if claude { "New Claude here" } else { "New terminal here" };
                     items.push(entry(
                         label,
                         MenuAction::NewHere { dir: pane.cwd.clone(), claude, host: pane.host.clone() },
                     ));
                     if claude && pane.container.is_none() {
                         items.extend(claude_with_on(&pane.cwd, context, &pane.host));
+                    }
+                    if claude {
+                        items.push(entry(
+                            "New terminal here",
+                            MenuAction::NewHere { dir: pane.cwd.clone(), claude: false, host: pane.host.clone() },
+                        ));
                     }
                     if !claude {
                         items.push(entry("Rename…", MenuAction::RenamePane(pane.leaf)));
@@ -513,7 +523,7 @@ pub fn project_menu(path: &Path, container: Option<&ContainerPlace>, context: &M
     if container.is_none() {
         items.extend(claude_with_on(path, context, &host));
     }
-    items.push(entry("New shell here", new_here(false)));
+    items.push(entry("New terminal here", new_here(false)));
     items.push(if context.favorite {
         entry("Unpin", MenuAction::UnpinFavorite(path.to_path_buf()))
     } else {
@@ -786,6 +796,7 @@ mod tests {
             labels(&items),
             [
                 "New Claude here",
+                "New terminal here",
                 "│",
                 "Mark as unread",
                 "Copy session id",
@@ -796,7 +807,7 @@ mod tests {
                 "Close tab"
             ]
         );
-        let MenuItem::Entry(copy) = &items[3] else { panic!() };
+        let MenuItem::Entry(copy) = &items[4] else { panic!() };
         assert_eq!(copy.action, MenuAction::Copy("s1".into()));
     }
 
@@ -856,6 +867,7 @@ mod tests {
             labels(&row_menu(&pane_row(true, false), ALONE, &MenuContext::default()).unwrap()),
             [
                 "New Claude here",
+                "New terminal here",
                 "│",
                 "Copy session id",
                 "Copy folder path",
@@ -868,10 +880,32 @@ mod tests {
         let shell = row_menu(&pane_row(false, false), ALONE, &MenuContext::default()).unwrap();
         assert_eq!(
             labels(&shell),
-            ["New shell here", "Rename…", "│", "Copy folder path", "Open folder", "Open in VS Code", "│", "Close tab"]
+            [
+                "New terminal here",
+                "Rename…",
+                "│",
+                "Copy folder path",
+                "Open folder",
+                "Open in VS Code",
+                "│",
+                "Close tab"
+            ]
         );
         let MenuItem::Entry(new) = &shell[0] else { panic!() };
         assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false, host: HostId::local() });
+    }
+
+    #[test]
+    fn a_session_row_offers_a_terminal_too() {
+        let live = session_row(SessionState::Managed { pane: 1 }, Tone::Idle, Some(4));
+        let items = row_menu(&live, ALONE, &MenuContext::default()).unwrap();
+        assert_eq!(labels(&items)[..3], ["New Claude here", "New terminal here", "│"]);
+        let MenuItem::Entry(new) = &items[1] else { panic!() };
+        assert_eq!(new.action, MenuAction::NewHere { dir: "/r/app".into(), claude: false, host: HostId::local() });
+        let items = row_menu(&live, ALONE, &two_dirs(None)).unwrap();
+        assert_eq!(labels(&items)[..4], ["New Claude here", "New Claude here with ▸", "New terminal here", "│"]);
+        let pane = row_menu(&pane_row(true, false), ALONE, &two_dirs(None)).unwrap();
+        assert_eq!(labels(&pane)[..4], ["New Claude here", "New Claude here with ▸", "New terminal here", "│"]);
     }
 
     #[test]
@@ -881,7 +915,7 @@ mod tests {
             labels(&items),
             [
                 "New Claude here",
-                "New shell here",
+                "New terminal here",
                 "Pin as favorite",
                 "Recent sessions here",
                 "│",
@@ -958,7 +992,7 @@ mod tests {
         let one = MenuContext { dirs: vec![("Default".into(), true, false)], favorite: false, project_color: None };
         assert!(submenu_labels(&row_menu(&live, ALONE, &one).unwrap()).is_empty());
         let items = row_menu(&live, ALONE, &two_dirs(None)).unwrap();
-        assert_eq!(labels(&items)[..3], ["New Claude here", "New Claude here with ▸", "│"]);
+        assert_eq!(labels(&items)[..3], ["New Claude here", "New Claude here with ▸", "New terminal here"]);
         assert_eq!(submenu_labels(&items), ["Personal (default)", "Work"]);
         // Closed rows offer Continue instead of New Claude here, so no choice either.
         let closed = session_row(SessionState::Closed, Tone::Closed, Some(4));
@@ -1066,7 +1100,7 @@ mod tests {
     fn a_project_menu_pins_and_unpins() {
         let pinned = MenuContext { favorite: true, ..MenuContext::default() };
         let items = project_menu(Path::new("/r/app"), None, &pinned);
-        assert_eq!(labels(&items)[..4], ["New Claude here", "New shell here", "Unpin", "Recent sessions here"]);
+        assert_eq!(labels(&items)[..4], ["New Claude here", "New terminal here", "Unpin", "Recent sessions here"]);
         let MenuItem::Entry(unpin) = &items[2] else { panic!() };
         assert_eq!(unpin.action, MenuAction::UnpinFavorite("/r/app".into()));
         let MenuItem::Entry(pin) = &project_menu(Path::new("/r/app"), None, &MenuContext::default())[2] else {
@@ -1129,7 +1163,7 @@ mod tests {
             labels(&items),
             [
                 "New Claude here",
-                "New shell here",
+                "New terminal here",
                 "Pin as favorite",
                 "Recent sessions here",
                 "│",

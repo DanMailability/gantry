@@ -58,22 +58,22 @@ const fn action(
 
 /// Every action, in page order.
 pub const ACTIONS: &[Action] = &[
-    action("newClaudeTab", Group::Tabs, "New Claude tab", "ctrl-shift-t", "cmd-t"),
-    action("newShellTab", Group::Tabs, "New shell tab", "ctrl-shift-alt-t", "cmd-alt-t"),
+    action("newClaudeTab", Group::Tabs, "New Claude session (same folder)", "ctrl-shift-t", "cmd-t"),
+    action("newShellTab", Group::Tabs, "New terminal (same folder)", "ctrl-shift-alt-t", "cmd-alt-t"),
     action("nextTab", Group::Tabs, "Next tab", "ctrl-tab", "cmd-shift-]"),
     action("previousTab", Group::Tabs, "Previous tab", "ctrl-shift-tab", "cmd-shift-["),
     action("historyBack", Group::Tabs, "Previous tab in history", "ctrl-shift-pageup", "cmd-["),
     action("historyForward", Group::Tabs, "Next tab in history", "ctrl-shift-pagedown", "cmd-]"),
     action("splitRightClaude", Group::Panes, "Split right (Claude)", "ctrl-shift-d", "cmd-d"),
-    action("splitRightShell", Group::Panes, "Split right (shell)", "ctrl-shift-alt-d", "cmd-alt-d"),
+    action("splitRightShell", Group::Panes, "Split right (terminal)", "ctrl-shift-alt-d", "cmd-alt-d"),
     action("splitDownClaude", Group::Panes, "Split down (Claude)", "ctrl-shift-e", "cmd-e"),
-    action("splitDownShell", Group::Panes, "Split down (shell)", "ctrl-shift-alt-e", "cmd-alt-e"),
+    action("splitDownShell", Group::Panes, "Split down (terminal)", "ctrl-shift-alt-e", "cmd-alt-e"),
     action("closePane", Group::Panes, "Close pane", "ctrl-shift-w", "cmd-w"),
     action("focusLeft", Group::Focus, "Focus left", "ctrl-shift-left", "cmd-left"),
     action("focusRight", Group::Focus, "Focus right", "ctrl-shift-right", "cmd-right"),
     action("focusUp", Group::Focus, "Focus up", "ctrl-shift-up", "cmd-up"),
     action("focusDown", Group::Focus, "Focus down", "ctrl-shift-down", "cmd-down"),
-    action("openLauncher", Group::Overlays, "Open folder (launcher)", "ctrl-shift-o", "cmd-o"),
+    action("openLauncher", Group::Overlays, "New Claude session…", "ctrl-shift-o", "cmd-o"),
     action("findSession", Group::Overlays, "Find session", "ctrl-shift-f", "cmd-f"),
     action("openRecents", Group::Overlays, "Recent sessions", "ctrl-shift-r", "cmd-r"),
     action("toggleSidebar", Group::Overlays, "Toggle sidebar", "ctrl-shift-b", "cmd-b"),
@@ -335,6 +335,16 @@ pub fn label(keystroke: Option<&str>, platform: Platform) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn labels_say_terminal_and_session() {
+        let label = |id: &str| ACTIONS.iter().find(|a| a.id == id).unwrap().label;
+        assert_eq!(label("newClaudeTab"), "New Claude session (same folder)");
+        assert_eq!(label("newShellTab"), "New terminal (same folder)");
+        assert_eq!(label("splitRightShell"), "Split right (terminal)");
+        assert_eq!(label("splitDownShell"), "Split down (terminal)");
+        assert_eq!(label("openLauncher"), "New Claude session…");
+    }
+
     use super::*;
 
     fn none() -> BTreeMap<String, Option<String>> {
