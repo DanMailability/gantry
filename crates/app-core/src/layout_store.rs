@@ -191,4 +191,21 @@ mod tests {
         assert_eq!(text.matches("\"host\"").count(), 1, "only the remote leaf names its host: {text}");
         assert_eq!(load(&path).unwrap(), Some(workspace));
     }
+
+    #[test]
+    fn a_layout_without_host_folders_loads_and_an_empty_map_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.json");
+        let mut workspace = sample();
+        save(&path, &workspace).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("host_folders"), "{text}");
+        assert_eq!(load(&path).unwrap().unwrap().host_folders, Default::default());
+        let devbox = HostId::named("devbox");
+        workspace
+            .host_folders
+            .insert(devbox.clone(), vec![crate::launcher::HostFolder { path: "/srv".into(), last_active_ms: 4 }]);
+        save(&path, &workspace).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(workspace));
+    }
 }
