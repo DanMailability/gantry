@@ -336,7 +336,7 @@ impl PaneLaunch {
     pub fn label(&self) -> String {
         let name = |path: &Path| path.file_name().map(|n| n.to_string_lossy().into_owned());
         let program = name(Path::new(&self.program))
-            .unwrap_or_else(|| if self.program.is_empty() { "shell".into() } else { self.program.clone() });
+            .unwrap_or_else(|| if self.program.is_empty() { "terminal".into() } else { self.program.clone() });
         match name(&self.cwd) {
             Some(dir) => format!("{program} · {dir}"),
             None => program,
@@ -2731,7 +2731,7 @@ mod tests {
         );
         let default = PaneLaunch::shell("/r".into(), &ShellSettings::default());
         assert_eq!(default.program, "");
-        assert_eq!(default.label(), "shell · r");
+        assert_eq!(default.label(), "terminal · r");
     }
 
     #[test]
