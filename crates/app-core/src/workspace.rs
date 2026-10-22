@@ -259,6 +259,33 @@ impl PaneLaunch {
         }
     }
 
+    /// A launch typed on the command line (`gantry -- claude …`): when the program is Claude, it becomes a Claude
+    /// session like one started in Gantry. The program and the typed arguments stay as typed; a `--session-id` is
+    /// added unless the arguments already pick or continue a session, and the config dir is the folder's `dir`.
+    pub fn as_command_line(self, dir: &ResolvedDir, daemon_dir: Option<&Path>) -> PaneLaunch {
+        if Path::new(&self.program).file_stem().is_none_or(|stem| stem != CLAUDE) {
+            return self;
+        }
+        let mut args = self.args;
+        let has_session = claude_session(true, &self.program, &args).is_some()
+            || args.iter().any(|arg| matches!(arg.as_str(), "--continue" | "-c"));
+        if !has_session {
+            args.extend(["--session-id".into(), uuid::Uuid::new_v4().to_string()]);
+        }
+        let own = daemon_dir == Some(dir.path.as_path());
+        PaneLaunch {
+            args,
+            claude: true,
+            claude_dir: (!own).then(|| dir.path.clone()),
+            env: if own {
+                Vec::new()
+            } else {
+                vec![("CLAUDE_CONFIG_DIR".into(), dir.path.to_string_lossy().into_owned())]
+            },
+            ..self
+        }
+    }
+
     /// A shell in `cwd`; an empty `shell.program` is the daemon's default shell.
     pub fn shell(cwd: PathBuf, shell: &ShellSettings) -> PaneLaunch {
         PaneLaunch {
@@ -1154,6 +1181,71 @@ pub fn restore(
 
 #[cfg(test)]
 mod tests {
+    fn typed(program: &str, args: &[&str]) -> PaneLaunch {
+        PaneLaunch {
+            program: program.into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            cwd: "/r".into(),
+            container: None,
+            claude: false,
+            claude_dir: None,
+            env: Vec::new(),
+        }
+    }
+
+    fn dir_at(path: &str) -> ResolvedDir {
+        ResolvedDir {
+            name: "Work".into(),
+            path: path.into(),
+            command: "claude-alt".into(),
+            args: vec!["--x".into()],
+            color: None,
+        }
+    }
+
+    #[test]
+    fn a_command_line_claude_gets_a_session_id() {
+        let launch = typed("claude", &["--model", "x"]).as_command_line(&dir_at("/cfg"), Some(Path::new("/cfg")));
+        assert!(launch.claude);
+        assert_eq!(launch.program, "claude");
+        assert_eq!(launch.args[..3], ["--model", "x", "--session-id"]);
+        assert_eq!(launch.args.len(), 4);
+        assert!(uuid::Uuid::parse_str(&launch.args[3]).is_ok());
+    }
+
+    #[test]
+    fn a_command_line_claude_keeps_its_own_session_flag() {
+        for args in [&["--resume", "abc"][..], &["-r", "abc"], &["--continue"], &["-c"], &["--session-id", "s1"]] {
+            let launch = typed("claude", args).as_command_line(&dir_at("/cfg"), None);
+            assert!(launch.claude);
+            assert_eq!(launch.args, args);
+        }
+    }
+
+    #[test]
+    fn a_command_line_claude_by_path_counts() {
+        let by_path = typed("/usr/bin/claude", &[]).as_command_line(&dir_at("/cfg"), None);
+        assert!(by_path.claude);
+        assert_eq!(by_path.program, "/usr/bin/claude");
+        let other = typed("claude-work", &["a"]);
+        assert_eq!(other.clone().as_command_line(&dir_at("/cfg"), None), other);
+        let shell = typed("bash", &[]);
+        assert_eq!(shell.clone().as_command_line(&dir_at("/cfg"), None), shell);
+    }
+
+    #[test]
+    fn a_command_line_claude_runs_as_typed_under_the_folders_dir() {
+        let dir = dir_at("/cfg/work");
+        let other = typed("claude", &[]).as_command_line(&dir, Some(Path::new("/cfg/main")));
+        assert_eq!(other.program, "claude");
+        assert!(!other.args.contains(&"--x".to_string()));
+        assert_eq!(other.claude_dir, Some("/cfg/work".into()));
+        assert_eq!(other.env, [("CLAUDE_CONFIG_DIR".to_string(), "/cfg/work".to_string())]);
+        let own = typed("claude", &[]).as_command_line(&dir, Some(Path::new("/cfg/work")));
+        assert_eq!(own.claude_dir, None);
+        assert!(own.env.is_empty());
+    }
+
     use super::*;
     use crate::settings::ClaudeDir;
 

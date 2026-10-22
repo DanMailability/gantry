@@ -31,7 +31,7 @@ use std::path::PathBuf;
 
 use app_core::settings::WindowSettings;
 use app_core::split_tree::NodeId;
-use app_core::workspace::{HostLive, Launch, restore};
+use app_core::workspace::{ClaudeDirs, HostLive, Launch, restore};
 use app_core::{layout_store, window_state};
 use daemon::client::{Connection, DaemonClient, StartError, restart_daemon};
 use daemon::launch::spawn_detached_daemon;
@@ -193,6 +193,19 @@ fn workspace(
         .collect();
     let keep = if resume_sessions { was_live.clone() } else { HashSet::new() };
     let extra = extra_hosts();
+    let launch = {
+        let settings = cx.global::<SettingsStore>().settings();
+        let dirs =
+            ClaudeDirs::from_settings(settings, connection.claude_dir.as_deref(), std::env::home_dir().as_deref());
+        Launch {
+            explicit: launch.explicit.clone().map(|explicit| {
+                let dir = dirs.for_folder(&explicit.cwd, None, &settings.folder_claude_dirs).clone();
+                explicit.as_command_line(&dir, connection.claude_dir.as_deref())
+            }),
+            default: launch.default.clone(),
+        }
+    };
+    let launch = &launch;
     let mut restored = {
         let mut hosts =
             vec![HostLive { host: HostId::local(), instance: &connection.instance, panes: &connection.panes }];
