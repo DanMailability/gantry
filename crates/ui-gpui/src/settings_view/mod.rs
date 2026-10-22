@@ -83,7 +83,7 @@ impl Section {
             Section::Terminal => "Font, scrollback and shell for terminal panes.",
             Section::Alerts => "For sessions running in Gantry's panes.",
             Section::Shortcuts => "Click a shortcut, then press the new keys. Esc cancels, Backspace unbinds.",
-            Section::Sessions => "How new Claude and shell panes start.",
+            Section::Sessions => "How new Claude and terminal panes start.",
             Section::SshHosts => "Remote machines that run Gantry over ssh.",
             Section::Window => "How Gantry starts.",
         }

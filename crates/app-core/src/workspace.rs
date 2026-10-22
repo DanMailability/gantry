@@ -5,10 +5,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use protocol::host::{HostId, PaneKey};
-use protocol::message::{PaneId, PaneInfo, SessionState, SessionStatus, SpawnRequest, claude_session};
+use protocol::message::{PaneId, PaneInfo, SessionInfo, SessionState, SessionStatus, SpawnRequest, claude_session};
 use serde::{Deserialize, Serialize};
 
 use crate::attention::most_urgent;
+use crate::launcher::HostFolder;
 use crate::sessions::SessionStore;
 use crate::settings::{Settings, ShellSettings, expand_home};
 use crate::split_tree::{Axis, Direction, DropZone, Node, NodeId};
@@ -259,6 +260,51 @@ impl PaneLaunch {
         }
     }
 
+    /// A launch typed on the command line (`gantry -- claude …`): when the program is Claude, it becomes a Claude
+    /// session like one started in Gantry. The program and the typed arguments stay as typed; a `--session-id` is
+    /// added unless the arguments already pick or continue a session, and the config dir is the folder's `dir`.
+    pub fn as_command_line(self, dir: &ResolvedDir, daemon_dir: Option<&Path>) -> PaneLaunch {
+        const NOT_SESSIONS: [&str; 12] = [
+            "mcp",
+            "config",
+            "update",
+            "doctor",
+            "install",
+            "plugin",
+            "setup-token",
+            "migrate-installer",
+            "-v",
+            "--version",
+            "-h",
+            "--help",
+        ];
+        let is_claude = Path::new(&self.program).file_stem().is_some_and(|stem| stem == CLAUDE);
+        if !is_claude || self.args.first().is_some_and(|first| NOT_SESSIONS.contains(&first.as_str())) {
+            return self;
+        }
+        let mut args = self.args;
+        let has_session = args.iter().any(|arg| {
+            matches!(arg.as_str(), "--resume" | "-r" | "--session-id" | "--continue" | "-c")
+                || arg.starts_with("--resume=")
+                || arg.starts_with("--session-id=")
+        });
+        if !has_session {
+            args.extend(["--session-id".into(), uuid::Uuid::new_v4().to_string()]);
+        }
+        let own = daemon_dir == Some(dir.path.as_path());
+        PaneLaunch {
+            args,
+            claude: true,
+            claude_dir: (!own).then(|| dir.path.clone()),
+            env: if own {
+                Vec::new()
+            } else {
+                vec![("CLAUDE_CONFIG_DIR".into(), dir.path.to_string_lossy().into_owned())]
+            },
+            ..self
+        }
+    }
+
     /// A shell in `cwd`; an empty `shell.program` is the daemon's default shell.
     pub fn shell(cwd: PathBuf, shell: &ShellSettings) -> PaneLaunch {
         PaneLaunch {
@@ -291,7 +337,7 @@ impl PaneLaunch {
     pub fn label(&self) -> String {
         let name = |path: &Path| path.file_name().map(|n| n.to_string_lossy().into_owned());
         let program = name(Path::new(&self.program))
-            .unwrap_or_else(|| if self.program.is_empty() { "shell".into() } else { self.program.clone() });
+            .unwrap_or_else(|| if self.program.is_empty() { "terminal".into() } else { self.program.clone() });
         match name(&self.cwd) {
             Some(dir) => format!("{program} · {dir}"),
             None => program,
@@ -498,7 +544,10 @@ pub struct Workspace {
     /// Sidebar visibility and width.
     #[serde(default)]
     pub sidebar: SidebarState,
-    /// Finished tabs and leaves that "Start with one new tab" dropped at startup; written back into every saved copy
+    /// Each SSH host's most recently used folders, kept while the host is away so the launcher can still list them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_folders: BTreeMap<HostId, Vec<HostFolder>>,
+    /// Finished tabs and leaves that "Running only" dropped at startup; written back into every saved copy
     /// so that switching to "Restore tabs and panes" brings them back.
     #[serde(skip)]
     dropped: Vec<(Tab, Vec<(NodeId, Leaf)>)>,
@@ -507,6 +556,9 @@ pub struct Workspace {
     history: TabHistory,
     next_id: NodeId,
 }
+
+/// Folders remembered per SSH host (`Workspace::host_folders`).
+pub const HOST_FOLDERS_KEPT: usize = 20;
 
 /// Most tabs `TabHistory` remembers.
 const HISTORY_LIMIT: usize = 50;
@@ -569,6 +621,11 @@ impl Workspace {
         if let Some(instance) = self.instances.remove(from) {
             self.instances.insert(to.clone(), instance);
         }
+        let folders = self.host_folders.remove(from);
+        self.host_folders.remove(to);
+        if let Some(folders) = folders {
+            self.host_folders.insert(to.clone(), folders);
+        }
         Ok(())
     }
 
@@ -587,7 +644,37 @@ impl Workspace {
             leaves.retain(|(_, leaf)| leaf.host != *host);
         }
         self.instances.remove(host);
+        self.host_folders.remove(host);
         panes
+    }
+
+    /// Remember the folders of the existing-folder sessions of the SSH host `host` (its newest `HOST_FOLDERS_KEPT`,
+    /// newest first, each once). This machine is never remembered, and a host with no folders in `sessions` keeps what
+    /// it had. True when the remembered folders or their order changed; newer times alone are stored but report false,
+    /// so a busy session does not rewrite the layout.
+    pub fn remember_host_folders(&mut self, host: &HostId, sessions: &[&SessionInfo]) -> bool {
+        if host.is_local() {
+            return false;
+        }
+        let mut latest: BTreeMap<&Path, u64> = BTreeMap::new();
+        for session in sessions.iter().filter(|session| session.cwd_exists) {
+            let last = latest.entry(session.cwd.as_path()).or_default();
+            *last = (*last).max(session.last_active_ms);
+        }
+        let mut folders: Vec<HostFolder> = latest
+            .into_iter()
+            .map(|(path, last_active_ms)| HostFolder { path: path.to_path_buf(), last_active_ms })
+            .collect();
+        folders.sort_by(|a, b| b.last_active_ms.cmp(&a.last_active_ms).then_with(|| a.path.cmp(&b.path)));
+        folders.truncate(HOST_FOLDERS_KEPT);
+        if folders.is_empty() {
+            return false;
+        }
+        let same_folders = self.host_folders.get(host).is_some_and(|kept| {
+            kept.len() == folders.len() && kept.iter().zip(&folders).all(|(a, b)| a.path == b.path)
+        });
+        self.host_folders.insert(host.clone(), folders);
+        !same_folders
     }
 
     /// Name a shell pane (trimmed; empty clears it). False, changing nothing, for a missing or Claude leaf.
@@ -1156,6 +1243,89 @@ pub fn restore(
 mod tests {
     use super::*;
     use crate::settings::ClaudeDir;
+
+    fn typed(program: &str, args: &[&str]) -> PaneLaunch {
+        PaneLaunch {
+            program: program.into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            cwd: "/r".into(),
+            container: None,
+            claude: false,
+            claude_dir: None,
+            env: Vec::new(),
+        }
+    }
+
+    fn dir_at(path: &str) -> ResolvedDir {
+        ResolvedDir {
+            name: "Work".into(),
+            path: path.into(),
+            command: "claude-alt".into(),
+            args: vec!["--x".into()],
+            color: None,
+        }
+    }
+
+    #[test]
+    fn a_command_line_claude_gets_a_session_id() {
+        let launch = typed("claude", &["--model", "x"]).as_command_line(&dir_at("/cfg"), Some(Path::new("/cfg")));
+        assert!(launch.claude);
+        assert_eq!(launch.program, "claude");
+        assert_eq!(launch.args[..3], ["--model", "x", "--session-id"]);
+        assert_eq!(launch.args.len(), 4);
+        assert!(uuid::Uuid::parse_str(&launch.args[3]).is_ok());
+    }
+
+    #[test]
+    fn a_command_line_claude_keeps_its_own_session_flag() {
+        for args in [
+            &["--resume", "abc"][..],
+            &["-r", "abc"],
+            &["--resume"],
+            &["-r"],
+            &["--resume=abc"],
+            &["--session-id=abc"],
+            &["--continue"],
+            &["-c"],
+            &["--session-id", "s1"],
+        ] {
+            let launch = typed("claude", args).as_command_line(&dir_at("/cfg"), None);
+            assert!(launch.claude);
+            assert_eq!(launch.args, args);
+        }
+    }
+
+    #[test]
+    fn claude_subcommands_and_info_flags_are_not_sessions() {
+        for args in [&["update"][..], &["--version"], &["mcp", "list"], &["-h"]] {
+            let launch = typed("claude", args);
+            assert_eq!(launch.clone().as_command_line(&dir_at("/cfg"), None), launch);
+        }
+    }
+
+    #[test]
+    fn a_command_line_claude_by_path_counts() {
+        let by_path = typed("/usr/bin/claude", &[]).as_command_line(&dir_at("/cfg"), None);
+        assert!(by_path.claude);
+        assert_eq!(by_path.program, "/usr/bin/claude");
+        let other = typed("claude-work", &["a"]);
+        assert_eq!(other.clone().as_command_line(&dir_at("/cfg"), None), other);
+        let shell = typed("bash", &[]);
+        assert_eq!(shell.clone().as_command_line(&dir_at("/cfg"), None), shell);
+    }
+
+    #[test]
+    fn a_command_line_claude_runs_as_typed_under_the_folders_dir() {
+        let dir = dir_at("/cfg/work");
+        let other = typed("claude", &[]).as_command_line(&dir, Some(Path::new("/cfg/main")));
+        assert_eq!(other.program, "claude");
+        assert!(!other.args.contains(&"--x".to_string()));
+        assert_eq!(other.claude_dir, Some("/cfg/work".into()));
+        assert_eq!(other.env, [("CLAUDE_CONFIG_DIR".to_string(), "/cfg/work".to_string())]);
+        let own = typed("claude", &[]).as_command_line(&dir, Some(Path::new("/cfg/work")));
+        assert_eq!(own.claude_dir, None);
+        assert!(own.env.is_empty());
+    }
 
     #[test]
     fn a_dirs_badge_is_its_upper_cased_first_letter_on_its_color() {
@@ -2603,7 +2773,7 @@ mod tests {
         );
         let default = PaneLaunch::shell("/r".into(), &ShellSettings::default());
         assert_eq!(default.program, "");
-        assert_eq!(default.label(), "shell · r");
+        assert_eq!(default.label(), "terminal · r");
     }
 
     #[test]
@@ -2934,5 +3104,94 @@ mod tests {
         assert!(ws.host_names().contains(&old), "parked leaves count");
         assert!(ws.rename_host(&dev, &old).is_err());
         assert!(ws.leaves.values().all(|leaf| leaf.host == dev));
+    }
+
+    fn folder_session(cwd: &str, last_active_ms: u64, cwd_exists: bool) -> SessionInfo {
+        SessionInfo { cwd: cwd.into(), last_active_ms, cwd_exists, ..session_info(cwd, SessionState::Closed) }
+    }
+
+    #[test]
+    fn remembers_the_newest_folders_of_a_remote_host() {
+        let dev = HostId::named("dev");
+        let mut sessions: Vec<SessionInfo> =
+            (0..22).map(|n| folder_session(&format!("/f{n}"), 100 + n, true)).collect();
+        sessions.extend((0..3).map(|n| folder_session("/f0", 1 + n, true)));
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let mut ws = Workspace::default();
+        assert!(ws.remember_host_folders(&dev, &refs));
+        let kept = &ws.host_folders[&dev];
+        assert_eq!(kept.len(), HOST_FOLDERS_KEPT);
+        assert_eq!((kept[0].path.clone(), kept[0].last_active_ms), (PathBuf::from("/f21"), 121));
+        assert!(kept.windows(2).all(|pair| pair[0].last_active_ms >= pair[1].last_active_ms));
+        assert!(!ws.remember_host_folders(&dev, &refs), "the same input changes nothing");
+    }
+
+    #[test]
+    fn newer_times_alone_are_stored_without_reporting_a_change() {
+        let dev = HostId::named("dev");
+        let mut ws = Workspace::default();
+        let first = [folder_session("/a", 5, true), folder_session("/b", 3, true)];
+        assert!(ws.remember_host_folders(&dev, &first.iter().collect::<Vec<_>>()));
+        let later = [folder_session("/a", 50, true), folder_session("/b", 3, true)];
+        assert!(!ws.remember_host_folders(&dev, &later.iter().collect::<Vec<_>>()));
+        assert_eq!(ws.host_folders[&dev][0].last_active_ms, 50);
+        let reordered = [folder_session("/a", 50, true), folder_session("/b", 60, true)];
+        assert!(ws.remember_host_folders(&dev, &reordered.iter().collect::<Vec<_>>()), "the order changed");
+    }
+
+    #[test]
+    fn a_rename_replaces_a_stale_entry_under_the_new_name() {
+        let (dev, box2) = (HostId::named("dev"), HostId::named("box2"));
+        let mut ws = Workspace::default();
+        let old = [folder_session("/stale", 1, true)];
+        ws.remember_host_folders(&box2, &old.iter().collect::<Vec<_>>());
+        ws.host_folders.remove(&dev);
+        ws.rename_host(&dev, &box2).unwrap();
+        assert!(ws.host_folders.is_empty(), "no entry for dev: the stale one under box2 goes too");
+    }
+
+    #[test]
+    fn a_folder_is_remembered_once_with_its_newest_time() {
+        let mut ws = Workspace::default();
+        let sessions = [folder_session("/a", 5, true), folder_session("/a", 9, true)];
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        ws.remember_host_folders(&HostId::named("dev"), &refs);
+        assert_eq!(ws.host_folders[&HostId::named("dev")], vec![HostFolder { path: "/a".into(), last_active_ms: 9 }]);
+    }
+
+    #[test]
+    fn this_machine_is_never_remembered() {
+        let sessions = [folder_session("/a", 5, true)];
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let mut ws = Workspace::default();
+        assert!(!ws.remember_host_folders(&HostId::local(), &refs));
+        assert!(ws.host_folders.is_empty());
+    }
+
+    #[test]
+    fn only_existing_folders_are_remembered() {
+        let dev = HostId::named("dev");
+        let sessions = [folder_session("/gone", 9, false), folder_session("/here", 5, true)];
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let mut ws = Workspace::default();
+        assert!(ws.remember_host_folders(&dev, &refs));
+        assert_eq!(ws.host_folders[&dev].len(), 1);
+        let none: Vec<&SessionInfo> = Vec::new();
+        assert!(!ws.remember_host_folders(&dev, &none), "an empty list does not wipe the memory");
+        assert_eq!(ws.host_folders[&dev].len(), 1);
+    }
+
+    #[test]
+    fn host_folders_follow_a_rename_and_go_with_a_removal() {
+        let (dev, box2) = (HostId::named("dev"), HostId::named("box2"));
+        let sessions = [folder_session("/a", 5, true)];
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let mut ws = Workspace::default();
+        ws.remember_host_folders(&dev, &refs);
+        ws.rename_host(&dev, &box2).unwrap();
+        assert!(!ws.host_folders.contains_key(&dev));
+        assert_eq!(ws.host_folders[&box2].len(), 1);
+        ws.remove_host(&box2);
+        assert!(ws.host_folders.is_empty());
     }
 }

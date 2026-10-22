@@ -116,6 +116,7 @@ impl WorkspaceView {
             }
         }
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(from, Vec::new(), cx));
+        self.welcome_items.take();
         self.attention.reset(from, &[]);
         self.set_host_state(to, HostState::NotConnected, cx);
         self.save(cx);
@@ -143,6 +144,7 @@ impl WorkspaceView {
         self.pending_opens.retain(|_, open| open.host != *host);
         self.host_states.remove(host);
         self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+        self.welcome_items.take();
         self.attention.reset(host, &[]);
         self.sync_unseen(cx);
         self.focus_current(window, cx);
@@ -208,6 +210,7 @@ impl WorkspaceView {
         if self.is_away(host) {
             // Its sessions are not known any more; they are listed again when it connects.
             self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, Vec::new(), cx));
+            self.welcome_items.take();
             self.attention.reset(host, &[]);
             self.sync_unseen(cx);
             self.git.forget_host(host);

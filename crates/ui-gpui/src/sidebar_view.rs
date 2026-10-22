@@ -80,12 +80,10 @@ pub enum SidebarEvent {
         /// The new name, as typed.
         name: String,
     },
-    /// A New button was pressed: the launcher (Claude first, or shell first), or a list of hosts.
+    /// A New button was pressed: open the launcher (Claude first, or terminal first).
     New {
-        /// Claude (true) or a shell.
+        /// Claude (true) or a terminal.
         claude: bool,
-        /// Where the button was clicked.
-        position: Point<Pixels>,
     },
     /// A pane of a split tab was dropped on the sidebar: make it a tab of its own.
     PullOut(NodeId),
@@ -1355,9 +1353,9 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(|style| style.opacity(0.9))
                             .child("New Claude session")
-                            .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
-                                cx.emit(SidebarEvent::New { claude: true, position: event.position() })
-                            })),
+                            .on_click(
+                                cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: true })),
+                            ),
                     )
                     .child(
                         div()
@@ -1375,9 +1373,17 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                             .child(">_")
-                            .on_click(cx.listener(|_, event: &ClickEvent, _, cx| {
-                                cx.emit(SidebarEvent::New { claude: false, position: event.position() })
-                            })),
+                            .tooltip(hover_card::tooltip(HoverCard {
+                                title: "New terminal".into(),
+                                status: None,
+                                dir: None,
+                                container: false,
+                                host: None,
+                                folder: None,
+                            }))
+                            .on_click(
+                                cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SidebarEvent::New { claude: false })),
+                            ),
                     ),
             )
             .when_some(self.menu.as_ref(), |el, menu| {

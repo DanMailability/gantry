@@ -257,12 +257,6 @@ impl WorkspaceView {
                 )
             })
             .child(round_button(
-                "new-claude",
-                "+",
-                &theme,
-                cx.listener(|this, _, window, cx| this.open(true, None, window, cx)),
-            ))
-            .child(round_button(
                 "open-settings",
                 "⚙",
                 &theme,

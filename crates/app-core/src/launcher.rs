@@ -1,8 +1,10 @@
-//! The directory launcher's list: directories from Claude history, most recently used first, fuzzy
-//! filtered, open folders first.
+//! The directory launcher's list: one list of folders across this machine and the SSH hosts (open now, favorites,
+//! then recent, newest first), fuzzy filtered, and the typed text that opens a path instead.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use protocol::host::{HostId, project_key, split_project_key};
 use protocol::message::SessionInfo;
@@ -32,23 +34,6 @@ pub struct OpenFolder {
     pub path: PathBuf,
     /// The most urgent tone among its Claude panes; `None` when it has only shells.
     pub tone: Option<Tone>,
-    /// Claude panes in it.
-    pub claude_panes: usize,
-    /// Shell panes in it.
-    pub shell_panes: usize,
-}
-
-impl OpenFolder {
-    /// The note on its row: "2 panes", "1 pane", "shell", "2 shells".
-    pub fn note(&self) -> String {
-        let total = self.claude_panes + self.shell_panes;
-        match (self.claude_panes, total) {
-            (0, 1) => "shell".to_string(),
-            (0, count) => format!("{count} shells"),
-            (_, 1) => "1 pane".to_string(),
-            (_, count) => format!("{count} panes"),
-        }
-    }
 }
 
 fn urgency(tone: Tone) -> u8 {
@@ -67,24 +52,13 @@ pub fn open_folders(panes: &[OpenPane]) -> Vec<OpenFolder> {
         let at = match folders.iter().position(|folder| folder.host == pane.host && folder.path == pane.cwd) {
             Some(at) => at,
             None => {
-                folders.push(OpenFolder {
-                    host: pane.host.clone(),
-                    path: pane.cwd.clone(),
-                    tone: None,
-                    claude_panes: 0,
-                    shell_panes: 0,
-                });
+                folders.push(OpenFolder { host: pane.host.clone(), path: pane.cwd.clone(), tone: None });
                 folders.len() - 1
             }
         };
         let folder = &mut folders[at];
-        if pane.claude {
-            folder.claude_panes += 1;
-            if folder.tone.is_none_or(|tone| urgency(pane.tone) < urgency(tone)) {
-                folder.tone = Some(pane.tone);
-            }
-        } else {
-            folder.shell_panes += 1;
+        if pane.claude && folder.tone.is_none_or(|tone| urgency(pane.tone) < urgency(tone)) {
+            folder.tone = Some(pane.tone);
         }
     }
     folders
@@ -93,55 +67,45 @@ pub fn open_folders(panes: &[OpenPane]) -> Vec<OpenFolder> {
 /// One launcher entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LauncherItem {
-    /// A section heading; not selectable.
-    Header {
-        /// Its text.
-        label: &'static str,
-        /// A count shown at its right.
-        count: Option<usize>,
-    },
     /// A folder with panes open now.
     Open(OpenFolder),
     /// A directory to open.
     Dir {
+        /// The host it is on.
+        host: HostId,
         /// The directory.
         path: PathBuf,
         /// Pinned in the settings (drawn with a star).
         favorite: bool,
-        /// Whether it exists; a favorite whose folder is gone cannot be opened.
+        /// Whether it exists; a favorite of this machine whose folder is gone cannot be opened.
         exists: bool,
     },
+    /// "<host>: type a path on this host"; picking it fills the field with `<host>:~/`.
+    HostHint(HostId),
 }
 
 impl LauncherItem {
-    /// Whether the highlight can rest on it.
-    pub fn selectable(&self) -> bool {
-        !matches!(self, LauncherItem::Header { .. })
+    /// The host the entry is about.
+    pub fn host(&self) -> &HostId {
+        match self {
+            LauncherItem::Open(folder) => &folder.host,
+            LauncherItem::Dir { host, .. } | LauncherItem::HostHint(host) => host,
+        }
     }
 
-    /// The folder it opens, if it is one.
+    /// The folder it opens; none for a host hint.
     pub fn folder(&self) -> Option<&PathBuf> {
         match self {
             LauncherItem::Open(folder) => Some(&folder.path),
             LauncherItem::Dir { path, .. } => Some(path),
-            LauncherItem::Header { .. } => None,
+            LauncherItem::HostHint(_) => None,
         }
     }
 }
 
-/// The first entry the highlight can rest on (0 for an empty list).
-pub fn first_selectable(items: &[LauncherItem]) -> usize {
-    items.iter().position(LauncherItem::selectable).unwrap_or(0)
-}
-
-/// The next selectable entry below (`down`) or above `from`; `from` itself when there is none.
+/// The entry below (`down`) or above `from`; `from` itself at the end of the list.
 pub fn step(items: &[LauncherItem], from: usize, down: bool) -> usize {
-    let found = if down {
-        items.iter().enumerate().skip(from + 1).find(|(_, item)| item.selectable())
-    } else {
-        items.iter().enumerate().take(from).rev().find(|(_, item)| item.selectable())
-    };
-    found.map_or(from, |(index, _)| index)
+    if down { (from + 1).min(items.len().saturating_sub(1)) } else { from.saturating_sub(1) }
 }
 
 /// The key a favorite on `host` is saved under in the settings: the folder itself for this machine,
@@ -150,100 +114,184 @@ pub fn favorite_key(host: &HostId, dir: &Path) -> PathBuf {
     project_key(host, dir)
 }
 
-/// The favorites that can be shown: those of this machine and of hosts in `known_hosts`.
-pub fn visible_favorites(favorites: &[PathBuf], known_hosts: &[HostId]) -> Vec<PathBuf> {
-    favorites
-        .iter()
-        .filter(|favorite| {
-            let (host, _) = split_project_key(favorite);
-            host.is_local() || known_hosts.contains(&host)
-        })
-        .cloned()
-        .collect()
+/// A folder of a host's recent sessions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentFolder {
+    /// The host it is on.
+    pub host: HostId,
+    /// The folder.
+    pub path: PathBuf,
+    /// When a session there was last active.
+    pub last_active_ms: u64,
 }
 
-/// Open folders (under "Open now", filtered by the query, in the given order), then favorites (settings order,
-/// filtered), then existing session directories (each once, by match score then recency), none of them an open
-/// folder. The "Favorites and recent" header appears only when "Open now" is shown and other directories follow.
-/// Only what belongs to `host` is listed: its open folders, its sessions' directories and the favorites saved for it
-/// (see [`favorite_key`]); a remote host's folders are not checked on this machine.
+/// A recent folder of an SSH host, as the layout remembers it while the host is away.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostFolder {
+    /// The folder.
+    pub path: PathBuf,
+    /// When a session there was last active.
+    pub last_active_ms: u64,
+}
+
+/// The existing folders of `sessions`, newest session per (host, folder), newest first; plus the `remembered` folders of
+/// the hosts none of `sessions` belongs to (they are away). Only this machine and the hosts in `listed`.
+pub fn recent_folders(
+    sessions: &[&SessionInfo],
+    remembered: &BTreeMap<HostId, Vec<HostFolder>>,
+    listed: &[HostId],
+) -> Vec<RecentFolder> {
+    let shown = |host: &HostId| host.is_local() || listed.contains(host);
+    let mut latest: HashMap<(&HostId, &Path), u64> = HashMap::new();
+    for session in sessions.iter().filter(|s| s.cwd_exists && shown(&s.host)) {
+        let last = latest.entry((&session.host, session.cwd.as_path())).or_default();
+        *last = (*last).max(session.last_active_ms);
+    }
+    let mut folders: Vec<RecentFolder> = latest
+        .into_iter()
+        .map(|((host, path), last_active_ms)| RecentFolder {
+            host: host.clone(),
+            path: path.to_path_buf(),
+            last_active_ms,
+        })
+        .collect();
+    for (host, kept) in remembered {
+        if !shown(host) || sessions.iter().any(|session| session.host == *host) {
+            continue;
+        }
+        folders.extend(kept.iter().map(|folder| RecentFolder {
+            host: host.clone(),
+            path: folder.path.clone(),
+            last_active_ms: folder.last_active_ms,
+        }));
+    }
+    folders.sort_by(|a, b| {
+        b.last_active_ms.cmp(&a.last_active_ms).then_with(|| (&a.host, &a.path).cmp(&(&b.host, &b.path)))
+    });
+    folders
+}
+
+/// What the typed text means.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Typed {
+    /// Words that filter the list.
+    Filter,
+    /// A path on a host: it is completed and can be opened as typed.
+    Path {
+        /// The host the path is on.
+        host: HostId,
+        /// The path as typed (`~/` for a bare `<host>:`).
+        path: String,
+    },
+}
+
+/// `/…` and `~…` are paths on this machine; `<host>:<path>` is a path on that host when it is one of `hosts`
+/// (the `sshHosts` names, matched ignoring case; a path starting with neither `/` nor `~` is under `~/`, like scp);
+/// anything else filters.
+pub fn typed(text: &str, hosts: &[HostId]) -> Typed {
+    if text.starts_with(['/', '~']) {
+        return Typed::Path { host: HostId::local(), path: text.to_string() };
+    }
+    let Some((name, path)) = text.split_once(':') else { return Typed::Filter };
+    let Some(host) = hosts.iter().find(|host| host.name().eq_ignore_ascii_case(name)) else { return Typed::Filter };
+    let path = match path {
+        "" => "~/".to_string(),
+        path if path.starts_with(['/', '~']) => path.to_string(),
+        path => format!("~/{path}"),
+    };
+    Typed::Path { host: host.clone(), path }
+}
+
+/// What a row is matched against: the displayed path on this machine, `<host>:<path>` on a host.
+fn row_text(host: &HostId, path: &Path, home: Option<&Path>) -> String {
+    if host.is_local() { display_path(path, home) } else { format!("{}:{}", host.name(), path.display()) }
+}
+
+/// One list for every host: open folders (in the given order), then favorites (settings order), then recent folders
+/// (by match score, then recency), each (host, folder) once and the first of those groups it is in wins. The query
+/// filters by `row_text`. While it is a bare prefix of a host name (no `:` or `/`), a hint row per such host leads.
+/// `hosts` are the `sshHosts` names; rows of any other remote host are left out.
 pub fn items(
     open: &[OpenFolder],
-    sessions: &[&SessionInfo],
+    recent: &[RecentFolder],
     query: &str,
     home: Option<&Path>,
     favorites: &[PathBuf],
-    host: &HostId,
+    hosts: &[HostId],
 ) -> Vec<LauncherItem> {
-    let remote = !host.is_local();
-    let open: Vec<&OpenFolder> = open.iter().filter(|folder| folder.host == *host).collect();
-    let sessions: Vec<&&SessionInfo> = sessions.iter().filter(|session| session.host == *host).collect();
-    let favorites: Vec<PathBuf> = favorites
-        .iter()
-        .filter_map(|favorite| {
-            let (favorite_host, path) = split_project_key(favorite);
-            (favorite_host == *host).then_some(path)
-        })
-        .collect();
-    let is_open = |path: &Path| open.iter().any(|folder| folder.path == path);
-    let mut latest: HashMap<&Path, u64> = HashMap::new();
-    for session in sessions.iter().filter(|s| s.cwd_exists) {
-        let last = latest.entry(session.cwd.as_path()).or_default();
-        *last = (*last).max(session.last_active_ms);
-    }
+    let shown = |host: &HostId| host.is_local() || hosts.contains(host);
+    let open: Vec<&OpenFolder> = open.iter().filter(|folder| shown(&folder.host)).collect();
+    let favorites: Vec<(HostId, PathBuf)> =
+        favorites.iter().map(|favorite| split_project_key(favorite)).filter(|(host, _)| shown(host)).collect();
+    let recent: Vec<&RecentFolder> = recent.iter().filter(|folder| shown(&folder.host)).collect();
+    let is_open = |host: &HostId, path: &Path| open.iter().any(|folder| folder.host == *host && folder.path == path);
+    let is_favorite = |host: &HostId, path: &Path| favorites.iter().any(|(h, p)| h == host && p == path);
     let texts = open
         .iter()
-        .map(|folder| folder.path.as_path())
-        .chain(favorites.iter().map(PathBuf::as_path))
-        .chain(latest.keys().copied())
-        .map(|path| display_path(path, home));
+        .map(|folder| row_text(&folder.host, &folder.path, home))
+        .chain(favorites.iter().map(|(host, path)| row_text(host, path, home)))
+        .chain(recent.iter().map(|folder| row_text(&folder.host, &folder.path, home)));
     let mut fuzzy = Fuzzy::new(query, texts);
-    let open_items: Vec<LauncherItem> = open
-        .iter()
-        .filter(|folder| fuzzy.as_mut().is_none_or(|fuzzy| fuzzy.score(&display_path(&folder.path, home)).is_some()))
-        .map(|folder| LauncherItem::Open((*folder).clone()))
-        .collect();
-    let mut pinned: Vec<LauncherItem> = Vec::new();
-    for path in &favorites {
-        if is_open(path) {
-            continue;
-        }
-        if pinned.iter().any(|item| matches!(item, LauncherItem::Dir { path: seen, .. } if seen == path)) {
-            continue;
-        }
-        if fuzzy.as_mut().is_some_and(|fuzzy| fuzzy.score(&display_path(path, home)).is_none()) {
-            continue;
-        }
-        pinned.push(LauncherItem::Dir { path: path.clone(), favorite: true, exists: remote || path.is_dir() });
+    let mut score = |host: &HostId, path: &Path| match &mut fuzzy {
+        None => Some(0),
+        Some(fuzzy) => fuzzy.score(&row_text(host, path, home)),
+    };
+    let mut list: Vec<LauncherItem> = Vec::new();
+    if !query.is_empty() && !query.contains([':', '/']) {
+        let query = query.to_lowercase();
+        list.extend(
+            hosts
+                .iter()
+                .filter(|host| host.name().to_lowercase().starts_with(&query))
+                .map(|host| LauncherItem::HostHint(host.clone())),
+        );
     }
-    let mut ranked: Vec<(&Path, u64, u32)> = latest
+    list.extend(
+        open.iter()
+            .filter(|folder| score(&folder.host, &folder.path).is_some())
+            .map(|folder| LauncherItem::Open((*folder).clone())),
+    );
+    let mut seen: Vec<(&HostId, &Path)> = Vec::new();
+    for (host, path) in &favorites {
+        if is_open(host, path) || seen.contains(&(host, path.as_path())) || score(host, path).is_none() {
+            continue;
+        }
+        seen.push((host, path));
+        let exists = !host.is_local() || path.is_dir();
+        list.push(LauncherItem::Dir { host: host.clone(), path: path.clone(), favorite: true, exists });
+    }
+    let mut ranked: Vec<(&RecentFolder, u32)> = recent
         .into_iter()
-        .filter(|(dir, _)| !is_open(dir))
-        .filter(|(dir, _)| !favorites.iter().any(|favorite| favorite == dir))
-        .filter_map(|(dir, last)| {
-            let score = match &mut fuzzy {
-                None => 0,
-                Some(fuzzy) => fuzzy.score(&display_path(dir, home))?,
-            };
-            Some((dir, last, score))
-        })
+        .filter(|folder| !is_open(&folder.host, &folder.path) && !is_favorite(&folder.host, &folder.path))
+        .filter_map(|folder| Some((folder, score(&folder.host, &folder.path)?)))
         .collect();
-    ranked.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)).then_with(|| a.0.cmp(b.0)));
-    let recent = ranked.into_iter().map(|(dir, ..)| LauncherItem::Dir {
-        path: dir.to_path_buf(),
+    ranked.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then(b.0.last_active_ms.cmp(&a.0.last_active_ms))
+            .then_with(|| (&a.0.host, &a.0.path).cmp(&(&b.0.host, &b.0.path)))
+    });
+    list.extend(ranked.into_iter().map(|(folder, _)| LauncherItem::Dir {
+        host: folder.host.clone(),
+        path: folder.path.clone(),
         favorite: false,
         exists: true,
-    });
-    let others: Vec<LauncherItem> = pinned.into_iter().chain(recent).collect();
-    let mut list = Vec::new();
-    if !open_items.is_empty() {
-        list.push(LauncherItem::Header { label: "Open now", count: Some(open_items.len()) });
-        list.extend(open_items);
-        if !others.is_empty() {
-            list.push(LauncherItem::Header { label: "Favorites and recent", count: None });
-        }
-    }
-    list.extend(others);
+    }));
+    list
+}
+
+/// How many folders the welcome screen lists.
+pub const WELCOME_ROWS: usize = 5;
+
+/// The welcome screen's folders: favorites, then recent folders (newest first), each (host, folder) once, at most
+/// `WELCOME_ROWS`; no open folders and no host hints.
+pub fn welcome_items(
+    recent: &[RecentFolder],
+    home: Option<&Path>,
+    favorites: &[PathBuf],
+    hosts: &[HostId],
+) -> Vec<LauncherItem> {
+    let mut list = items(&[], recent, "", home, favorites, hosts);
+    list.truncate(WELCOME_ROWS);
     list
 }
 
@@ -253,9 +301,9 @@ mod tests {
     use crate::session_tree::Tone;
     use protocol::message::SessionState;
 
-    fn info(cwd: &str, last_active_ms: u64, cwd_exists: bool) -> SessionInfo {
+    fn info(host: &HostId, cwd: &str, last_active_ms: u64, cwd_exists: bool) -> SessionInfo {
         SessionInfo {
-            id: format!("{cwd}{last_active_ms}"),
+            id: format!("{host:?}{cwd}{last_active_ms}"),
             cwd: cwd.into(),
             title: String::new(),
             last_active_ms,
@@ -266,91 +314,165 @@ mod tests {
             container: None,
             claude_dir: None,
             last_prompt: None,
-            host: HostId::local(),
+            host: host.clone(),
         }
     }
 
-    fn dirs(items: &[LauncherItem]) -> Vec<String> {
-        items
-            .iter()
-            .map(|item| match item {
-                LauncherItem::Header { label, .. } => format!("# {label}"),
-                LauncherItem::Open(folder) => format!("open {}", folder.path.display()),
-                LauncherItem::Dir { path, .. } => path.display().to_string(),
-            })
-            .collect()
+    fn local() -> HostId {
+        HostId::local()
     }
 
-    #[test]
-    fn recent_directories_come_first_once_each() {
-        let sessions = [info("/a", 10, true), info("/b", 30, true), info("/a", 50, true), info("/gone", 99, false)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &HostId::local())), vec!["/a", "/b"]);
+    fn devbox() -> HostId {
+        HostId::named("devbox")
     }
 
-    // Unix-style paths: Windows joins them with `\`.
-    #[cfg(unix)]
-    #[test]
-    fn a_query_filters_by_the_displayed_path() {
-        let sessions = [info("/home/me/code/devops", 50, true), info("/home/me/Private/rust_terminal", 10, true)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let home = Some(Path::new("/home/me"));
-        assert_eq!(
-            dirs(&items(&[], &refs, "rust", home, &[], &HostId::local())),
-            vec!["/home/me/Private/rust_terminal"]
-        );
-        assert_eq!(dirs(&items(&[], &refs, "~/code", home, &[], &HostId::local())), vec!["/home/me/code/devops"]);
-        assert_eq!(dirs(&items(&[], &refs, "zzz", home, &[], &HostId::local())), Vec::<&str>::new());
-        assert_eq!(dirs(&items(&[], &[], "", home, &[], &HostId::local())), Vec::<&str>::new());
+    fn recent(host: &HostId, path: &str, last_active_ms: u64) -> RecentFolder {
+        RecentFolder { host: host.clone(), path: path.into(), last_active_ms }
     }
 
-    fn favs(items: &[LauncherItem]) -> Vec<(String, bool, bool)> {
-        items
-            .iter()
-            .filter_map(|item| match item {
-                LauncherItem::Dir { path, favorite, exists } => Some((path.display().to_string(), *favorite, *exists)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn favorites_come_first_in_settings_order_without_duplicates() {
-        let here = std::env::temp_dir();
-        let sessions = [info("/a", 10, true), info("/b", 30, true), info(here.to_str().unwrap(), 5, true)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let favorites = [PathBuf::from("/b"), here.clone(), PathBuf::from("/b")];
-        let list = items(&[], &refs, "", None, &favorites, &HostId::local());
-        assert_eq!(
-            favs(&list),
-            vec![
-                ("/b".to_string(), true, false),
-                (here.display().to_string(), true, true),
-                ("/a".to_string(), false, true)
-            ]
-        );
-    }
-
-    #[test]
-    fn favorites_are_filtered_by_the_query() {
-        let sessions = [info("/home/me/code/devops", 50, true)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let home = Some(Path::new("/home/me"));
-        let favorites = [PathBuf::from("/home/me/Private/rust_terminal"), PathBuf::from("/home/me/work/ops")];
-        assert_eq!(
-            favs(&items(&[], &refs, "rust", home, &favorites, &HostId::local())),
-            vec![("/home/me/Private/rust_terminal".to_string(), true, false)]
-        );
-        assert_eq!(favs(&items(&[], &refs, "", home, &favorites, &HostId::local())).len(), 3);
-        assert_eq!(favs(&items(&[], &refs, "zzz", home, &favorites, &HostId::local())), vec![]);
-    }
-
-    fn open(path: &str, tone: Option<Tone>, claude: usize, shell: usize) -> OpenFolder {
-        OpenFolder { host: HostId::local(), path: path.into(), tone, claude_panes: claude, shell_panes: shell }
+    fn open(host: &HostId, path: &str) -> OpenFolder {
+        OpenFolder { host: host.clone(), path: path.into(), tone: None }
     }
 
     fn pane(cwd: &str, claude: bool, tone: Tone) -> OpenPane {
-        OpenPane { host: HostId::local(), cwd: cwd.into(), claude, tone }
+        OpenPane { host: local(), cwd: cwd.into(), claude, tone }
+    }
+
+    /// `open`, `fav`, `dir` or `hint`, then `host:path`.
+    fn rows(items: &[LauncherItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                LauncherItem::Open(folder) => format!("open {}:{}", folder.host.name(), folder.path.display()),
+                LauncherItem::Dir { host, path, favorite, .. } => {
+                    format!("{} {}:{}", if *favorite { "fav" } else { "dir" }, host.name(), path.display())
+                }
+                LauncherItem::HostHint(host) => format!("hint {}", host.name()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_list_open_then_favorites_then_recent_across_hosts() {
+        let favorites = [PathBuf::from("ssh://devbox/work")];
+        let recent = [recent(&local(), "/b", 10), recent(&devbox(), "/src/x", 20)];
+        let list = items(&[open(&local(), "/a")], &recent, "", None, &favorites, &[devbox()]);
+        assert_eq!(rows(&list), vec!["open local:/a", "fav devbox:/work", "dir devbox:/src/x", "dir local:/b"]);
+    }
+
+    #[test]
+    fn a_folder_is_listed_once_per_host() {
+        let recent = [recent(&local(), "/a", 5), recent(&devbox(), "/a", 6)];
+        let list = items(&[open(&local(), "/a")], &recent, "", None, &[], &[devbox()]);
+        assert_eq!(rows(&list), vec!["open local:/a", "dir devbox:/a"]);
+    }
+
+    #[test]
+    fn open_beats_favorite_beats_recent() {
+        let favorites = [PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/b")];
+        let recent = [recent(&local(), "/a", 1), recent(&local(), "/b", 2), recent(&local(), "/c", 3)];
+        let list = items(&[open(&local(), "/a")], &recent, "", None, &favorites, &[]);
+        assert_eq!(rows(&list), vec!["open local:/a", "fav local:/b", "dir local:/c"]);
+    }
+
+    #[test]
+    fn hosts_not_in_ssh_hosts_are_left_out() {
+        let gone = HostId::named("gone");
+        let recent = [recent(&gone, "/x", 1), recent(&devbox(), "/y", 2)];
+        let favorites = [PathBuf::from("ssh://gone/f")];
+        let list = items(&[open(&gone, "/o")], &recent, "", None, &favorites, &[devbox()]);
+        assert_eq!(rows(&list), vec!["dir devbox:/y"]);
+    }
+
+    #[test]
+    fn remote_rows_match_on_host_and_path() {
+        let recent = [recent(&devbox(), "/src/x", 20), recent(&devbox(), "/etc", 15), recent(&local(), "/b", 10)];
+        let hosts = [devbox()];
+        let by_host = items(&[], &recent, "devbox", None, &[], &hosts);
+        assert_eq!(rows(&by_host), vec!["hint devbox", "dir devbox:/src/x", "dir devbox:/etc"]);
+        assert_eq!(rows(&items(&[], &recent, "src", None, &[], &hosts)), vec!["dir devbox:/src/x"]);
+    }
+
+    #[test]
+    fn host_hint_rows_only_for_a_bare_prefix() {
+        let hosts = [devbox()];
+        let hinted =
+            |query: &str| items(&[], &[], query, None, &[], &hosts).first() == Some(&LauncherItem::HostHint(devbox()));
+        assert!(hinted("dev"));
+        assert!(hinted("DEV"));
+        assert!(!hinted("dev/x"));
+        assert!(!hinted("dev:"));
+        assert!(!hinted(""));
+        assert!(!hinted("box"));
+    }
+
+    #[test]
+    fn welcome_items_are_favorites_then_recent_capped() {
+        let favorites = [PathBuf::from("ssh://devbox/work"), PathBuf::from("/fav")];
+        let host = |n: u64| if n.is_multiple_of(2) { local() } else { devbox() };
+        let recent: Vec<RecentFolder> = (0..6u64).map(|n| recent(&host(n), &format!("/r{n}"), n)).collect();
+        let list = welcome_items(&recent, None, &favorites, &[devbox()]);
+        assert_eq!(list.len(), WELCOME_ROWS);
+        assert_eq!(
+            rows(&list),
+            vec!["fav devbox:/work", "fav local:/fav", "dir devbox:/r5", "dir local:/r4", "dir devbox:/r3"]
+        );
+    }
+
+    #[test]
+    fn typed_paths() {
+        let hosts = [devbox()];
+        let path = |host: HostId, path: &str| Typed::Path { host, path: path.into() };
+        assert_eq!(typed("~/co", &hosts), path(local(), "~/co"));
+        assert_eq!(typed("/etc", &hosts), path(local(), "/etc"));
+        assert_eq!(typed("devbox:~/src/m", &hosts), path(devbox(), "~/src/m"));
+        assert_eq!(typed("devbox:", &hosts), path(devbox(), "~/"));
+        assert_eq!(typed("devbox:src", &hosts), path(devbox(), "~/src"));
+        assert_eq!(typed("DevBox:/etc", &hosts), path(devbox(), "/etc"));
+        assert_eq!(typed("nohost:~/x", &hosts), Typed::Filter);
+        assert_eq!(typed("devbox:~/x", &[]), Typed::Filter);
+        assert_eq!(typed(":~/x", &hosts), Typed::Filter);
+        assert_eq!(typed("notes", &hosts), Typed::Filter);
+    }
+
+    #[test]
+    fn missing_local_favorite_is_not_openable() {
+        let favorites = [PathBuf::from("/gone-folder-for-sure"), PathBuf::from("ssh://devbox/gone")];
+        let list = items(&[], &[], "", None, &favorites, &[devbox()]);
+        let exists: Vec<bool> =
+            list.iter().map(|item| matches!(item, LauncherItem::Dir { exists: true, .. })).collect();
+        assert_eq!(exists, vec![false, true]);
+    }
+
+    #[test]
+    fn recent_folders_fill_in_away_hosts() {
+        let gpu = HostId::named("gpu");
+        let sessions = [
+            info(&local(), "/a", 5, true),
+            info(&devbox(), "/d", 7, true),
+            info(&devbox(), "/d", 9, true),
+            info(&devbox(), "/gone", 99, false),
+        ];
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let folder = |path: &str, last_active_ms| HostFolder { path: path.into(), last_active_ms };
+        let remembered = BTreeMap::from([(devbox(), vec![folder("/old", 1)]), (gpu.clone(), vec![folder("/g", 3)])]);
+        let listed = [devbox(), gpu.clone()];
+        let found = recent_folders(&refs, &remembered, &listed);
+        assert_eq!(found, vec![recent(&devbox(), "/d", 9), recent(&local(), "/a", 5), recent(&gpu, "/g", 3)]);
+        assert_eq!(recent_folders(&refs, &remembered, &[devbox()]).len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_query_filters_by_the_displayed_path() {
+        let recent =
+            [recent(&local(), "/home/me/code/devops", 50), recent(&local(), "/home/me/Private/rust_terminal", 10)];
+        let home = Some(Path::new("/home/me"));
+        let found = |query: &str| rows(&items(&[], &recent, query, home, &[], &[]));
+        assert_eq!(found("rust"), vec!["dir local:/home/me/Private/rust_terminal"]);
+        assert_eq!(found("~/code"), vec!["dir local:/home/me/code/devops"]);
+        assert!(found("zzz").is_empty());
+        assert!(items(&[open(&local(), "/home/me/x")], &recent, "zzz", home, &[], &[]).is_empty());
     }
 
     #[test]
@@ -363,115 +485,34 @@ mod tests {
             pane("/c", true, Tone::Working),
             pane("/c", true, Tone::Done),
         ];
+        let folder = |path: &str, tone| OpenFolder { host: local(), path: path.into(), tone };
         assert_eq!(
             open_folders(&panes),
-            vec![
-                open("/a", Some(Tone::NeedsInput), 2, 1),
-                open("/b", None, 0, 1),
-                open("/c", Some(Tone::Working), 2, 0),
-            ]
-        );
-    }
-
-    #[test]
-    fn open_folder_notes() {
-        assert_eq!(open("/a", Some(Tone::Idle), 1, 0).note(), "1 pane");
-        assert_eq!(open("/a", Some(Tone::Idle), 2, 1).note(), "3 panes");
-        assert_eq!(open("/a", None, 0, 1).note(), "shell");
-        assert_eq!(open("/a", None, 0, 2).note(), "2 shells");
-    }
-
-    #[test]
-    fn open_folders_lead_under_a_header_and_are_not_repeated() {
-        let sessions = [info("/a", 10, true), info("/b", 30, true)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let open = [open("/b", Some(Tone::Working), 1, 0)];
-        let list = items(&open, &refs, "", None, &[PathBuf::from("/b")], &HostId::local());
-        assert_eq!(dirs(&list), vec!["# Open now", "open /b", "# Favorites and recent", "/a"]);
-        assert_eq!(list[0], LauncherItem::Header { label: "Open now", count: Some(1) });
-    }
-
-    #[test]
-    fn headers_appear_only_for_sections_that_exist() {
-        let open = [open("/b", None, 0, 1)];
-        assert_eq!(dirs(&items(&open, &[], "", None, &[], &HostId::local())), vec!["# Open now", "open /b"]);
-        let sessions = [info("/a", 10, true)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &HostId::local())), vec!["/a"]);
-        assert!(items(&[], &[], "", None, &[], &HostId::local()).is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_query_filters_open_folders_too() {
-        let home = Some(Path::new("/home/me"));
-        let open = [open("/home/me/code/devops", None, 0, 1), open("/home/me/Private/rust_terminal", None, 0, 1)];
-        assert_eq!(
-            dirs(&items(&open, &[], "rust", home, &[], &HostId::local())),
-            vec!["# Open now", "open /home/me/Private/rust_terminal"]
-        );
-        assert!(items(&open, &[], "zzz", home, &[], &HostId::local()).is_empty());
-    }
-
-    #[test]
-    fn selection_skips_headers() {
-        let open = [open("/b", None, 0, 1)];
-        let sessions = [info("/a", 10, true)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let list = items(&open, &refs, "", None, &[], &HostId::local()); // header, open, header, dir
-        assert_eq!(first_selectable(&list), 1);
-        assert_eq!(step(&list, 1, true), 3);
-        assert_eq!(step(&list, 3, false), 1);
-        assert_eq!(step(&list, 3, true), 3);
-        assert_eq!(step(&list, 1, false), 1);
-        assert_eq!(first_selectable(&[]), 0);
-        assert_eq!(step(&[], 0, true), 0);
-    }
-
-    fn remote_info(cwd: &str, last_active_ms: u64) -> SessionInfo {
-        SessionInfo { host: HostId::named("devbox"), ..info(cwd, last_active_ms, true) }
-    }
-
-    #[test]
-    fn a_remote_launcher_lists_only_that_hosts_folders() {
-        let sessions = [remote_info("/r/app", 10), info("/l/app", 20, true)];
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
-        let devbox = HostId::named("devbox");
-        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &devbox)), vec!["/r/app"]);
-        assert_eq!(dirs(&items(&[], &refs, "", None, &[], &HostId::local())), vec!["/l/app"]);
-        let open = [OpenFolder { host: devbox.clone(), ..open("/r/w", None, 0, 1) }, open("/l/w", None, 0, 1)];
-        assert_eq!(dirs(&items(&open, &[], "", None, &[], &devbox)), vec!["# Open now", "open /r/w"]);
-    }
-
-    #[test]
-    fn favorites_are_decoded_per_host() {
-        let favorites = [PathBuf::from("/a"), PathBuf::from("ssh://devbox/work")];
-        assert_eq!(
-            favs(&items(&[], &[], "", None, &favorites, &HostId::local())),
-            vec![("/a".to_string(), true, false)]
-        );
-        assert_eq!(
-            favs(&items(&[], &[], "", None, &favorites, &HostId::named("devbox"))),
-            vec![("/work".to_string(), true, true)]
-        );
-        assert_eq!(favorite_key(&HostId::named("devbox"), Path::new("/work")), PathBuf::from("ssh://devbox/work"));
-        assert_eq!(favorite_key(&HostId::local(), Path::new("/a")), PathBuf::from("/a"));
-    }
-
-    #[test]
-    fn favorites_of_removed_hosts_are_hidden() {
-        let favorites = [PathBuf::from("ssh://gone/x"), PathBuf::from("/a"), PathBuf::from("ssh://devbox/y")];
-        assert_eq!(
-            visible_favorites(&favorites, &[HostId::named("devbox")]),
-            vec![PathBuf::from("/a"), PathBuf::from("ssh://devbox/y")]
+            vec![folder("/a", Some(Tone::NeedsInput)), folder("/b", None), folder("/c", Some(Tone::Working)),]
         );
     }
 
     #[test]
     fn open_folders_group_by_host() {
-        let remote = OpenPane { host: HostId::named("devbox"), ..pane("/a", true, Tone::Idle) };
+        let remote = OpenPane { host: devbox(), ..pane("/a", true, Tone::Idle) };
         let folders = open_folders(&[pane("/a", true, Tone::Idle), remote]);
         assert_eq!(folders.len(), 2);
-        assert_eq!(folders[1].host, HostId::named("devbox"));
+        assert_eq!(folders[1].host, devbox());
+    }
+
+    #[test]
+    fn selection_steps_through_every_row() {
+        let list = items(&[open(&local(), "/a"), open(&local(), "/b")], &[], "", None, &[], &[]);
+        assert_eq!(step(&list, 0, true), 1);
+        assert_eq!(step(&list, 1, true), 1);
+        assert_eq!(step(&list, 1, false), 0);
+        assert_eq!(step(&list, 0, false), 0);
+        assert_eq!(step(&[], 0, true), 0);
+    }
+
+    #[test]
+    fn favorite_keys_per_host() {
+        assert_eq!(favorite_key(&devbox(), Path::new("/work")), PathBuf::from("ssh://devbox/work"));
+        assert_eq!(favorite_key(&local(), Path::new("/a")), PathBuf::from("/a"));
     }
 }

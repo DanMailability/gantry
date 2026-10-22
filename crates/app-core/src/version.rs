@@ -117,7 +117,7 @@ impl Update {
     pub fn note_text(&self) -> String {
         match self.note {
             Note::ClosesSessions(count) => format!(
-                "Restarting closes your {count} running session{} and then resumes them. Shells start fresh in the \
+                "Restarting closes your {count} running session{} and then resumes them. Terminals start fresh in the \
                  same folders.",
                 if count == 1 { "" } else { "s" }
             ),
@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(up.detail_text(), "Gantry 0.3.0 is installed. This window runs 0.2.0.");
         assert_eq!(
             up.note_text(),
-            "Restarting closes your 3 running sessions and then resumes them. Shells start fresh in the same folders."
+            "Restarting closes your 3 running sessions and then resumes them. Terminals start fresh in the same folders."
         );
     }
 

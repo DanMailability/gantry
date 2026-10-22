@@ -1,6 +1,6 @@
 //! The window's root view: tabs of split panes, routing daemon events to them, and saving the layout.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -335,8 +335,6 @@ pub struct WorkspaceView {
     tab_menu: Option<OpenMenu>,
     /// The open popup of a pane's split button (Claude or Terminal).
     pane_menu: Option<OpenMenu>,
-    /// The open list of `Local` and the SSH hosts, from a New button.
-    host_menu: Option<OpenMenu>,
     /// The binary this window started from (resolved at start, before an install can replace it).
     start_path: Option<PathBuf>,
     /// The version found at `start_path` after a change; `None` until one was probed.
@@ -382,6 +380,8 @@ pub struct WorkspaceView {
     take_overs: HashMap<(HostId, String), TakeOverTarget>,
     /// New sessions waiting for `ContainerFound`, by request id.
     pending_opens: HashMap<u64, PendingOpen>,
+    /// The welcome screen's folder rows; dropped when the session lists, the settings or a tab change what they say.
+    welcome_items: RefCell<Option<Vec<app_core::launcher::LauncherItem>>>,
     /// Status changes seen so far, to tell which ones alert.
     attention: AttentionTracker,
     /// Leaves with an alert the user has not seen yet.
@@ -572,7 +572,6 @@ impl WorkspaceView {
             before_settings: None,
             tab_menu: None,
             pane_menu: None,
-            host_menu: None,
             start_path: None,
             installed: None,
             daemon_version: None,
@@ -597,6 +596,7 @@ impl WorkspaceView {
             git_task: None,
             take_overs: HashMap::new(),
             pending_opens: HashMap::new(),
+            welcome_items: RefCell::new(None),
             attention: AttentionTracker::default(),
             unseen: HashMap::new(),
             marked_unread: HashSet::new(),

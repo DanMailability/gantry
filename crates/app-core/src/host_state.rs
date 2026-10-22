@@ -390,20 +390,15 @@ pub fn prompt_title(host: &str, prompt: &str) -> String {
     }
 }
 
-/// The launcher's line about a host whose daemon is not connected, from the host's name and its state `label`.
-/// "Open connects it" is added only where opening a session can start a connection.
-pub fn not_connected_notice(host: &str, label: &str) -> String {
-    let (sentence, open_connects) = match label {
-        "needs sign-in" => (format!("{host} needs sign-in"), true),
-        "not connected" => (format!("{host} is not connected"), true),
-        "update needed" => (format!("{host} must be updated"), false),
-        "not installed" => (format!("{host} has no Gantry installed"), false),
-        "opened elsewhere" => (format!("{host} was opened elsewhere"), true),
-        "failed" => (format!("{host} failed to connect"), true),
-        "disconnected" => (format!("{host} is disconnected"), true),
-        other => (format!("{host} is {other}"), false),
-    };
-    if open_connects { format!("{sentence}: Open connects it") } else { sentence }
+/// The launcher's line about a typed host whose daemon is not connected: a host that is simply away is opened by
+/// Enter (the lazy connect); any other state is named in a few words.
+pub fn away_line(host: &str, state: &HostState) -> String {
+    match state {
+        HostState::NotConnected | HostState::Disconnected | HostState::Failed { .. } => {
+            format!("{host} is not connected: Enter opens it and connects")
+        }
+        other => format!("{host}: {}", other.label()),
+    }
 }
 
 #[cfg(test)]
@@ -439,13 +434,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_not_connected_notice_reads_as_a_sentence() {
-        assert_eq!(not_connected_notice("devbox", "needs sign-in"), "devbox needs sign-in: Open connects it");
-        assert_eq!(not_connected_notice("devbox", "not connected"), "devbox is not connected: Open connects it");
-        assert_eq!(not_connected_notice("devbox", "update needed"), "devbox must be updated");
-        assert_eq!(not_connected_notice("devbox", "opened elsewhere"), "devbox was opened elsewhere: Open connects it");
-        assert_eq!(not_connected_notice("devbox", "failed"), "devbox failed to connect: Open connects it");
-        assert_eq!(not_connected_notice("devbox", "reconnecting 2/4"), "devbox is reconnecting 2/4");
+    fn the_away_line_offers_enter_only_for_a_host_that_is_simply_away() {
+        let line = "devbox is not connected: Enter opens it and connects";
+        assert_eq!(away_line("devbox", &HostState::NotConnected), line);
+        assert_eq!(away_line("devbox", &HostState::Disconnected), line);
+        assert_eq!(away_line("devbox", &HostState::Failed { reason: "x".into() }), line);
+        assert_eq!(away_line("devbox", &HostState::NeedsSignIn), "devbox: needs sign-in");
+        assert_eq!(away_line("devbox", &HostState::TakenOver), "devbox: opened elsewhere");
+        assert_eq!(away_line("devbox", &HostState::Reconnecting { attempt: 2 }), "devbox: reconnecting 2/4");
     }
 
     fn other(reason: &str) -> HostEvent {

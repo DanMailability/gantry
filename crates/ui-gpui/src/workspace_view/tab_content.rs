@@ -2,13 +2,15 @@ use super::layout::{CARD_PAD, content_frame};
 use super::{PANE_GAP, WorkspaceView};
 
 use app_core::attention::without_claude_glyph;
+use app_core::launcher::{self, LauncherItem};
 use app_core::split_tree::{self, Axis, NodeId};
 use app_core::theme_colors::mix;
 use app_core::workspace::{DirBadge, MAX_PANES_PER_TAB};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Div, DragMoveEvent, FontWeight, IntoElement, MouseButton, MouseDownEvent,
-    Pixels, Point, Window, canvas, div, prelude::*, px, relative, rgb, rgba, svg,
+    AnyElement, App, Bounds, Context, CursorStyle, Div, DragMoveEvent, FontWeight, IntoElement, MouseButton,
+    MouseDownEvent, Pixels, Point, Window, canvas, div, prelude::*, px, relative, rgb, rgba, svg,
 };
+use protocol::host::HostId;
 use protocol::message::SessionStatus;
 
 use app_core::menus::{self, MenuAction, MenuEntry, MenuItem};
@@ -18,6 +20,7 @@ use app_core::shortcuts::{self, Platform};
 use crate::assets::{CLOSE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
 use crate::hover_card::{self, HoverCard};
+use crate::launcher_view::{FolderRow, star};
 use crate::pane_drag::DraggedPane;
 use crate::settings_store::SettingsStore;
 use crate::theme::{
@@ -144,57 +147,180 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// The screen with no tabs: what a session is, the recent folders of every host to start one in, and the other ways in.
+    fn render_welcome(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = theme(cx).clone();
+        let settings = cx.global::<SettingsStore>().settings().clone();
+        let platform = Platform::current();
+        let key = |action: &str| {
+            shortcuts::current(action, &settings.shortcuts, platform).map(|key| shortcuts::label(Some(&key), platform))
+        };
+        let home = std::env::home_dir();
+        let hosts: Vec<HostId> = self.ssh_hosts.iter().map(|entry| HostId::named(&entry.name)).collect();
+        let cached = self.welcome_items.borrow().clone();
+        let items = cached.unwrap_or_else(|| {
+            let items = launcher::welcome_items(&self.recent_folders(cx), home.as_deref(), &settings.favorites, &hosts);
+            *self.welcome_items.borrow_mut() = Some(items.clone());
+            items
+        });
+        let rows = items.iter().enumerate().filter_map(|(index, item)| {
+            let LauncherItem::Dir { host, path, favorite, exists } = item else { return None };
+            let (host, path, dimmed) = (host.clone(), path.clone(), !exists);
+            let group = format!("welcome-row-{index}");
+            let lead = star(*favorite, &theme);
+            let row = FolderRow {
+                host: &host,
+                path: &path,
+                home: home.as_deref(),
+                connected: self.client(&host).is_some(),
+                lead,
+                selected: false,
+                dimmed,
+            };
+            let start = (!dimmed).then(|| {
+                div()
+                    .flex_none()
+                    .h(theme.ui(22.))
+                    .px(theme.ui(10.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(RADIUS_SMALL))
+                    .bg(rgb(theme.tokens.accent))
+                    .text_color(rgb(theme.tokens.on_accent))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .opacity(0.)
+                    .group_hover(group.clone(), |style| style.opacity(1.))
+                    .child("Start")
+                    .into_any_element()
+            });
+            let row = row.render(&theme, ("welcome-row", index), start.into_iter().collect()).group(group);
+            Some(if dimmed {
+                row
+            } else {
+                row.on_click(cx.listener(move |this, _, window, cx| {
+                    // A start waits for the daemon's container answer; a second click would open a second session.
+                    if this.pending_opens.is_empty() {
+                        this.open_folder(host.clone(), path.clone(), true, None, window, cx)
+                    }
+                }))
+            })
+        });
+        let rows: Vec<_> = rows.collect();
+        let has_rows = !rows.is_empty();
+        let action = |id: &'static str, title: &'static str, sub: String, claude: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .min_w_0()
+                .p(theme.ui(14.))
+                .flex()
+                .flex_col()
+                .gap(theme.ui(2.))
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(rgb(theme.tokens.line))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme.tokens.raised)).border_color(rgb(theme.tokens.accent)))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(div().text_xs().text_color(rgb(theme.tokens.muted)).child(sub))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if claude { this.show_recents(None, window, cx) } else { this.show_launcher(false, window, cx) }
+                }))
+        };
+        let continue_sub = match key("openRecents") {
+            Some(key) => format!("Pick up a past session · {key}"),
+            None => "Pick up a past session".into(),
+        };
+        div()
+            .id("welcome")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .items_center()
+            .py(theme.ui(48.))
+            .text_sm()
+            .child(
+                div()
+                    .w(theme.ui(560.))
+                    .max_w_full()
+                    .px(theme.ui(16.))
+                    .flex()
+                    .flex_col()
+                    .gap(theme.ui(16.))
+                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Start a Claude session"))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child("Claude works inside a folder. Pick the project you want it to work on."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .rounded(px(RADIUS_LARGE))
+                            .border_1()
+                            .border_color(rgb(theme.tokens.line))
+                            .bg(rgb(theme.tokens.surface))
+                            .overflow_hidden()
+                            .when(has_rows, |card| {
+                                card.child(
+                                    div()
+                                        .px(theme.ui(16.))
+                                        .py(theme.ui(10.))
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme.tokens.muted))
+                                        .child("Recent folders"),
+                                )
+                                .children(rows)
+                            })
+                            .child(
+                                div()
+                                    .id("welcome-choose")
+                                    .h(theme.ui(40.))
+                                    .px(theme.ui(16.))
+                                    .flex()
+                                    .items_center()
+                                    .when(has_rows, |foot| foot.border_t_1().border_color(rgb(theme.tokens.line)))
+                                    .text_color(rgb(theme.tokens.accent))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                                    .child(if has_rows { "Choose another folder…" } else { "Choose a folder…" })
+                                    .on_click(cx.listener(|this, _, window, cx| this.show_launcher(true, window, cx))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(theme.ui(12.))
+                            .child(action("welcome-continue", "Continue a conversation", continue_sub, true))
+                            .child(action(
+                                "welcome-terminal",
+                                "Open a terminal",
+                                "A plain shell, no Claude".into(),
+                                false,
+                            )),
+                    )
+                    .children(key("openLauncher").map(|key| {
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.tokens.muted))
+                            .child(format!("Anywhere in Gantry, {key} starts a new session."))
+                    })),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_active_tab(&self, animate: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
         let Some(tab) = self.workspace.active_tab() else {
-            return div()
-                .flex_1()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .child(
-                    div()
-                        .id("empty-claude")
-                        .w(theme.ui(220.))
-                        .h(theme.ui(40.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(RADIUS))
-                        .bg(rgb(theme.tokens.accent))
-                        .text_color(rgb(theme.tokens.on_accent))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .cursor_pointer()
-                        .child("New Claude session")
-                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
-                            this.new_pressed(true, event.position(), window, cx)
-                        })),
-                )
-                .child(
-                    div()
-                        .id("empty-shell")
-                        .w(theme.ui(220.))
-                        .h(theme.ui(40.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(RADIUS))
-                        .border_1()
-                        .border_color(rgb(theme.tokens.line))
-                        .text_color(rgb(theme.tokens.muted))
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
-                        .child("New shell")
-                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
-                            this.new_pressed(false, event.position(), window, cx)
-                        })),
-                )
-                .into_any_element();
+            return self.render_welcome(cx);
         };
+        self.welcome_items.take(); // rebuilt when the screen shows again
         if tab.settings {
             return match self.settings.clone() {
                 Some(page) => div().id("tab-content").flex_1().min_h_0().w_full().child(page).into_any_element(),

@@ -536,7 +536,7 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .gap(theme.ui(4.))
-                .child(muted(theme, "Shell panes always have a scrollbar. This adds one to Claude panes."))
+                .child(muted(theme, "Terminal panes always have a scrollbar. This adds one to Claude panes."))
                 .child(muted(
                     theme,
                     "Note: Claude's fullscreen mode doesn't allow external scrollbars, so this only works in classic mode. To use it, run /tui default in Claude.",

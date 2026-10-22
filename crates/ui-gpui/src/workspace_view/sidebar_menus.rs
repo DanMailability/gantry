@@ -1,8 +1,7 @@
 use super::{FindSession, OpenRecents, OpenSettings, TakeOverTarget, ToggleSidebar, WorkspaceView};
 
 use app_core::attention::AlertKind;
-use app_core::host_state::HostDot;
-use gpui::{ClipboardItem, Context, Focusable, MouseButton, MouseMoveEvent, Pixels, Point, PromptLevel, Window, px};
+use gpui::{ClipboardItem, Context, Focusable, MouseButton, MouseMoveEvent, Pixels, Point, PromptLevel, Window};
 use protocol::host::HostId;
 use protocol::message::SessionState;
 
@@ -37,9 +36,6 @@ impl WorkspaceView {
                     self.open(claude, Some(axis), window, cx);
                 }
             }
-            MenuAction::NewLocal { claude } => self.show_launcher(claude, HostId::local(), window, cx),
-            MenuAction::NewOnHost { host, claude } => self.show_launcher(claude, HostId::named(&host), window, cx),
-            MenuAction::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
             MenuAction::OpenInVsCode(args) => self.open_in_vscode(args, window, cx),
@@ -145,7 +141,6 @@ impl WorkspaceView {
                 action: MenuAction::CloseTab(index),
                 swatch: None,
                 checked: false,
-                dot: None,
             })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };
@@ -172,35 +167,6 @@ impl WorkspaceView {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         self.tab_menu = Some(OpenMenu::new(items, position, focus));
-        cx.notify();
-    }
-
-    /// A New button was pressed: the launcher, or first a list of `Local` and the SSH hosts.
-    pub(super) fn new_pressed(
-        &mut self,
-        claude: bool,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.ssh_hosts.is_empty() {
-            self.show_launcher(claude, HostId::local(), window, cx);
-            return;
-        }
-        let hosts: Vec<(String, String, HostDot)> = self
-            .ssh_hosts
-            .iter()
-            .map(|host| {
-                let state = self.host_state(&HostId::named(&host.name));
-                (host.name.clone(), state.label(), state.dot())
-            })
-            .collect();
-        let items = menus::host_menu(claude, &hosts);
-        // The buttons are at the bottom of the window: open the list upward from the click.
-        let height = px(30. * items.len() as f32 + 8.);
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
-        self.host_menu = Some(OpenMenu::new(items, position - gpui::point(px(0.), height), focus));
         cx.notify();
     }
 
@@ -247,7 +213,7 @@ impl WorkspaceView {
             }
             SidebarEvent::CloseGit => self.close_git_page(window, cx),
             SidebarEvent::TabMenu { index, position } => self.open_tab_menu(index, position, window, cx),
-            SidebarEvent::New { claude, position } => self.new_pressed(claude, position, window, cx),
+            SidebarEvent::New { claude } => self.show_launcher(claude, window, cx),
             SidebarEvent::PullOut(leaf) => {
                 if self.workspace.pull_out(leaf) {
                     self.focus_current(window, cx);
