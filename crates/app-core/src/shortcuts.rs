@@ -335,6 +335,8 @@ pub fn label(keystroke: Option<&str>, platform: Platform) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn labels_say_terminal_and_session() {
         let label = |id: &str| ACTIONS.iter().find(|a| a.id == id).unwrap().label;
@@ -344,8 +346,6 @@ mod tests {
         assert_eq!(label("splitDownShell"), "Split down (terminal)");
         assert_eq!(label("openLauncher"), "New Claude session…");
     }
-
-    use super::*;
 
     fn none() -> BTreeMap<String, Option<String>> {
         BTreeMap::new()

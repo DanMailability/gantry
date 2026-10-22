@@ -263,12 +263,30 @@ impl PaneLaunch {
     /// session like one started in Gantry. The program and the typed arguments stay as typed; a `--session-id` is
     /// added unless the arguments already pick or continue a session, and the config dir is the folder's `dir`.
     pub fn as_command_line(self, dir: &ResolvedDir, daemon_dir: Option<&Path>) -> PaneLaunch {
-        if Path::new(&self.program).file_stem().is_none_or(|stem| stem != CLAUDE) {
+        const NOT_SESSIONS: [&str; 12] = [
+            "mcp",
+            "config",
+            "update",
+            "doctor",
+            "install",
+            "plugin",
+            "setup-token",
+            "migrate-installer",
+            "-v",
+            "--version",
+            "-h",
+            "--help",
+        ];
+        let is_claude = Path::new(&self.program).file_stem().is_some_and(|stem| stem == CLAUDE);
+        if !is_claude || self.args.first().is_some_and(|first| NOT_SESSIONS.contains(&first.as_str())) {
             return self;
         }
         let mut args = self.args;
-        let has_session = claude_session(true, &self.program, &args).is_some()
-            || args.iter().any(|arg| matches!(arg.as_str(), "--continue" | "-c"));
+        let has_session = args.iter().any(|arg| {
+            matches!(arg.as_str(), "--resume" | "-r" | "--session-id" | "--continue" | "-c")
+                || arg.starts_with("--resume=")
+                || arg.starts_with("--session-id=")
+        });
         if !has_session {
             args.extend(["--session-id".into(), uuid::Uuid::new_v4().to_string()]);
         }
@@ -525,7 +543,7 @@ pub struct Workspace {
     /// Sidebar visibility and width.
     #[serde(default)]
     pub sidebar: SidebarState,
-    /// Finished tabs and leaves that "Start with one new tab" dropped at startup; written back into every saved copy
+    /// Finished tabs and leaves that "Running only" dropped at startup; written back into every saved copy
     /// so that switching to "Restore tabs and panes" brings them back.
     #[serde(skip)]
     dropped: Vec<(Tab, Vec<(NodeId, Leaf)>)>,
@@ -1181,6 +1199,9 @@ pub fn restore(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::settings::ClaudeDir;
+
     fn typed(program: &str, args: &[&str]) -> PaneLaunch {
         PaneLaunch {
             program: program.into(),
@@ -1215,10 +1236,28 @@ mod tests {
 
     #[test]
     fn a_command_line_claude_keeps_its_own_session_flag() {
-        for args in [&["--resume", "abc"][..], &["-r", "abc"], &["--continue"], &["-c"], &["--session-id", "s1"]] {
+        for args in [
+            &["--resume", "abc"][..],
+            &["-r", "abc"],
+            &["--resume"],
+            &["-r"],
+            &["--resume=abc"],
+            &["--session-id=abc"],
+            &["--continue"],
+            &["-c"],
+            &["--session-id", "s1"],
+        ] {
             let launch = typed("claude", args).as_command_line(&dir_at("/cfg"), None);
             assert!(launch.claude);
             assert_eq!(launch.args, args);
+        }
+    }
+
+    #[test]
+    fn claude_subcommands_and_info_flags_are_not_sessions() {
+        for args in [&["update"][..], &["--version"], &["mcp", "list"], &["-h"]] {
+            let launch = typed("claude", args);
+            assert_eq!(launch.clone().as_command_line(&dir_at("/cfg"), None), launch);
         }
     }
 
@@ -1245,9 +1284,6 @@ mod tests {
         assert_eq!(own.claude_dir, None);
         assert!(own.env.is_empty());
     }
-
-    use super::*;
-    use crate::settings::ClaudeDir;
 
     #[test]
     fn a_dirs_badge_is_its_upper_cased_first_letter_on_its_color() {

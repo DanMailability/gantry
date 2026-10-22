@@ -134,6 +134,12 @@ impl WorkspaceView {
             return;
         }
         let source = self.workspace.focused().and_then(|leaf| self.workspace.leaves.get(&leaf));
+        // A remote pane whose host is neither listed nor connected ("Not listed") starts a local tab.
+        let source = source.filter(|leaf| {
+            leaf.host.is_local()
+                || self.client(&leaf.host).is_some()
+                || self.ssh_hosts.iter().any(|entry| entry.name == leaf.host.name())
+        });
         let cwd = source.map_or_else(|| self.default_cwd.clone(), |leaf| leaf.launch.cwd.clone());
         let cwd_from = source.and_then(|leaf| leaf.key());
         let host = source.map(|leaf| leaf.host.clone()).unwrap_or_default();
