@@ -91,6 +91,7 @@ pub fn split_project_key(key: &Path) -> (HostId, PathBuf) {
         return (HostId::local(), key.to_path_buf());
     };
     match rest.split_once('/') {
+        Some((host, path)) if path.starts_with('~') => (HostId::named(host), PathBuf::from(path)),
         Some((host, path)) => (HostId::named(host), PathBuf::from(format!("/{path}"))),
         None => (HostId::named(rest), PathBuf::from("/")),
     }
@@ -146,5 +147,11 @@ mod tests {
     fn the_root_folder_of_a_remote_host_round_trips() {
         let key = project_key(&HostId::named("devbox"), Path::new("/"));
         assert_eq!(split_project_key(&key), (HostId::named("devbox"), PathBuf::from("/")));
+    }
+
+    #[test]
+    fn a_home_relative_folder_of_a_remote_host_round_trips() {
+        let key = project_key(&HostId::named("devbox"), Path::new("~/src"));
+        assert_eq!(split_project_key(&key), (HostId::named("devbox"), PathBuf::from("~/src")));
     }
 }
