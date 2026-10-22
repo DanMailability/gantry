@@ -10,6 +10,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 - **Terminal, not shell** - Buttons, menus and shortcut names say "terminal"; every sidebar row with New Claude here also has New terminal here, and the `>_` button says what it does.
+- **One launcher for every host** - The launcher lists your folders from this machine and every SSH host in one list, with the host's name on remote folders; type a path (`~/…`, `/…`, or `devbox:~/…` for a host) to open any folder, even one you never used; New Claude session and the terminal button open it straight away.
 - **"One new tab" is now "Running only"** - Same behavior, a name that says it.
 
 ### Removed
@@ -19,7 +20,6 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **New tab from an SSH pane** - Ctrl+Shift+T on a pane of an SSH host opens the new session on that host, not on this machine.
 - **`gantry -- claude`** - A Claude started from the command line is a tracked session with Continue, like one started in Gantry.
 - **Continue that can't continue** - Says why instead of doing nothing.
-- **New on an SSH host asks where** - Picking an SSH host after New Claude session or New terminal now opens the launcher on that host, so you choose the folder as you do on this machine, instead of starting in the host's home folder.
 
 ## [0.9.1] - 2026-10-19
 
