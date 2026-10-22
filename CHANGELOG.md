@@ -8,7 +8,17 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - **Update remote Gantry** - A connected SSH host that runs an older Gantry than this one shows `↑ <version>` in the SSH hosts list; one click uploads the new `gantryd` and restarts the host's daemon, after asking when sessions are running there.
 
+### Changed
+- **Terminal, not shell** - Buttons, menus and shortcut names say "terminal"; every sidebar row with New Claude here also has New terminal here, and the `>_` button says what it does.
+- **"One new tab" is now "Running only"** - Same behavior, a name that says it.
+
+### Removed
+- **Title-bar +** - Ctrl+Shift+T still opens a new session in the current folder.
+
 ### Fixed
+- **New tab from an SSH pane** - Ctrl+Shift+T on a pane of an SSH host opens the new session on that host, not on this machine.
+- **`gantry -- claude`** - A Claude started from the command line is a tracked session with Continue, like one started in Gantry.
+- **Continue that can't continue** - Says why instead of doing nothing.
 - **New on an SSH host asks where** - Picking an SSH host after New Claude session or New shell now opens the launcher on that host, so you choose the folder as you do on this machine, instead of starting in the host's home folder.
 
 ## [0.9.1] - 2026-10-19
