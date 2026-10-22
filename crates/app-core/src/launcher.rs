@@ -279,6 +279,22 @@ pub fn items(
     list
 }
 
+/// How many folders the welcome screen lists.
+pub const WELCOME_ROWS: usize = 5;
+
+/// The welcome screen's folders: favorites, then recent folders (newest first), each (host, folder) once, at most
+/// `WELCOME_ROWS`; no open folders and no host hints.
+pub fn welcome_items(
+    recent: &[RecentFolder],
+    home: Option<&Path>,
+    favorites: &[PathBuf],
+    hosts: &[HostId],
+) -> Vec<LauncherItem> {
+    let mut list = items(&[], recent, "", home, favorites, hosts);
+    list.truncate(WELCOME_ROWS);
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +404,19 @@ mod tests {
         assert!(!hinted("dev:"));
         assert!(!hinted(""));
         assert!(!hinted("box"));
+    }
+
+    #[test]
+    fn welcome_items_are_favorites_then_recent_capped() {
+        let favorites = [PathBuf::from("ssh://devbox/work"), PathBuf::from("/fav")];
+        let host = |n: u64| if n.is_multiple_of(2) { local() } else { devbox() };
+        let recent: Vec<RecentFolder> = (0..6u64).map(|n| recent(&host(n), &format!("/r{n}"), n)).collect();
+        let list = welcome_items(&recent, None, &favorites, &[devbox()]);
+        assert_eq!(list.len(), WELCOME_ROWS);
+        assert_eq!(
+            rows(&list),
+            vec!["fav devbox:/work", "fav local:/fav", "dir devbox:/r5", "dir local:/r4", "dir devbox:/r3"]
+        );
     }
 
     #[test]

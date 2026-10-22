@@ -90,6 +90,70 @@ fn pick_for(pick: Option<&Pick>, host: &HostId, folder: &Path) -> Option<usize> 
     pick.filter(|(pick_host, pick_folder, _)| pick_host == host && pick_folder == folder).map(|(_, _, dir)| *dir)
 }
 
+/// A host's name on a remote row: solid while it is connected, dashed with "not connected" otherwise.
+fn host_tag(host: &HostId, connected: bool, theme: &Theme) -> Option<AnyElement> {
+    let name = host.remote_name()?;
+    Some(
+        div()
+            .flex_none()
+            .h(theme.ui(18.))
+            .px(theme.ui(6.))
+            .flex()
+            .items_center()
+            .text_xs()
+            .rounded(px(RADIUS_SMALL))
+            .border_1()
+            .when(!connected, |tag| tag.border_dashed())
+            .border_color(rgb(if connected { theme.tokens.accent } else { theme.tokens.muted }))
+            .text_color(rgb(if connected { theme.tokens.accent } else { theme.tokens.muted }))
+            .child(if connected { name.to_string() } else { format!("{name} · not connected") })
+            .into_any_element(),
+    )
+}
+
+/// A folder's row as the launcher and the welcome screen draw it: mark, folder name, path, host tag, then `trailing`.
+pub(crate) struct FolderRow<'a> {
+    /// The host the folder is on.
+    pub host: &'a HostId,
+    /// The folder.
+    pub path: &'a Path,
+    /// This machine's home folder, shortened to `~` in the path.
+    pub home: Option<&'a Path>,
+    /// The host is connected (else its tag is dashed).
+    pub connected: bool,
+    /// The mark at the left: a status dot, a star or nothing.
+    pub lead: AnyElement,
+    /// The row is highlighted.
+    pub selected: bool,
+    /// The row is dimmed (a favorite whose folder is gone).
+    pub dimmed: bool,
+}
+
+impl FolderRow<'_> {
+    /// The row with `trailing` after the host tag; the caller adds the click.
+    pub(crate) fn render(self, theme: &Theme, id: impl Into<ElementId>, trailing: Vec<AnyElement>) -> Stateful<Div> {
+        let path = self.path;
+        let name =
+            path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+        let shown = if self.host.is_local() { display_path(path, self.home) } else { path.display().to_string() };
+        let mut children = vec![
+            div().flex_none().w(theme.ui(14.)).flex().items_center().child(self.lead).into_any_element(),
+            div().flex_none().font_weight(FontWeight::SEMIBOLD).child(name).into_any_element(),
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_xs()
+                .text_color(rgb(theme.tokens.muted))
+                .child(shown)
+                .into_any_element(),
+        ];
+        children.extend(host_tag(self.host, self.connected, theme));
+        children.extend(trailing);
+        LauncherView::row(theme, id, self.selected, self.dimmed, children)
+    }
+}
+
 /// The launcher overlay.
 pub struct LauncherView {
     focus_handle: FocusHandle,
@@ -472,28 +536,6 @@ impl LauncherView {
         )
     }
 
-    /// The host's name on a remote row: solid while it is connected, dashed with "not connected" otherwise.
-    fn host_tag(&self, host: &HostId, theme: &Theme) -> Option<AnyElement> {
-        let name = host.remote_name()?;
-        let connected = self.host_connected(host);
-        Some(
-            div()
-                .flex_none()
-                .h(theme.ui(18.))
-                .px(theme.ui(6.))
-                .flex()
-                .items_center()
-                .text_xs()
-                .rounded(px(RADIUS_SMALL))
-                .border_1()
-                .when(!connected, |tag| tag.border_dashed())
-                .border_color(rgb(if connected { theme.tokens.accent } else { theme.tokens.muted }))
-                .text_color(rgb(if connected { theme.tokens.accent } else { theme.tokens.muted }))
-                .child(if connected { name.to_string() } else { format!("{name} · not connected") })
-                .into_any_element(),
-        )
-    }
-
     /// A row's mark: the status dot of an open folder, a star for a favorite, else nothing.
     fn mark(&self, host: &HostId, path: &Path, theme: &Theme) -> AnyElement {
         if let Some(folder) = self.open.iter().find(|folder| folder.host == *host && folder.path == path) {
@@ -567,31 +609,23 @@ impl LauncherView {
             LauncherItem::Open(folder) => (folder.host.clone(), folder.path.clone(), false),
             LauncherItem::Dir { host, path, exists, .. } => (host.clone(), path.clone(), !exists),
         };
-        let lead = self.mark(&host, &path, &theme);
-        let name =
-            path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
-        let shown =
-            if host.is_local() { display_path(&path, self.home.as_deref()) } else { path.display().to_string() };
-        let mut children = vec![
-            div().flex_none().w(theme.ui(14.)).flex().items_center().child(lead).into_any_element(),
-            div().flex_none().font_weight(FontWeight::SEMIBOLD).child(name).into_any_element(),
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_xs()
-                .text_color(rgb(theme.tokens.muted))
-                .child(shown)
-                .into_any_element(),
-        ];
-        children.extend(self.host_tag(&host, &theme));
+        let row = FolderRow {
+            host: &host,
+            path: &path,
+            home: self.home.as_deref(),
+            connected: self.host_connected(&host),
+            lead: self.mark(&host, &path, &theme),
+            selected,
+            dimmed,
+        };
+        let mut trailing = Vec::new();
         if let Some((_, dir)) = self.badge().filter(|_| selected && !dimmed) {
-            children.push(self.render_badge(dir, &theme, cx));
+            trailing.push(self.render_badge(dir, &theme, cx));
         }
         if selected && !dimmed {
-            children.push(Self::enter_mark(&theme));
+            trailing.push(Self::enter_mark(&theme));
         }
-        Self::row(&theme, index, selected, dimmed, children)
+        row.render(&theme, index, trailing)
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, event.modifiers().alt, cx)))
     }
 
@@ -606,7 +640,7 @@ impl LauncherView {
             div().flex_none().w(theme.ui(14.)).flex().items_center().child(lead).into_any_element(),
             div().flex_1().min_w_0().truncate().child(format!("{}/", dir.name)).into_any_element(),
         ];
-        children.extend(self.host_tag(host, &theme));
+        children.extend(host_tag(host, self.host_connected(host), &theme));
         if let Some((_, badge)) = self.badge().filter(|_| selected) {
             children.push(self.render_badge(badge, &theme, cx));
         }
