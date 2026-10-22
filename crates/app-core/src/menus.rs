@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use protocol::host::{HostId, split_project_key};
 use protocol::message::{ContainerPlace, SessionState};
 
-use crate::host_state::HostDot;
 use crate::session_tree::{Row, RowKind, Tone};
 use crate::settings::Settings;
 use crate::split_tree::{Axis, NodeId};
@@ -123,8 +122,6 @@ pub struct MenuEntry {
     pub swatch: Option<ProjectColor>,
     /// Marked as the current choice.
     pub checked: bool,
-    /// A state dot drawn before the label (SSH hosts in the New menu).
-    pub dot: Option<HostDot>,
 }
 
 /// A menu line.
@@ -188,7 +185,6 @@ fn entry(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
-        dot: None,
     })
 }
 
@@ -200,7 +196,6 @@ fn with_shortcut(label: &str, shortcut: Shortcut, action: MenuAction) -> MenuIte
         action,
         swatch: None,
         checked: false,
-        dot: None,
     })
 }
 
@@ -212,7 +207,6 @@ fn accented(label: &str, action: MenuAction) -> MenuItem {
         action,
         swatch: None,
         checked: false,
-        dot: None,
     })
 }
 
@@ -231,7 +225,6 @@ fn color_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
                 action,
                 swatch: Some(color),
                 checked: current == Some(color),
-                dot: None,
             })
         })
         .collect();
@@ -242,7 +235,6 @@ fn color_menu(root: &Path, current: Option<ProjectColor>) -> MenuItem {
         action: MenuAction::SetProjectColor { root: root.to_path_buf(), color: None },
         swatch: None,
         checked: current.is_none(),
-        dot: None,
     }));
     MenuItem::Submenu { label: "Color".into(), items }
 }

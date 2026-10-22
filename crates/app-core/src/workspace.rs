@@ -621,7 +621,9 @@ impl Workspace {
         if let Some(instance) = self.instances.remove(from) {
             self.instances.insert(to.clone(), instance);
         }
-        if let Some(folders) = self.host_folders.remove(from) {
+        let folders = self.host_folders.remove(from);
+        self.host_folders.remove(to);
+        if let Some(folders) = folders {
             self.host_folders.insert(to.clone(), folders);
         }
         Ok(())
@@ -648,7 +650,8 @@ impl Workspace {
 
     /// Remember the folders of the existing-folder sessions of the SSH host `host` (its newest `HOST_FOLDERS_KEPT`,
     /// newest first, each once). This machine is never remembered, and a host with no folders in `sessions` keeps what
-    /// it had. True when what is remembered changed.
+    /// it had. True when the remembered folders or their order changed; newer times alone are stored but report false,
+    /// so a busy session does not rewrite the layout.
     pub fn remember_host_folders(&mut self, host: &HostId, sessions: &[&SessionInfo]) -> bool {
         if host.is_local() {
             return false;
@@ -664,11 +667,14 @@ impl Workspace {
             .collect();
         folders.sort_by(|a, b| b.last_active_ms.cmp(&a.last_active_ms).then_with(|| a.path.cmp(&b.path)));
         folders.truncate(HOST_FOLDERS_KEPT);
-        if folders.is_empty() || self.host_folders.get(host) == Some(&folders) {
+        if folders.is_empty() {
             return false;
         }
+        let same_folders = self.host_folders.get(host).is_some_and(|kept| {
+            kept.len() == folders.len() && kept.iter().zip(&folders).all(|(a, b)| a.path == b.path)
+        });
         self.host_folders.insert(host.clone(), folders);
-        true
+        !same_folders
     }
 
     /// Name a shell pane (trimmed; empty clears it). False, changing nothing, for a missing or Claude leaf.
@@ -3118,6 +3124,30 @@ mod tests {
         assert_eq!((kept[0].path.clone(), kept[0].last_active_ms), (PathBuf::from("/f21"), 121));
         assert!(kept.windows(2).all(|pair| pair[0].last_active_ms >= pair[1].last_active_ms));
         assert!(!ws.remember_host_folders(&dev, &refs), "the same input changes nothing");
+    }
+
+    #[test]
+    fn newer_times_alone_are_stored_without_reporting_a_change() {
+        let dev = HostId::named("dev");
+        let mut ws = Workspace::default();
+        let first = [folder_session("/a", 5, true), folder_session("/b", 3, true)];
+        assert!(ws.remember_host_folders(&dev, &first.iter().collect::<Vec<_>>()));
+        let later = [folder_session("/a", 50, true), folder_session("/b", 3, true)];
+        assert!(!ws.remember_host_folders(&dev, &later.iter().collect::<Vec<_>>()));
+        assert_eq!(ws.host_folders[&dev][0].last_active_ms, 50);
+        let reordered = [folder_session("/a", 50, true), folder_session("/b", 60, true)];
+        assert!(ws.remember_host_folders(&dev, &reordered.iter().collect::<Vec<_>>()), "the order changed");
+    }
+
+    #[test]
+    fn a_rename_replaces_a_stale_entry_under_the_new_name() {
+        let (dev, box2) = (HostId::named("dev"), HostId::named("box2"));
+        let mut ws = Workspace::default();
+        let old = [folder_session("/stale", 1, true)];
+        ws.remember_host_folders(&box2, &old.iter().collect::<Vec<_>>());
+        ws.host_folders.remove(&dev);
+        ws.rename_host(&dev, &box2).unwrap();
+        assert!(ws.host_folders.is_empty(), "no entry for dev: the stale one under box2 goes too");
     }
 
     #[test]

@@ -141,7 +141,6 @@ impl WorkspaceView {
                 action: MenuAction::CloseTab(index),
                 swatch: None,
                 checked: false,
-                dot: None,
             })]
         } else {
             let Some(leaf) = self.workspace.leaves.get(&tab.focused) else { return };

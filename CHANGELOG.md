@@ -11,6 +11,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Changed
 - **Terminal, not shell** - Buttons, menus and shortcut names say "terminal"; every sidebar row with New Claude here also has New terminal here, and the `>_` button says what it does.
 - **One launcher for every host** - The launcher lists your folders from this machine and every SSH host in one list, with the host's name on remote folders; type a path (`~/…`, `/…`, or `devbox:~/…` for a host) to open any folder, even one you never used; New Claude session and the terminal button open it straight away.
+  - The Claude config dir is a small badge on the highlighted folder (Tab / Shift+Tab or a click changes it), shown only with two or more config dirs.
 - **"One new tab" is now "Running only"** - Same behavior, a name that says it.
 
 ### Removed

@@ -34,10 +34,6 @@ pub struct OpenFolder {
     pub path: PathBuf,
     /// The most urgent tone among its Claude panes; `None` when it has only shells.
     pub tone: Option<Tone>,
-    /// Claude panes in it.
-    pub claude_panes: usize,
-    /// Shell panes in it.
-    pub shell_panes: usize,
 }
 
 fn urgency(tone: Tone) -> u8 {
@@ -56,24 +52,13 @@ pub fn open_folders(panes: &[OpenPane]) -> Vec<OpenFolder> {
         let at = match folders.iter().position(|folder| folder.host == pane.host && folder.path == pane.cwd) {
             Some(at) => at,
             None => {
-                folders.push(OpenFolder {
-                    host: pane.host.clone(),
-                    path: pane.cwd.clone(),
-                    tone: None,
-                    claude_panes: 0,
-                    shell_panes: 0,
-                });
+                folders.push(OpenFolder { host: pane.host.clone(), path: pane.cwd.clone(), tone: None });
                 folders.len() - 1
             }
         };
         let folder = &mut folders[at];
-        if pane.claude {
-            folder.claude_panes += 1;
-            if folder.tone.is_none_or(|tone| urgency(pane.tone) < urgency(tone)) {
-                folder.tone = Some(pane.tone);
-            }
-        } else {
-            folder.shell_panes += 1;
+        if pane.claude && folder.tone.is_none_or(|tone| urgency(pane.tone) < urgency(tone)) {
+            folder.tone = Some(pane.tone);
         }
     }
     folders
@@ -201,18 +186,20 @@ pub enum Typed {
 }
 
 /// `/…` and `~…` are paths on this machine; `<host>:<path>` is a path on that host when it is one of `hosts`
-/// (the `sshHosts` names); anything else filters.
+/// (the `sshHosts` names, matched ignoring case; a path starting with neither `/` nor `~` is under `~/`, like scp);
+/// anything else filters.
 pub fn typed(text: &str, hosts: &[HostId]) -> Typed {
     if text.starts_with(['/', '~']) {
         return Typed::Path { host: HostId::local(), path: text.to_string() };
     }
-    match text.split_once(':') {
-        Some((name, path)) if !name.is_empty() && hosts.contains(&HostId::named(name)) => Typed::Path {
-            host: HostId::named(name),
-            path: if path.is_empty() { "~/".to_string() } else { path.to_string() },
-        },
-        _ => Typed::Filter,
-    }
+    let Some((name, path)) = text.split_once(':') else { return Typed::Filter };
+    let Some(host) = hosts.iter().find(|host| host.name().eq_ignore_ascii_case(name)) else { return Typed::Filter };
+    let path = match path {
+        "" => "~/".to_string(),
+        path if path.starts_with(['/', '~']) => path.to_string(),
+        path => format!("~/{path}"),
+    };
+    Typed::Path { host: host.clone(), path }
 }
 
 /// What a row is matched against: the displayed path on this machine, `<host>:<path>` on a host.
@@ -328,7 +315,7 @@ mod tests {
     }
 
     fn open(host: &HostId, path: &str) -> OpenFolder {
-        OpenFolder { host: host.clone(), path: path.into(), tone: None, claude_panes: 0, shell_panes: 1 }
+        OpenFolder { host: host.clone(), path: path.into(), tone: None }
     }
 
     fn pane(cwd: &str, claude: bool, tone: Tone) -> OpenPane {
@@ -411,6 +398,8 @@ mod tests {
         assert_eq!(typed("/etc", &hosts), path(local(), "/etc"));
         assert_eq!(typed("devbox:~/src/m", &hosts), path(devbox(), "~/src/m"));
         assert_eq!(typed("devbox:", &hosts), path(devbox(), "~/"));
+        assert_eq!(typed("devbox:src", &hosts), path(devbox(), "~/src"));
+        assert_eq!(typed("DevBox:/etc", &hosts), path(devbox(), "/etc"));
         assert_eq!(typed("nohost:~/x", &hosts), Typed::Filter);
         assert_eq!(typed("devbox:~/x", &[]), Typed::Filter);
         assert_eq!(typed(":~/x", &hosts), Typed::Filter);
@@ -467,20 +456,10 @@ mod tests {
             pane("/c", true, Tone::Working),
             pane("/c", true, Tone::Done),
         ];
-        let folder = |path: &str, tone, claude_panes, shell_panes| OpenFolder {
-            host: local(),
-            path: path.into(),
-            tone,
-            claude_panes,
-            shell_panes,
-        };
+        let folder = |path: &str, tone| OpenFolder { host: local(), path: path.into(), tone };
         assert_eq!(
             open_folders(&panes),
-            vec![
-                folder("/a", Some(Tone::NeedsInput), 2, 1),
-                folder("/b", None, 0, 1),
-                folder("/c", Some(Tone::Working), 2, 0),
-            ]
+            vec![folder("/a", Some(Tone::NeedsInput)), folder("/b", None), folder("/c", Some(Tone::Working)),]
         );
     }
 

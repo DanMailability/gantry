@@ -91,7 +91,7 @@ pub fn split_project_key(key: &Path) -> (HostId, PathBuf) {
         return (HostId::local(), key.to_path_buf());
     };
     match rest.split_once('/') {
-        Some((host, path)) if path.starts_with('~') => (HostId::named(host), PathBuf::from(path)),
+        Some((host, path)) if path == "~" || path.starts_with("~/") => (HostId::named(host), PathBuf::from(path)),
         Some((host, path)) => (HostId::named(host), PathBuf::from(format!("/{path}"))),
         None => (HostId::named(rest), PathBuf::from("/")),
     }
@@ -153,5 +153,14 @@ mod tests {
     fn a_home_relative_folder_of_a_remote_host_round_trips() {
         let key = project_key(&HostId::named("devbox"), Path::new("~/src"));
         assert_eq!(split_project_key(&key), (HostId::named("devbox"), PathBuf::from("~/src")));
+    }
+
+    #[test]
+    fn only_tilde_alone_or_tilde_slash_is_home_relative() {
+        assert_eq!(split_project_key(Path::new("ssh://devbox/~")), (HostId::named("devbox"), PathBuf::from("~")));
+        assert_eq!(
+            split_project_key(Path::new("ssh://devbox/~backup/x")),
+            (HostId::named("devbox"), PathBuf::from("/~backup/x"))
+        );
     }
 }

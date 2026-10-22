@@ -12,6 +12,7 @@ use app_core::dir_complete::{self, Completion, TabAction};
 use app_core::host_state::{HostState, away_line};
 use app_core::launcher::{self, LauncherItem, OpenFolder, RecentFolder, Typed};
 use app_core::session_tree::display_path;
+use app_core::settings::expand_home;
 use app_core::text_field::TextField;
 use app_core::workspace::ClaudeDirs;
 use gpui::{
@@ -19,7 +20,7 @@ use gpui::{
     IntoElement, KeyDownEvent, MouseButton, Render, ScrollStrategy, Stateful, UniformListScrollHandle, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
-use protocol::host::HostId;
+use protocol::host::{HostId, split_project_key};
 use protocol::message::DirEntry;
 
 use crate::field;
@@ -289,14 +290,22 @@ impl LauncherView {
         let prefix = if host.is_local() { String::new() } else { format!("{}:", host.name()) };
         self.query = TextField::default();
         self.query.insert(&format!("{prefix}{parent}{}/", dir.name));
+        self.badge_open = false;
         self.typed_changed(cx);
+    }
+
+    /// A path of `host` as a launch uses it: `~` expanded on this machine, a remote path as typed.
+    fn launch_path(&self, host: &HostId, path: &str) -> PathBuf {
+        let path = PathBuf::from(path);
+        if host.is_local() { expand_home(&path, self.home.as_deref()) } else { path }
     }
 
     /// The folder the highlight is on: a completion row in path mode, else the highlighted list row.
     fn highlighted(&self) -> Option<(HostId, PathBuf)> {
         if let Some((host, path)) = self.path_mode() {
             let dir = self.completions().get(self.completion_selected?)?.clone();
-            return Some((host, PathBuf::from(format!("{}{}", dir_complete::split_typed(&path).0, dir.name))));
+            let full = format!("{}{}", dir_complete::split_typed(&path).0, dir.name);
+            return Some((host.clone(), self.launch_path(&host, &full)));
         }
         let item = self.items.get(self.selected)?;
         Some((item.host().clone(), item.folder()?.clone()))
@@ -313,7 +322,8 @@ impl LauncherView {
     /// or more dirs. The row's own pick, else what the folder resolves to.
     fn badge(&self) -> Option<(PathBuf, usize)> {
         let (host, folder) = self.highlighted().filter(|(host, _)| host.is_local())?;
-        if !self.claude_first || self.dirs.dirs.len() < 2 {
+        let missing = matches!(self.items.get(self.selected), Some(LauncherItem::Dir { exists: false, .. }));
+        if !self.claude_first || (missing && self.path_mode().is_none()) || self.dirs.dirs.len() < 2 {
             return None;
         }
         let dir = pick_for(self.pick.as_ref(), &host, &folder).unwrap_or_else(|| self.resolved_dir(&folder));
@@ -341,7 +351,7 @@ impl LauncherView {
             Some(dir) => format!("{}{}", dir_complete::split_typed(&path).0, dir.name),
             None => path,
         };
-        let dir = PathBuf::from(if typed.len() > 1 { typed.trim_end_matches('/') } else { typed.as_str() });
+        let dir = self.launch_path(&host, if typed.len() > 1 { typed.trim_end_matches('/') } else { typed.as_str() });
         let dir_pick = self.dir_pick_for(&host, &dir, claude);
         cx.emit(LauncherEvent::Open { host, dir, claude, dir_pick });
     }
@@ -350,6 +360,7 @@ impl LauncherView {
     fn fill_host(&mut self, host: &HostId, cx: &mut Context<Self>) {
         self.query = TextField::default();
         self.query.insert(&format!("{}:~/", host.name()));
+        self.badge_open = false;
         self.refresh();
         self.typed_changed(cx);
     }
@@ -386,6 +397,9 @@ impl LauncherView {
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let path_mode = self.path_mode();
+        if matches!(keystroke.key.as_str(), "up" | "down") {
+            self.badge_open = false;
+        }
         match keystroke.key.as_str() {
             "tab" if path_mode.is_some() => {
                 let path = path_mode.as_ref().map(|(_, path)| path.clone()).unwrap_or_default();
@@ -419,6 +433,7 @@ impl LauncherView {
                 if !field::edit(&mut self.query, keystroke, cx) {
                     return;
                 }
+                self.badge_open = false;
                 self.refresh();
                 self.typed_changed(cx);
             }
@@ -479,6 +494,22 @@ impl LauncherView {
         )
     }
 
+    /// A row's mark: the status dot of an open folder, a star for a favorite, else nothing.
+    fn mark(&self, host: &HostId, path: &Path, theme: &Theme) -> AnyElement {
+        if let Some(folder) = self.open.iter().find(|folder| folder.host == *host && folder.path == path) {
+            return div()
+                .size(theme.ui(8.))
+                .rounded_full()
+                .map(|dot| match folder.tone {
+                    Some(tone) => dot.bg(rgb(theme.tone(tone).dot)),
+                    None => dot.border_1().border_color(rgb(theme.tokens.muted)),
+                })
+                .into_any_element();
+        }
+        let favorite = self.favorites.iter().any(|key| split_project_key(key) == (host.clone(), path.to_path_buf()));
+        div().text_color(rgb(theme.tokens.accent)).child(if favorite { "★" } else { "" }).into_any_element()
+    }
+
     /// The dir badge of the highlighted row: the dir it will use, a click opens the list of dirs.
     fn render_badge(&self, dir: usize, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -503,12 +534,16 @@ impl LauncherView {
             .into_any_element()
     }
 
+    /// The `↵` on the highlighted row.
+    fn enter_mark(theme: &Theme) -> AnyElement {
+        div().flex_none().text_color(rgb(theme.tokens.muted)).child("↵").into_any_element()
+    }
+
     /// One row of the list.
     fn render_item(&self, index: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = theme(cx).clone();
         let selected = index == self.selected;
-        let enter = || div().flex_none().text_color(rgb(theme.tokens.muted)).child("↵").into_any_element();
-        let (host, path, lead, dimmed) = match &self.items[index] {
+        let (host, path, dimmed) = match &self.items[index] {
             LauncherItem::HostHint(host) => {
                 let id = host.clone();
                 let text = format!("{}: type a path on this host", host.name());
@@ -529,18 +564,10 @@ impl LauncherView {
                     },
                 ));
             }
-            LauncherItem::Open(folder) => {
-                let dot = div().size(theme.ui(8.)).rounded_full().map(|dot| match folder.tone {
-                    Some(tone) => dot.bg(rgb(theme.tone(tone).dot)),
-                    None => dot.border_1().border_color(rgb(theme.tokens.muted)),
-                });
-                (folder.host.clone(), folder.path.clone(), dot.into_any_element(), false)
-            }
-            LauncherItem::Dir { host, path, favorite, exists } => {
-                let star = div().text_color(rgb(theme.tokens.accent)).child(if *favorite { "★" } else { "" });
-                (host.clone(), path.clone(), star.into_any_element(), !exists)
-            }
+            LauncherItem::Open(folder) => (folder.host.clone(), folder.path.clone(), false),
+            LauncherItem::Dir { host, path, exists, .. } => (host.clone(), path.clone(), !exists),
         };
+        let lead = self.mark(&host, &path, &theme);
         let name =
             path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
         let shown =
@@ -558,11 +585,11 @@ impl LauncherView {
                 .into_any_element(),
         ];
         children.extend(self.host_tag(&host, &theme));
-        if let Some((_, dir)) = self.badge().filter(|_| selected) {
+        if let Some((_, dir)) = self.badge().filter(|_| selected && !dimmed) {
             children.push(self.render_badge(dir, &theme, cx));
         }
-        if selected {
-            children.push(enter());
+        if selected && !dimmed {
+            children.push(Self::enter_mark(&theme));
         }
         Self::row(&theme, index, selected, dimmed, children)
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.choose(index, event.modifiers().alt, cx)))
@@ -572,18 +599,19 @@ impl LauncherView {
     fn render_completion(&self, index: usize, dir: &DirEntry, host: &HostId, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = theme(cx).clone();
         let selected = self.completion_selected == Some(index);
+        let path = self.path_mode().map(|(_, path)| path).unwrap_or_default();
+        let folder = self.launch_path(host, &format!("{}{}", dir_complete::split_typed(&path).0, dir.name));
+        let lead = self.mark(host, &folder, &theme);
         let mut children = vec![
+            div().flex_none().w(theme.ui(14.)).flex().items_center().child(lead).into_any_element(),
             div().flex_1().min_w_0().truncate().child(format!("{}/", dir.name)).into_any_element(),
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(rgb(theme.tokens.muted))
-                .child(if dir.symlink { "(symlink)" } else { "" })
-                .into_any_element(),
         ];
         children.extend(self.host_tag(host, &theme));
         if let Some((_, badge)) = self.badge().filter(|_| selected) {
             children.push(self.render_badge(badge, &theme, cx));
+        }
+        if selected {
+            children.push(Self::enter_mark(&theme));
         }
         Self::row(&theme, ("launcher-completion", index), selected, false, children).on_click(cx.listener(
             move |this, _, _, cx| {
