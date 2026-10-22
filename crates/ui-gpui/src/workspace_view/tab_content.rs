@@ -20,7 +20,7 @@ use app_core::shortcuts::{self, Platform};
 use crate::assets::{CLOSE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
 use crate::hover_card::{self, HoverCard};
-use crate::launcher_view::FolderRow;
+use crate::launcher_view::{FolderRow, star};
 use crate::pane_drag::DraggedPane;
 use crate::settings_store::SettingsStore;
 use crate::theme::{
@@ -157,18 +157,23 @@ impl WorkspaceView {
         };
         let home = std::env::home_dir();
         let hosts: Vec<HostId> = self.ssh_hosts.iter().map(|entry| HostId::named(&entry.name)).collect();
-        let items = launcher::welcome_items(&self.recent_folders(cx), home.as_deref(), &settings.favorites, &hosts);
+        let cached = self.welcome_items.borrow().clone();
+        let items = cached.unwrap_or_else(|| {
+            let items = launcher::welcome_items(&self.recent_folders(cx), home.as_deref(), &settings.favorites, &hosts);
+            *self.welcome_items.borrow_mut() = Some(items.clone());
+            items
+        });
         let rows = items.iter().enumerate().filter_map(|(index, item)| {
             let LauncherItem::Dir { host, path, favorite, exists } = item else { return None };
             let (host, path, dimmed) = (host.clone(), path.clone(), !exists);
             let group = format!("welcome-row-{index}");
-            let lead = div().text_color(rgb(theme.tokens.accent)).child(if *favorite { "★" } else { "" });
+            let lead = star(*favorite, &theme);
             let row = FolderRow {
                 host: &host,
                 path: &path,
                 home: home.as_deref(),
                 connected: self.client(&host).is_some(),
-                lead: lead.into_any_element(),
+                lead,
                 selected: false,
                 dimmed,
             };
@@ -194,7 +199,10 @@ impl WorkspaceView {
                 row
             } else {
                 row.on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_folder(host.clone(), path.clone(), true, None, window, cx)
+                    // A start waits for the daemon's container answer; a second click would open a second session.
+                    if this.pending_opens.is_empty() {
+                        this.open_folder(host.clone(), path.clone(), true, None, window, cx)
+                    }
                 }))
             })
         });
@@ -312,6 +320,7 @@ impl WorkspaceView {
         let Some(tab) = self.workspace.active_tab() else {
             return self.render_welcome(cx);
         };
+        self.welcome_items.take(); // rebuilt when the screen shows again
         if tab.settings {
             return match self.settings.clone() {
                 Some(page) => div().id("tab-content").flex_1().min_h_0().w_full().child(page).into_any_element(),

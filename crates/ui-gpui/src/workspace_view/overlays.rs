@@ -43,6 +43,7 @@ impl WorkspaceView {
         }
         let settings = cx.global::<SettingsStore>().settings().clone();
         self.ssh_hosts = settings.ssh_hosts.clone();
+        self.welcome_items.take();
         if settings.check_for_updates != self.check_updates {
             self.check_updates = settings.check_for_updates;
             if self.check_updates {
@@ -143,8 +144,7 @@ impl WorkspaceView {
 
     /// The recent folders of this machine and every listed SSH host, for the launcher and the welcome screen.
     pub(super) fn recent_folders(&self, cx: &Context<Self>) -> Vec<RecentFolder> {
-        let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
-        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let refs: Vec<&SessionInfo> = self.sidebar.read(cx).sessions().all().collect();
         let listed: Vec<HostId> = self.ssh_hosts.iter().map(|entry| HostId::named(&entry.name)).collect();
         launcher::recent_folders(&refs, &self.workspace.host_folders, &listed)
     }

@@ -111,6 +111,11 @@ fn host_tag(host: &HostId, connected: bool, theme: &Theme) -> Option<AnyElement>
     )
 }
 
+/// The mark of a favorite folder (nothing for any other).
+pub(crate) fn star(favorite: bool, theme: &Theme) -> AnyElement {
+    div().text_color(rgb(theme.tokens.accent)).child(if favorite { "★" } else { "" }).into_any_element()
+}
+
 /// A folder's row as the launcher and the welcome screen draw it: mark, folder name, path, host tag, then `trailing`.
 pub(crate) struct FolderRow<'a> {
     /// The host the folder is on.
@@ -526,11 +531,11 @@ impl LauncherView {
                 .items_center()
                 .gap(theme.ui(10.))
                 .rounded(px(RADIUS_SMALL))
-                .cursor_pointer()
                 .overflow_hidden()
                 .whitespace_nowrap()
+                .when(!dimmed, |el| el.cursor_pointer())
                 .when(selected, |el| el.bg(rgb(theme.tokens.raised)))
-                .when(!selected, |el| el.hover(|style| style.bg(rgb(theme.tokens.raised))))
+                .when(!selected && !dimmed, |el| el.hover(|style| style.bg(rgb(theme.tokens.raised))))
                 .when(dimmed, |el| el.text_color(rgb(theme.tokens.muted)))
                 .children(children),
         )
@@ -549,7 +554,7 @@ impl LauncherView {
                 .into_any_element();
         }
         let favorite = self.favorites.iter().any(|key| split_project_key(key) == (host.clone(), path.to_path_buf()));
-        div().text_color(rgb(theme.tokens.accent)).child(if favorite { "★" } else { "" }).into_any_element()
+        star(favorite, theme)
     }
 
     /// The dir badge of the highlighted row: the dir it will use, a click opens the list of dirs.
