@@ -2,7 +2,7 @@ use super::{OpenLauncher, OpenRecents, OpenSettings, WorkspaceView};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use app_core::host_state::{HostDot, HostState};
+use app_core::host_state::HostState;
 use app_core::launcher::{self, OpenFolder, OpenPane};
 use app_core::recents;
 use app_core::release::CheckStatus;
@@ -101,7 +101,7 @@ impl WorkspaceView {
     }
 
     pub(super) fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_launcher(true, HostId::local(), window, cx);
+        self.show_launcher(true, window, cx);
     }
 
     /// The folders with live panes, in sidebar order, for the launcher's "Open now".
@@ -131,44 +131,29 @@ impl WorkspaceView {
         launcher::open_folders(&panes)
     }
 
-    /// This machine and the SSH hosts as the launcher's host chip lists them.
+    /// This machine and the SSH hosts, with where each connection stands.
     fn launcher_hosts(&self) -> Vec<LauncherHost> {
-        let local = LauncherHost {
-            id: HostId::local(),
-            label: "Local".into(),
-            dot: HostDot::Ok,
-            connected: true,
-            state: "connected".into(),
-        };
+        let local = LauncherHost { id: HostId::local(), connected: true, state: HostState::Connected };
         let hosts = self.ssh_hosts.iter().map(|entry| {
-            let (id, state) = (HostId::named(&entry.name), self.host_state(&HostId::named(&entry.name)));
-            LauncherHost {
-                label: format!("{} · {}", entry.name, state.label()),
-                dot: state.dot(),
-                connected: self.client(&id).is_some(),
-                state: state.label(),
-                id,
-            }
+            let id = HostId::named(&entry.name);
+            LauncherHost { connected: self.client(&id).is_some(), state: self.host_state(&id), id }
         });
-        if self.ssh_hosts.is_empty() { vec![local] } else { std::iter::once(local).chain(hosts).collect() }
+        std::iter::once(local).chain(hosts).collect()
     }
 
-    /// Open the launcher on `host`; `claude_first`: Enter starts Claude and Alt+Enter a shell, false swaps them.
-    pub(super) fn show_launcher(
-        &mut self,
-        claude_first: bool,
-        host: HostId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Open the launcher; `claude_first`: Enter starts Claude and Alt+Enter a terminal, false swaps them.
+    pub(super) fn show_launcher(&mut self, claude_first: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.setup.is_some() || self.ssh_wizard.is_some() {
             return;
         }
         self.recents = None;
         let sessions: Vec<SessionInfo> = self.sidebar.read(cx).sessions().all().cloned().collect();
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let listed: Vec<HostId> = self.ssh_hosts.iter().map(|entry| HostId::named(&entry.name)).collect();
+        let recent = launcher::recent_folders(&refs, &self.workspace.host_folders, &listed);
         let open = self.open_folders(cx);
         let hosts = self.launcher_hosts();
-        let view = cx.new(|cx| LauncherView::new(open, sessions, claude_first, hosts, host, cx));
+        let view = cx.new(|cx| LauncherView::new(open, recent, claude_first, hosts, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &LauncherEvent, window, cx| {
             this.on_launcher_event(event.clone(), window, cx)
         });
@@ -339,7 +324,7 @@ impl WorkspaceView {
             }
             LauncherEvent::Open { dir, claude, dir_pick, .. } => self.open_launcher_pick(claude, dir, dir_pick, cx),
             LauncherEvent::ListDir { .. } => {}
-            LauncherEvent::Browse { claude, dir_pick } => {
+            LauncherEvent::Browse { claude } => {
                 let picked = cx.prompt_for_paths(PathPromptOptions {
                     files: false,
                     directories: true,
@@ -352,7 +337,7 @@ impl WorkspaceView {
                         _ => None,
                     };
                     let _ = this.update_in(cx, |this, window, cx| match dir {
-                        Some(dir) => this.open_launcher_pick(claude, dir, dir_pick, cx),
+                        Some(dir) => this.open_launcher_pick(claude, dir, None, cx),
                         None => this.focus_current(window, cx),
                     });
                 })

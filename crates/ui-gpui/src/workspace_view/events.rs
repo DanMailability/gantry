@@ -81,6 +81,7 @@ impl WorkspaceView {
                     self.attention.reset(host, sessions);
                     let sessions = sessions.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.set_sessions(host, sessions, cx));
+                    self.remember_folders(host, cx);
                     self.push_recents(cx);
                     self.resume_finished(window, cx);
                 }
@@ -96,6 +97,7 @@ impl WorkspaceView {
                     let alerts = self.attention.update(host, upserted, removed);
                     let upserted = upserted.clone();
                     self.sidebar.update(cx, |sidebar, cx| sidebar.apply(host, upserted, removed, cx));
+                    self.remember_folders(host, cx);
                     for alert in alerts {
                         self.raise(alert, window, cx);
                     }
@@ -223,6 +225,19 @@ impl WorkspaceView {
             }
         }
         if changed {
+            self.save(cx);
+        }
+    }
+
+    /// Remember an SSH host's recent folders in the layout, for the launcher while the host is away.
+    fn remember_folders(&mut self, host: &HostId, cx: &mut Context<Self>) {
+        if host.is_local() {
+            return;
+        }
+        let sessions: Vec<SessionInfo> =
+            self.sidebar.read(cx).sessions().all().filter(|s| s.host == *host).cloned().collect();
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        if self.workspace.remember_host_folders(host, &refs) {
             self.save(cx);
         }
     }

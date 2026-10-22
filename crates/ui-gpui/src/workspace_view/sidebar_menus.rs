@@ -37,8 +37,8 @@ impl WorkspaceView {
                     self.open(claude, Some(axis), window, cx);
                 }
             }
-            MenuAction::NewLocal { claude } => self.show_launcher(claude, HostId::local(), window, cx),
-            MenuAction::NewOnHost { host, claude } => self.show_launcher(claude, HostId::named(&host), window, cx),
+            MenuAction::NewLocal { claude } => self.show_launcher(claude, window, cx),
+            MenuAction::NewOnHost { claude, .. } => self.show_launcher(claude, window, cx),
             MenuAction::AddSshHost => self.open_ssh_wizard(WizardStart::Add, window, cx),
             MenuAction::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::OpenFolder(dir) => cx.open_with_system(&dir),
@@ -184,7 +184,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         if self.ssh_hosts.is_empty() {
-            self.show_launcher(claude, HostId::local(), window, cx);
+            self.show_launcher(claude, window, cx);
             return;
         }
         let hosts: Vec<(String, String, HostDot)> = self
