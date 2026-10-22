@@ -170,9 +170,7 @@ impl WorkspaceView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .child("New Claude session")
-                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
-                            this.new_pressed(true, event.position(), window, cx)
-                        })),
+                        .on_click(cx.listener(|this, _, window, cx| this.show_launcher(true, window, cx))),
                 )
                 .child(
                     div()
@@ -189,9 +187,7 @@ impl WorkspaceView {
                         .cursor_pointer()
                         .hover(|style| style.text_color(rgb(theme.tokens.text)).bg(rgb(theme.tokens.raised)))
                         .child("New terminal")
-                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
-                            this.new_pressed(false, event.position(), window, cx)
-                        })),
+                        .on_click(cx.listener(|this, _, window, cx| this.show_launcher(false, window, cx))),
                 )
                 .into_any_element();
         };

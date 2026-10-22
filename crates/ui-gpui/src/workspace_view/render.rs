@@ -362,27 +362,6 @@ impl Render for WorkspaceView {
                     move |window, cx| dismiss(&(), window, cx),
                 ))
             })
-            .when_some(self.host_menu.as_ref(), |root, menu| {
-                let pick = cx.listener(|this, action: &MenuAction, window, cx| {
-                    this.host_menu = None;
-                    this.focus_current(window, cx);
-                    this.run_menu_action(action.clone(), window, cx);
-                    cx.notify();
-                });
-                let dismiss = cx.listener(|this, _: &(), window, cx| {
-                    this.host_menu = None;
-                    this.focus_current(window, cx);
-                    cx.notify();
-                });
-                root.child(context_menu::render(
-                    "host-menu",
-                    menu,
-                    &theme,
-                    cx.global::<SettingsStore>().settings(),
-                    move |action, window, cx| pick(action, window, cx),
-                    move |window, cx| dismiss(&(), window, cx),
-                ))
-            })
             .when_some(self.tab_menu.as_ref(), |root, menu| {
                 let pick = cx.listener(|this, action: &MenuAction, window, cx| {
                     this.tab_menu = None;

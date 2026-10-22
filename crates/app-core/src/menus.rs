@@ -48,20 +48,6 @@ pub enum MenuAction {
         /// Claude (else a shell).
         claude: bool,
     },
-    /// Open the launcher, with Claude (else a shell) first.
-    NewLocal {
-        /// Claude (else a shell).
-        claude: bool,
-    },
-    /// Start a new Claude session (else a shell) on an SSH host.
-    NewOnHost {
-        /// The host's name.
-        host: String,
-        /// Claude (else a shell).
-        claude: bool,
-    },
-    /// Open the SSH host wizard.
-    AddSshHost,
     /// Copy text to the clipboard.
     Copy(String),
     /// Show a folder in the system file manager.
@@ -379,26 +365,6 @@ pub fn split_menu(leaf: NodeId, axis: Axis) -> Vec<MenuItem> {
     ]
 }
 
-/// The list the New buttons open when SSH hosts are defined: `Local` first, then each host as (name, state label,
-/// state dot).
-pub fn host_menu(claude: bool, hosts: &[(String, String, HostDot)]) -> Vec<MenuItem> {
-    let mut items = vec![entry("Local", MenuAction::NewLocal { claude }), MenuItem::Separator];
-    items.extend(hosts.iter().map(|(name, state, dot)| {
-        MenuItem::Entry(MenuEntry {
-            label: format!("{name} · {state}"),
-            shortcut: None,
-            accent: false,
-            action: MenuAction::NewOnHost { host: name.clone(), claude },
-            swatch: None,
-            checked: false,
-            dot: Some(*dot),
-        })
-    }));
-    items.push(MenuItem::Separator);
-    items.push(entry("Add SSH host…", MenuAction::AddSshHost));
-    items
-}
-
 /// What a middle click on a sidebar row does: a split tab's heading closes the tab, a pane's row closes the pane
 /// (and its tab with its last pane); rows without a pane do nothing.
 pub fn middle_click(row: &Row) -> Option<MenuAction> {
@@ -657,39 +623,6 @@ mod tests {
         );
         let MenuItem::Entry(terminal) = &split_menu(7, Axis::Horizontal)[1] else { panic!() };
         assert_eq!(terminal.shortcut, Some(Shortcut::SplitRightShell));
-    }
-
-    #[test]
-    fn the_host_menu_lists_local_first_then_each_host_with_its_state() {
-        let hosts = vec![
-            ("devbox".to_string(), "connected".to_string(), HostDot::Ok),
-            ("lab".to_string(), "needs sign-in".to_string(), HostDot::Warn),
-        ];
-        let items = host_menu(true, &hosts);
-        let entry = |item: &MenuItem| match item {
-            MenuItem::Entry(entry) => Some((entry.label.clone(), entry.action.clone())),
-            _ => None,
-        };
-        assert_eq!(entry(&items[0]), Some(("Local".into(), MenuAction::NewLocal { claude: true })));
-        assert!(matches!(items[1], MenuItem::Separator));
-        assert_eq!(
-            entry(&items[2]),
-            Some(("devbox · connected".into(), MenuAction::NewOnHost { host: "devbox".into(), claude: true }))
-        );
-        assert_eq!(
-            entry(&items[3]),
-            Some(("lab · needs sign-in".into(), MenuAction::NewOnHost { host: "lab".into(), claude: true }))
-        );
-        assert!(matches!(items[4], MenuItem::Separator));
-        assert_eq!(entry(&items[5]), Some(("Add SSH host…".into(), MenuAction::AddSshHost)));
-        assert_eq!(items.len(), 6);
-        let dot = |item: &MenuItem| match item {
-            MenuItem::Entry(entry) => entry.dot,
-            _ => None,
-        };
-        assert_eq!((dot(&items[0]), dot(&items[2]), dot(&items[3])), (None, Some(HostDot::Ok), Some(HostDot::Warn)));
-        let shell = host_menu(false, &hosts);
-        assert!(matches!(&shell[0], MenuItem::Entry(MenuEntry { action: MenuAction::NewLocal { claude: false }, .. })));
     }
 
     #[test]

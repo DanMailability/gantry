@@ -335,8 +335,6 @@ pub struct WorkspaceView {
     tab_menu: Option<OpenMenu>,
     /// The open popup of a pane's split button (Claude or Terminal).
     pane_menu: Option<OpenMenu>,
-    /// The open list of `Local` and the SSH hosts, from a New button.
-    host_menu: Option<OpenMenu>,
     /// The binary this window started from (resolved at start, before an install can replace it).
     start_path: Option<PathBuf>,
     /// The version found at `start_path` after a change; `None` until one was probed.
@@ -572,7 +570,6 @@ impl WorkspaceView {
             before_settings: None,
             tab_menu: None,
             pane_menu: None,
-            host_menu: None,
             start_path: None,
             installed: None,
             daemon_version: None,
