@@ -173,6 +173,22 @@ fn liveness(record: &LiveRecord, host: &impl Host) -> Option<(IndexState, Option
     }
 }
 
+/// The transcript file of session `id` in the Claude config dir `config`: the `projects/<folder>/<id>.jsonl` whose
+/// file stem is `id`. `None` when there is no `projects/` or no such session. The cwd is encoded into `<folder>` by
+/// Claude, so rather than reproduce that encoding this scans the one project folder level for the id — the same shape
+/// `transcripts` reads.
+pub fn transcript_path(config: &Path, id: &str) -> Option<PathBuf> {
+    let projects = config.join("projects");
+    let folders = std::fs::read_dir(&projects).ok()?;
+    for folder in folders.flatten() {
+        let path = folder.path().join(format!("{id}.jsonl"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// `projects/<folder>/<id>.jsonl` files with their mtime and size. Deeper files (subagent
 /// transcripts) are not sessions.
 pub fn transcripts(projects: &Path) -> Vec<(PathBuf, SystemTime, u64)> {
@@ -417,5 +433,18 @@ mod tests {
             .unwrap();
         assert!(Index::new(dir.path().into(), FakeHost::default()).scan().is_empty());
         assert!(Index::new(dir.path().join("nope"), FakeHost::default()).scan().is_empty());
+    }
+
+    #[test]
+    fn transcript_path_finds_a_session_by_id_whatever_its_project_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        transcript(dir.path(), "-home-me-app", "abc-123", "/home/me/app", "hi", 5);
+        transcript(dir.path(), "-home-me-other", "def-456", "/home/me/other", "yo", 6);
+        assert_eq!(
+            transcript_path(dir.path(), "abc-123"),
+            Some(dir.path().join("projects/-home-me-app/abc-123.jsonl"))
+        );
+        assert_eq!(transcript_path(dir.path(), "missing"), None);
+        assert_eq!(transcript_path(&dir.path().join("nope"), "abc-123"), None);
     }
 }

@@ -324,6 +324,7 @@ impl WorkspaceView {
             }
         }
         self.slots.remove(&leaf);
+        self.reading.remove(&leaf);
         self.marked_unread.remove(&leaf);
         if self.unseen.remove(&leaf).is_some() {
             self.sync_unseen(cx);
@@ -376,6 +377,16 @@ impl WorkspaceView {
         if let Some(settings) = settings {
             settings.focus_handle(cx).focus(window, cx);
             self.sidebar.update(cx, |sidebar, cx| sidebar.set_focused(None, cx));
+            self.clear_seen(window, cx);
+            return;
+        }
+        // A pane showing the reading view takes focus there, so keys do not fall through to the terminal underneath.
+        if let Some(leaf) = self.workspace.focused()
+            && let Some(view) = self.reading.get(&leaf)
+        {
+            view.focus_handle(cx).focus(window, cx);
+            let focused = self.workspace.focused();
+            self.sidebar.update(cx, |sidebar, cx| sidebar.set_focused(focused, cx));
             self.clear_seen(window, cx);
             return;
         }

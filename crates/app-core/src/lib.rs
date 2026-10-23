@@ -14,6 +14,7 @@ pub mod input;
 pub mod launcher;
 pub mod layout;
 pub mod layout_store;
+pub mod markdown;
 pub mod menus;
 pub mod mouse;
 pub mod palette;

@@ -122,6 +122,7 @@ impl Render for WorkspaceView {
             }))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_git_panel))
+            .on_action(cx.listener(Self::toggle_reading_view))
             .on_action(cx.listener(Self::find_session))
             .on_action(cx.listener(Self::open_launcher))
             .on_action(cx.listener(Self::open_recents))

@@ -7,6 +7,7 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 - **Windows** - Gantry runs on Windows 10 and 11 (x86_64): a per-user `.msi` installer and a portable `.zip` on the releases page. Sessions outside Gantry show as running and can be taken over, SSH sign-in dialogs work, notifications show as Gantry and focus their pane when clicked, and new terminals open PowerShell. See the README for what is not on Windows yet.
+- **Reading view** - A local Claude pane can toggle between the terminal and a formatted-Markdown rendering of the conversation: headings, bold/italic, inline code, gray code boxes, lists, blockquotes and rules, with "You" and "Claude" labels. Toggle it with the page button in the pane's header buttons or Ctrl+Shift+M (Cmd+Shift+M on macOS), rebindable on the Shortcuts page. The terminal keeps running underneath, and the view refreshes as the conversation grows. Local Claude sessions only for now.
 
 ## [0.10.0] - 2026-10-22
 

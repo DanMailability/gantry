@@ -35,6 +35,7 @@ use crate::git_scrollbar::{self};
 use crate::git_state::GitRepos;
 use crate::launcher_view::LauncherView;
 use crate::pane_drag::PaneDrop;
+use crate::reading_view::ReadingView;
 use crate::recents_view::RecentsView;
 use crate::release_check::CheckRow;
 use crate::settings_store::SettingsStore;
@@ -76,6 +77,7 @@ mod workspace_actions {
             HistoryForward,
             ToggleSidebar,
             ToggleGitPanel,
+            ToggleReadingView,
             FindSession,
             OpenLauncher,
             OpenRecents,
@@ -92,6 +94,7 @@ mod hosts;
 mod layout;
 mod overlays;
 mod panes;
+mod reading;
 mod render;
 mod resume;
 mod sidebar_menus;
@@ -252,6 +255,8 @@ pub struct WorkspaceView {
     /// its list may miss the sessions of dirs it has not scanned, and resuming one of those would start it afresh.
     local_dirs_indexed: bool,
     slots: HashMap<NodeId, Slot>,
+    /// Leaves showing the reading view instead of the terminal; the terminal keeps running in its slot underneath.
+    reading: HashMap<NodeId, Entity<ReadingView>>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
@@ -525,6 +530,7 @@ impl WorkspaceView {
             to_resume: Vec::new(),
             local_dirs_indexed: false,
             slots: HashMap::new(),
+            reading: HashMap::new(),
             pending: HashMap::new(),
             next_request: 0,
             search_answers: HashMap::new(),
