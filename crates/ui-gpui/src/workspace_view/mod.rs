@@ -106,6 +106,15 @@ struct Slot {
     _subscription: Subscription,
 }
 
+/// A pane's open reading view and where its transcript read stands.
+struct Reading {
+    view: Entity<ReadingView>,
+    /// Byte offset after the last message received, for the next incremental read.
+    offset: u64,
+    /// The in-flight `read_transcript` request id, if any.
+    request: Option<u64>,
+}
+
 /// Where a taken-over session is resumed.
 enum TakeOverTarget {
     /// A new tab, or a split of the focused pane.
@@ -254,7 +263,11 @@ pub struct WorkspaceView {
     local_dirs_indexed: bool,
     slots: HashMap<NodeId, Slot>,
     /// Leaves showing the reading view instead of the terminal; the terminal keeps running in its slot underneath.
-    reading: HashMap<NodeId, Entity<ReadingView>>,
+    reading: HashMap<NodeId, Reading>,
+    /// `read_transcript` request id → the leaf whose reading view it feeds.
+    reading_requests: HashMap<u64, NodeId>,
+    /// The timer that re-reads shown reading views' transcripts.
+    reading_task: Option<Task<()>>,
     /// Spawn request id → leaf waiting for it.
     pending: HashMap<u64, NodeId>,
     next_request: u64,
@@ -528,6 +541,8 @@ impl WorkspaceView {
             local_dirs_indexed: false,
             slots: HashMap::new(),
             reading: HashMap::new(),
+            reading_requests: HashMap::new(),
+            reading_task: None,
             pending: HashMap::new(),
             next_request: 0,
             search_answers: HashMap::new(),
@@ -622,6 +637,7 @@ impl WorkspaceView {
         cx.set_global(CheckRow::default());
         this.release_task = Some(this.start_release_timer(cx));
         this.git_task = Some(Self::start_git_timer(window, cx));
+        this.reading_task = Some(Self::start_reading_timer(window, cx));
         let leaves: Vec<NodeId> = this.workspace.leaves.keys().copied().collect();
         for leaf in leaves {
             this.add_slot(leaf, window, cx);

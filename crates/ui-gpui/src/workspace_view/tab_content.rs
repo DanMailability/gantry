@@ -490,7 +490,7 @@ impl WorkspaceView {
                                                 .child(view)
                                                 // The reading view sits over the terminal, which keeps running underneath.
                                                 .children(self.reading.get(&leaf).map(|reading| {
-                                                    div().absolute().inset_0().occlude().child(reading.clone())
+                                                    div().absolute().inset_0().occlude().child(reading.view.clone())
                                                 }))
                                                 .child(self.split_buttons(leaf, index, focused, &theme, cx)),
                                         )

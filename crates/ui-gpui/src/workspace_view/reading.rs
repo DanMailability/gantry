@@ -1,28 +1,33 @@
-//! The reading view toggle: swapping a local Claude pane between its terminal and a formatted-Markdown rendering of
-//! the conversation. The terminal stays alive in its slot underneath, so toggling back is instant and the session
-//! keeps running. Only local Claude panes offer the toggle; see `reading_view` for the view itself.
+//! The reading view toggle and its data flow. A Claude pane (local or on an SSH host) can swap its terminal for a
+//! formatted-Markdown rendering of the conversation. The terminal stays alive in its slot underneath, so toggling
+//! back is instant and the session keeps running.
+//!
+//! The conversation text is fetched through the pane's host daemon (`read_transcript` → `Transcript`), like the git
+//! diff view fetches remote content, so the heavy transcript file stays on the host. A light timer re-requests from
+//! the last byte offset so large transcripts are not re-sent.
 
-use super::{ToggleReadingView, WorkspaceView};
+use super::{Reading, ToggleReadingView, WorkspaceView};
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use app_core::split_tree::NodeId;
-use gpui::{Context, Window, prelude::*};
+use gpui::{Context, Task, Window, prelude::*};
 
-use crate::reading_view::{ReadingSource, ReadingView};
+use crate::reading_view::ReadingView;
+
+/// How often each shown reading view re-requests its transcript.
+const REFRESH: Duration = Duration::from_millis(1500);
 
 impl WorkspaceView {
-    /// Whether `leaf` can show the reading view: a Claude pane (not a shell), running on this machine (not an SSH
-    /// host) and not inside a dev container (its transcript would live in the container).
+    /// Whether `leaf` can show the reading view: a Claude pane (not a plain shell). Remote and dev-container panes
+    /// qualify; the daemon resolves the transcript on whichever host the session runs on.
     pub(super) fn reading_available(&self, leaf: NodeId) -> bool {
-        self.workspace
-            .leaves
-            .get(&leaf)
-            .is_some_and(|entry| entry.launch.is_claude() && entry.host.is_local() && entry.launch.container.is_none())
+        self.workspace.leaves.get(&leaf).is_some_and(|entry| entry.launch.is_claude())
     }
 
-    /// The Claude config dir `leaf`'s session lives under: the one the session reported, else the pane's launch dir,
-    /// else the daemon's own.
+    /// The Claude config dir `leaf`'s session lives under on its host: the one the session reported, else the pane's
+    /// launch dir. `None` leaves the host daemon to use its own default dir.
     fn leaf_claude_dir(&self, leaf: NodeId, cx: &Context<Self>) -> Option<PathBuf> {
         let entry = self.workspace.leaves.get(&leaf)?;
         let recorded = entry
@@ -30,20 +35,7 @@ impl WorkspaceView {
             .as_deref()
             .and_then(|id| self.sidebar.read(cx).sessions().get(&entry.host, id))
             .and_then(|info| info.claude_dir.clone());
-        recorded.or_else(|| entry.launch.claude_dir.clone()).or_else(|| self.daemon_dir.clone())
-    }
-
-    /// Where `leaf`'s reading view reads from: its session transcript when the session id and config dir are known,
-    /// else a short message explaining why there is nothing to show yet.
-    fn reading_source(&self, leaf: NodeId, cx: &Context<Self>) -> ReadingSource {
-        if !self.reading_available(leaf) {
-            return ReadingSource::Message("Reading view is available for local Claude sessions for now.".to_string());
-        }
-        let session_id = self.workspace.leaves.get(&leaf).and_then(|entry| entry.session.clone());
-        match (session_id, self.leaf_claude_dir(leaf, cx)) {
-            (Some(session_id), Some(config_dir)) => ReadingSource::Session { config_dir, session_id },
-            _ => ReadingSource::Message("Waiting for the conversation to start.".to_string()),
-        }
+        recorded.or_else(|| entry.launch.claude_dir.clone())
     }
 
     /// Toggle the focused pane between its terminal and the reading view.
@@ -59,14 +51,103 @@ impl WorkspaceView {
             return;
         }
         if self.reading.remove(&leaf).is_some() {
+            self.reading_requests.retain(|_, waiting| *waiting != leaf);
             self.focus_current(window, cx);
             cx.notify();
             return;
         }
-        let source = self.reading_source(leaf, cx);
-        let view = cx.new(|cx| ReadingView::new(source, window, cx));
-        self.reading.insert(leaf, view);
+        let view = cx.new(ReadingView::new);
+        self.reading.insert(leaf, Reading { view, offset: 0, request: None });
+        self.send_reading_request(leaf, cx);
         self.focus_current(window, cx);
         cx.notify();
+    }
+
+    /// The reading views' refresh timer: re-request each shown view's transcript from its last offset.
+    pub(super) fn start_reading_timer(window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(REFRESH).await;
+                if this.update(cx, |view, cx| view.reading_tick(cx)).is_err() {
+                    return;
+                }
+            }
+        })
+    }
+
+    /// Ask each shown reading view's host for any new messages.
+    fn reading_tick(&mut self, cx: &mut Context<Self>) {
+        let leaves: Vec<NodeId> = self.reading.keys().copied().collect();
+        for leaf in leaves {
+            self.send_reading_request(leaf, cx);
+        }
+    }
+
+    /// Send one `read_transcript` request for `leaf` (unless one is already in flight, or its host is not connected).
+    fn send_reading_request(&mut self, leaf: NodeId, cx: &mut Context<Self>) {
+        let Some(reading) = self.reading.get(&leaf) else { return };
+        let in_flight = reading.request;
+        let (offset, view) = (reading.offset, reading.view.clone());
+        let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
+        let host = entry.host.clone();
+        let session = entry.session.clone();
+        let Some(client) = self.client(&host).cloned() else {
+            // The host is not connected: a request that was in flight will never be answered, so drop it and let the
+            // next tick (after a reconnect) ask again rather than stall forever.
+            if let Some(request) = in_flight {
+                self.reading_requests.remove(&request);
+                if let Some(reading) = self.reading.get_mut(&leaf) {
+                    reading.request = None;
+                }
+            }
+            return;
+        };
+        if in_flight.is_some() {
+            return;
+        }
+        if !client.transcript() {
+            view.update(cx, |view, cx| {
+                view.set_notice(
+                    Some("Reading view needs a newer Gantry on this host. Update it from the SSH hosts list.".into()),
+                    cx,
+                )
+            });
+            return;
+        }
+        view.update(cx, |view, cx| view.set_notice(None, cx));
+        // A fresh session has no id until its first transcript line; the view shows "Waiting…" until then.
+        let Some(session) = session else { return };
+        let claude_dir = self.leaf_claude_dir(leaf, cx);
+        self.next_request += 1;
+        let request = self.next_request;
+        self.reading_requests.insert(request, leaf);
+        if let Some(reading) = self.reading.get_mut(&leaf) {
+            reading.request = Some(request);
+        }
+        client.read_transcript(request, &session, claude_dir, offset);
+    }
+
+    /// Route a `Transcript` answer to its leaf's reading view.
+    pub(super) fn on_transcript(
+        &mut self,
+        host: &protocol::host::HostId,
+        request: u64,
+        messages: Vec<protocol::message::TranscriptMessage>,
+        offset: u64,
+        found: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(leaf) = self.reading_requests.remove(&request) else { return };
+        if self.workspace.leaves.get(&leaf).is_none_or(|entry| &entry.host != host) {
+            return;
+        }
+        let Some(reading) = self.reading.get_mut(&leaf) else { return };
+        if reading.request != Some(request) {
+            return;
+        }
+        reading.request = None;
+        reading.offset = offset;
+        let view = reading.view.clone();
+        view.update(cx, |view, cx| view.append(messages, found, cx));
     }
 }

@@ -365,6 +365,19 @@ pub enum ClientMessage {
         /// The commit (a hash as listed in `GitState.commits`).
         hash: String,
     },
+    /// A session's conversation text from byte `offset` (the reading view); answered by `Transcript`. Only sent to a
+    /// daemon whose `Welcome.transcript` is true (no protocol bump: older daemons never see it).
+    ReadTranscript {
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// The session id (its transcript file's stem).
+        session: String,
+        /// The Claude config dir the session was reported in; the daemon's own default when `None`.
+        #[serde(default)]
+        claude_dir: Option<PathBuf>,
+        /// Read from this byte offset (0 reads the whole file).
+        offset: u64,
+    },
     /// Terminate every pane and stop the daemon (frozen).
     StopAll,
 }
@@ -525,6 +538,15 @@ pub enum Speaker {
     Claude,
 }
 
+/// One message of a conversation, for the reading view (`ReadTranscript` → `Transcript`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptMessage {
+    /// Who wrote it.
+    pub speaker: Speaker,
+    /// Its Markdown text (tool calls, tool output, thinking and injected spans already stripped).
+    pub text: String,
+}
+
 /// A session whose conversation matches a search, shown by its best-matching message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -565,6 +587,9 @@ pub enum DaemonMessage {
         /// The daemon answers `SavePasteImage`; older daemons send none.
         #[serde(default)]
         paste_image: bool,
+        /// The daemon answers `ReadTranscript` (the reading view); older daemons send none.
+        #[serde(default)]
+        transcript: bool,
     },
     /// Handshake rejected; only `StopAll` is accepted afterwards.
     VersionMismatch {
@@ -717,6 +742,17 @@ pub enum DaemonMessage {
         /// Why.
         problem: GitProblem,
     },
+    /// The answer to `ReadTranscript`.
+    Transcript {
+        /// Echoed request id.
+        request: u64,
+        /// The messages read from the requested offset, in order.
+        messages: Vec<TranscriptMessage>,
+        /// Byte offset after the last complete line read; pass it back to continue.
+        offset: u64,
+        /// Whether the session's transcript file was found on the host.
+        found: bool,
+    },
     /// Another GUI connected; this connection is closed next.
     TakenOver,
     /// A request could not be handled.
@@ -788,6 +824,7 @@ mod tests {
                 app_version: Some("0.3.0".into()),
                 app_commit: Some("a1b2c3d".into()),
                 paste_image: true,
+                transcript: true,
             },
             DaemonMessage::Welcome {
                 protocol: PROTOCOL_VERSION,
@@ -796,6 +833,7 @@ mod tests {
                 app_version: None,
                 app_commit: None,
                 paste_image: false,
+                transcript: false,
             },
             DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
         ] {
@@ -926,7 +964,8 @@ mod tests {
                 claude_dir: None,
                 app_version: None,
                 app_commit: None,
-                paste_image: false
+                paste_image: false,
+                transcript: false
             }
         );
         let new = DaemonMessage::Welcome {
@@ -936,6 +975,7 @@ mod tests {
             app_version: Some("0.3.0".into()),
             app_commit: Some("a1b2c3d".into()),
             paste_image: true,
+            transcript: false,
         };
         let json = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), new);
@@ -956,7 +996,8 @@ mod tests {
                 claude_dir: None,
                 app_version: None,
                 app_commit: None,
-                paste_image: false
+                paste_image: false,
+                transcript: false
             }
         );
         let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
@@ -1131,6 +1172,41 @@ mod tests {
             assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
         }
         assert!(serde_json::to_string(&Speaker::You).unwrap() == r#""you""#);
+    }
+
+    #[test]
+    fn transcript_messages_round_trip_and_capability_defaults_off() {
+        let request = ClientMessage::ReadTranscript {
+            request: 7,
+            session: "abc-123".into(),
+            claude_dir: Some("/home/me/.claude".into()),
+            offset: 4096,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.starts_with(r#"{"type":"read_transcript","#), "{json}");
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), request);
+        let reply = DaemonMessage::Transcript {
+            request: 7,
+            messages: vec![
+                TranscriptMessage { speaker: Speaker::You, text: "fix the build".into() },
+                TranscriptMessage { speaker: Speaker::Claude, text: "# Done\n\nA `fix`.".into() },
+            ],
+            offset: 8192,
+            found: true,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
+        // claude_dir is optional on the wire, and a daemon from before the feature advertises no transcript support.
+        let old_request = r#"{"type":"read_transcript","request":1,"session":"s","offset":0}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(old_request).unwrap(),
+            ClientMessage::ReadTranscript { claude_dir: None, .. }
+        ));
+        let old_welcome = r#"{"type":"welcome","protocol":10,"instance":"x"}"#;
+        match serde_json::from_str::<DaemonMessage>(old_welcome).unwrap() {
+            DaemonMessage::Welcome { transcript, .. } => assert!(!transcript),
+            other => panic!("expected Welcome, got {other:?}"),
+        }
     }
 
     #[test]
