@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Windows installer** - A tagged release now builds `gantry-<version>-x86_64-windows-setup.exe`, an Inno Setup installer that can add Gantry to your `PATH` and create Start-menu and desktop shortcuts. Built and smoke-tested on a Windows runner in CI. Not yet code-signed, so Windows SmartScreen warns on first run.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

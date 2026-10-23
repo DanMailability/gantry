@@ -92,7 +92,7 @@ in a hand-editable `settings.json` that applies live.
 
 ## Requirements and limits
 
-- Linux x86_64 (glibc 2.35 or newer: Ubuntu 22.04+, Fedora) and macOS on Apple Silicon. Windows is not available yet.
+- Linux x86_64 (glibc 2.35 or newer: Ubuntu 22.04+, Fedora) and macOS on Apple Silicon. Windows x86_64 (Windows 10 and 11) is supported.
 - Gantry is GPU-rendered, so it needs working graphics drivers.
 - Claude Code must be installed. Gantry runs your own `claude` and does not replace it.
 - SSH hosts must be Linux x86_64.
@@ -160,7 +160,11 @@ Files and Folders. Granting Full Disk Access is not needed.
 
 ### Windows
 
-Planned for the future.
+1. Download `gantry-<version>-x86_64-windows-setup.exe` from the [releases page](https://github.com/idogrf/gantry/releases).
+2. Run it. The installer is not code-signed, so Windows SmartScreen warns the first time: click **More info**, then **Run anyway**.
+3. Follow the installer. It can add Gantry to your `PATH` (so `gantry` works in any terminal) and create a desktop shortcut.
+
+Start Gantry from the Start menu, or run `gantry`. To remove it, use "Add or remove programs" or the uninstaller in the install folder.
 
 ## Usage
 
