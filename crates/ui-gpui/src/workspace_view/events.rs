@@ -191,6 +191,9 @@ impl WorkspaceView {
                         cx.notify();
                     }
                 }
+                ClientEvent::Transcript { request, messages, offset, found } => {
+                    self.on_transcript(host, *request, messages.clone(), *offset, *found, cx);
+                }
                 ClientEvent::TakenOver if !host.is_local() => self.host_taken_over(host, cx),
                 ClientEvent::Disconnected if !host.is_local() => self.host_dropped(host, window, cx),
                 ClientEvent::TakenOver | ClientEvent::Disconnected => {

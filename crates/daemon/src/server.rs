@@ -455,6 +455,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             app_version: Some(protocol::build::VERSION.into()),
             app_commit: Some(protocol::build::COMMIT.into()),
             paste_image: shared.paste_dir.is_some(),
+            transcript: true,
         }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id
@@ -738,6 +739,9 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
             git_diff_request(shared, request, folder, path, old_path, full, commit)
         }
         ClientMessage::GitCommit { request, folder, hash } => git_commit_request(shared, request, folder, hash),
+        ClientMessage::ReadTranscript { request, session, claude_dir, offset } => {
+            read_transcript_request(shared, request, session, claude_dir, offset)
+        }
         ClientMessage::Kill { pane } => {
             let mut state = shared.lock();
             let inside = state
@@ -961,6 +965,48 @@ fn git_commit_request(shared: &Arc<Shared>, request: u64, folder: String, hash: 
         let reply = match crate::git::commit(&folder, std::env::home_dir().as_deref(), &hash) {
             Ok(detail) => DaemonMessage::GitCommit { request, detail },
             Err(problem) => DaemonMessage::GitUnavailable { request, problem },
+        };
+        shared.lock().control(&reply);
+    });
+}
+
+/// Answer `ReadTranscript` off the async threads: resolve the session's transcript on this host and read its new
+/// messages from `offset`. `claude_dir` (the dir the session was reported in) falls back to the daemon's own.
+fn read_transcript_request(
+    shared: &Arc<Shared>,
+    request: u64,
+    session: String,
+    claude_dir: Option<PathBuf>,
+    offset: u64,
+) {
+    use claude_index::search::Speaker as IndexSpeaker;
+    use protocol::message::{Speaker, TranscriptMessage};
+
+    let fallback = shared.claude_dir.clone();
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let reply = match claude_dir.or(fallback) {
+            Some(config) => match claude_index::index::transcript_path(&config, &session) {
+                Some(path) => match claude_index::search::read_messages(&path, offset) {
+                    Ok((messages, end)) => {
+                        let messages = messages
+                            .into_iter()
+                            .map(|message| TranscriptMessage {
+                                speaker: match message.speaker {
+                                    IndexSpeaker::You => Speaker::You,
+                                    IndexSpeaker::Claude => Speaker::Claude,
+                                },
+                                text: message.text,
+                            })
+                            .collect();
+                        DaemonMessage::Transcript { request, messages, offset: end, found: true }
+                    }
+                    // The file was there but could not be read (e.g. a transient IO error); keep the offset.
+                    Err(_) => DaemonMessage::Transcript { request, messages: Vec::new(), offset, found: true },
+                },
+                None => DaemonMessage::Transcript { request, messages: Vec::new(), offset: 0, found: false },
+            },
+            None => DaemonMessage::Transcript { request, messages: Vec::new(), offset: 0, found: false },
         };
         shared.lock().control(&reply);
     });

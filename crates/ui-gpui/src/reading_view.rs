@@ -1,64 +1,41 @@
-//! The reading view: a Claude pane's conversation drawn as formatted Markdown instead of the terminal grid. It reads
-//! the clean per-message text from the session transcript (`claude_index::search::read_messages`), parses each
-//! message as Markdown (`app_core::markdown`), and lays the blocks out with GPUI. It is read-only and refreshes on a
-//! light timer; no live token streaming, per completed message is enough.
+//! The reading view: a Claude pane's conversation drawn as formatted Markdown instead of the terminal grid. The
+//! conversation text comes from the pane's host daemon (`read_transcript` → `Transcript`), the same way the git diff
+//! view fetches remote content, so it works for local and SSH-host sessions alike. The `WorkspaceView` drives the
+//! requests and feeds answers in here through [`ReadingView::append`]; this view only renders and scrolls.
 //!
-//! Local Claude sessions only. A remote or not-yet-started session shows a short placeholder instead.
-
-use std::path::PathBuf;
-use std::time::Duration;
+//! Each message's text is parsed with `app_core::markdown` and laid out with GPUI. Read-only, per completed message
+//! (no live token streaming).
 
 use app_core::markdown::{Block, Inline, parse_markdown};
 use app_core::theme_colors::mix;
-use claude_index::index::transcript_path;
-use claude_index::search::{Message, Speaker, read_messages};
 use gpui::{
     App, Context, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, IntoElement, ScrollHandle,
-    SharedString, StyledText, Task, UnderlineStyle, Window, div, prelude::*, px, rgb,
+    SharedString, StyledText, UnderlineStyle, Window, div, prelude::*, px, rgb,
 };
+use protocol::message::{Speaker, TranscriptMessage};
 
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{installed_families, installed_family};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
 
-/// How often the view re-reads the transcript while it is shown.
-const REFRESH: Duration = Duration::from_millis(1500);
-
-/// Where a reading view gets its text.
-pub(crate) enum ReadingSource {
-    /// A local Claude session: the Claude config dir and the session id. The transcript file is found by id, so it can
-    /// resolve later if it does not exist yet (a fresh session before its first message).
-    Session {
-        /// The Claude config dir the session lives under.
-        config_dir: PathBuf,
-        /// The session id (the transcript file's stem).
-        session_id: String,
-    },
-    /// Nothing to read here; show this one-line message (a remote or non-Claude pane).
-    Message(String),
-}
-
 /// One message turned into blocks, with who wrote it.
 struct Shown {
-    speaker: Speaker,
+    you: bool,
     blocks: Vec<Block>,
 }
 
 /// A Claude pane's conversation as formatted Markdown.
 pub struct ReadingView {
     focus_handle: FocusHandle,
-    source: ReadingSource,
-    /// The transcript path once found.
-    path: Option<PathBuf>,
     /// Messages parsed so far.
     messages: Vec<Shown>,
-    /// Byte offset after the last complete line read, for the next incremental read.
-    offset: u64,
-    /// At least one successful read has happened.
+    /// A fixed one-line notice shown instead of the conversation (e.g. the host's daemon is too old).
+    notice: Option<String>,
+    /// At least one `Transcript` answer has arrived.
     loaded: bool,
+    /// The transcript file was found on the host.
+    found: bool,
     scroll: ScrollHandle,
-    /// The refresh timer; dropped with the view.
-    _refresh: Task<()>,
 }
 
 impl Focusable for ReadingView {
@@ -68,27 +45,44 @@ impl Focusable for ReadingView {
 }
 
 impl ReadingView {
-    pub(crate) fn new(source: ReadingSource, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let refresh = cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(REFRESH).await;
-                if this.update_in(cx, |view, _window, cx| view.refresh(cx)).is_err() {
-                    return;
-                }
-            }
-        });
-        let mut view = ReadingView {
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        ReadingView {
             focus_handle: cx.focus_handle(),
-            source,
-            path: None,
             messages: Vec::new(),
-            offset: 0,
+            notice: None,
             loaded: false,
+            found: false,
             scroll: ScrollHandle::new(),
-            _refresh: refresh,
-        };
-        view.refresh(cx);
-        view
+        }
+    }
+
+    /// Set or clear the fixed notice; redraws only when it changes.
+    pub(crate) fn set_notice(&mut self, notice: Option<String>, cx: &mut Context<Self>) {
+        if self.notice != notice {
+            self.notice = notice;
+            cx.notify();
+        }
+    }
+
+    /// Append the messages from a `Transcript` answer. Keeps the view pinned to the bottom when it already was (so a
+    /// running session's new replies stay in view), but never scrolls on the first load.
+    pub(crate) fn append(&mut self, messages: Vec<TranscriptMessage>, found: bool, cx: &mut Context<Self>) {
+        let was_at_bottom = self.at_bottom();
+        let added = !messages.is_empty();
+        let first_load = !self.loaded;
+        for message in messages {
+            let you = matches!(message.speaker, Speaker::You);
+            self.messages.push(Shown { you, blocks: parse_markdown(&message.text) });
+        }
+        let found_changed = self.found != found;
+        self.loaded = true;
+        self.found = found;
+        if added && !first_load && was_at_bottom {
+            self.scroll.scroll_to_bottom();
+        }
+        if added || first_load || found_changed {
+            cx.notify();
+        }
     }
 
     /// Whether the scroll position is at (or within a few pixels of) the bottom.
@@ -98,43 +92,22 @@ impl ReadingView {
         max <= 1.0 || scrolled >= max - 8.0
     }
 
-    /// Re-read the transcript from the last offset and append any new messages. Keeps the view pinned to the bottom
-    /// when it already was (so a running session's new replies stay in view), but never scrolls on the first load.
-    fn refresh(&mut self, cx: &mut Context<Self>) {
-        let ReadingSource::Session { config_dir, session_id } = &self.source else { return };
-        if self.path.is_none() {
-            self.path = transcript_path(config_dir, session_id);
-        }
-        let Some(path) = self.path.clone() else { return };
-        let Ok((new, end)) = read_messages(&path, self.offset) else { return };
-        let was_at_bottom = self.at_bottom();
-        let added = !new.is_empty();
-        for Message { speaker, text } in new {
-            self.messages.push(Shown { speaker, blocks: parse_markdown(&text) });
-        }
-        self.offset = end;
-        let first_load = !self.loaded;
-        self.loaded = true;
-        if added || first_load {
-            if added && !first_load && was_at_bottom {
-                self.scroll.scroll_to_bottom();
-            }
-            cx.notify();
-        }
-    }
-
     /// The one-line placeholder to show instead of a conversation, if there is nothing to draw yet.
     fn placeholder(&self) -> Option<String> {
-        match &self.source {
-            ReadingSource::Message(text) => Some(text.clone()),
-            ReadingSource::Session { .. } if self.path.is_none() => {
-                Some("Waiting for the conversation to start.".to_string())
-            }
-            ReadingSource::Session { .. } if self.messages.is_empty() => {
-                Some("No messages in this conversation yet.".to_string())
-            }
-            ReadingSource::Session { .. } => None,
+        if let Some(notice) = &self.notice {
+            return Some(notice.clone());
         }
+        if self.messages.is_empty() {
+            return Some(
+                if self.loaded && self.found {
+                    "No messages in this conversation yet."
+                } else {
+                    "Waiting for the conversation…"
+                }
+                .to_string(),
+            );
+        }
+        None
     }
 }
 
@@ -178,9 +151,10 @@ impl Render for ReadingView {
 
 /// One message: a speaker label, then its blocks.
 fn render_message(message: &Shown, mono: &SharedString, theme: &Theme) -> impl IntoElement {
-    let (label, fill, ink) = match message.speaker {
-        Speaker::You => ("You", theme.tokens.accent, theme.tokens.on_accent),
-        Speaker::Claude => ("Claude", theme.tokens.raised, theme.tokens.text),
+    let (label, fill, ink) = if message.you {
+        ("You", theme.tokens.accent, theme.tokens.on_accent)
+    } else {
+        ("Claude", theme.tokens.raised, theme.tokens.text)
     };
     div()
         .w_full()

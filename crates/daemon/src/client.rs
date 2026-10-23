@@ -155,6 +155,17 @@ pub enum ClientEvent {
         /// Why.
         problem: protocol::message::GitProblem,
     },
+    /// The answer to `read_transcript`.
+    Transcript {
+        /// Echoed request id.
+        request: u64,
+        /// The messages read from the requested offset.
+        messages: Vec<protocol::message::TranscriptMessage>,
+        /// Byte offset after the last complete line read.
+        offset: u64,
+        /// Whether the transcript file was found on the host.
+        found: bool,
+    },
     /// The answer to `save_paste_image`: the image is at `path`, as the pane's Claude sees it.
     PasteImageSaved {
         /// The pane that asked.
@@ -211,6 +222,8 @@ pub struct DaemonClient {
     outgoing: mpsc::UnboundedSender<Outgoing>,
     /// Whether the daemon's `Welcome` said it saves pasted images (set once the handshake is done).
     paste_image: bool,
+    /// Whether the daemon's `Welcome` said it answers `read_transcript` (the reading view).
+    transcript: bool,
 }
 
 /// What the handshake returned.
@@ -220,6 +233,7 @@ pub(crate) struct Hello {
     pub(crate) daemon_version: Option<String>,
     pub(crate) daemon_commit: Option<String>,
     pub(crate) paste_image: bool,
+    pub(crate) transcript: bool,
     pub(crate) panes: Vec<PaneInfo>,
 }
 
@@ -336,6 +350,18 @@ impl DaemonClient {
         self.send(&ClientMessage::GitCommit { request, folder: folder.into(), hash: hash.into() });
     }
 
+    /// Whether this daemon answers `read_transcript` (the reading view); false for a daemon from before the feature.
+    pub fn transcript(&self) -> bool {
+        self.transcript
+    }
+
+    /// Ask for `session`'s conversation text from byte `offset`; answered by `Transcript` with the same `request`.
+    /// `claude_dir` is the config dir the session was reported in (the daemon's own default when `None`). Only for a
+    /// daemon whose `transcript` is true.
+    pub fn read_transcript(&self, request: u64, session: &str, claude_dir: Option<PathBuf>, offset: u64) {
+        self.send(&ClientMessage::ReadTranscript { request, session: session.into(), claude_dir, offset });
+    }
+
     /// Whether this daemon saves pasted images (`save_paste_image`); false for a daemon from before the feature.
     pub fn paste_image(&self) -> bool {
         self.paste_image
@@ -398,7 +424,12 @@ impl Link {
     pub(crate) fn new() -> Link {
         let (outgoing_tx, outgoing) = mpsc::unbounded_channel();
         let (events_tx, events) = async_channel::bounded(EVENT_QUEUE);
-        Link { client: DaemonClient { outgoing: outgoing_tx, paste_image: false }, outgoing, events_tx, events }
+        Link {
+            client: DaemonClient { outgoing: outgoing_tx, paste_image: false, transcript: false },
+            outgoing,
+            events_tx,
+            events,
+        }
     }
 }
 
@@ -408,8 +439,9 @@ pub(crate) fn connection(
     hello: Hello,
     events: async_channel::Receiver<ClientEvent>,
 ) -> Connection {
-    let Hello { instance, claude_dir, daemon_version, daemon_commit, paste_image, panes } = hello;
+    let Hello { instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript, panes } = hello;
     client.paste_image = paste_image;
+    client.transcript = transcript;
     Connection { client, instance, claude_dir, daemon_version, daemon_commit, panes, events }
 }
 
@@ -479,6 +511,9 @@ where
                 Some(Ok(DaemonMessage::GitUnavailable { request, problem })) => {
                     ClientEvent::GitUnavailable { request, problem }
                 }
+                Some(Ok(DaemonMessage::Transcript { request, messages, offset, found })) => {
+                    ClientEvent::Transcript { request, messages, offset, found }
+                }
                 Some(Ok(DaemonMessage::PasteImageSaved { pane, path })) => ClientEvent::PasteImageSaved { pane, path },
                 Some(Ok(DaemonMessage::PasteImageFailed { pane, reason })) => {
                     ClientEvent::PasteImageFailed { pane, reason }
@@ -534,19 +569,20 @@ where
 {
     let io = |err: io::Error| StartError::Io(err.into());
     write_frame(send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.map_err(io)?;
-    let (instance, claude_dir, daemon_version, daemon_commit, paste_image) = match next_message(recv).await? {
-        DaemonMessage::Welcome { instance, claude_dir, app_version, app_commit, paste_image, .. } => {
-            (instance, claude_dir, app_version, app_commit, paste_image)
-        }
-        DaemonMessage::VersionMismatch { daemon_protocol } => {
-            return Err(StartError::VersionMismatch { daemon_protocol });
-        }
-        other => return Err(StartError::Io(anyhow::anyhow!("unexpected handshake reply {other:?}"))),
-    };
+    let (instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript) =
+        match next_message(recv).await? {
+            DaemonMessage::Welcome {
+                instance, claude_dir, app_version, app_commit, paste_image, transcript, ..
+            } => (instance, claude_dir, app_version, app_commit, paste_image, transcript),
+            DaemonMessage::VersionMismatch { daemon_protocol } => {
+                return Err(StartError::VersionMismatch { daemon_protocol });
+            }
+            other => return Err(StartError::Io(anyhow::anyhow!("unexpected handshake reply {other:?}"))),
+        };
     write_frame(send, &Frame::control(&ClientMessage::ListPanes)).await.map_err(io)?;
     loop {
         if let DaemonMessage::Panes { panes } = next_message(recv).await? {
-            return Ok(Hello { instance, claude_dir, daemon_version, daemon_commit, paste_image, panes });
+            return Ok(Hello { instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript, panes });
         }
     }
 }
