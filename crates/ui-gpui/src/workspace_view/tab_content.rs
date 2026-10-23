@@ -17,7 +17,7 @@ use app_core::menus::{self, MenuAction, MenuEntry, MenuItem};
 use app_core::session_tree::{Tone, Unseen, display_path, leaf_tone, status_tone, tone_word};
 use app_core::shortcuts::{self, Platform};
 
-use crate::assets::{CLOSE_ICON, PROMPT_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
+use crate::assets::{CLOSE_ICON, PROMPT_ICON, READING_ICON, SPLIT_DOWN_ICON, SPLIT_RIGHT_ICON};
 use crate::context_menu::OpenMenu;
 use crate::hover_card::{self, HoverCard};
 use crate::launcher_view::{FolderRow, star};
@@ -93,6 +93,38 @@ impl WorkspaceView {
         let close_card =
             HoverCard { title: close_title, status: None, dir: None, container: false, host: None, folder: None };
         let danger = theme.tokens.danger;
+        // The reading view toggle, shown only for local Claude panes, left of the split buttons.
+        let reading_toggle = self.reading_available(leaf).then(|| {
+            let on = self.reading.contains_key(&leaf);
+            let platform = Platform::current();
+            let title = match shortcuts::current("toggleReadingView", &settings.shortcuts, platform) {
+                Some(keystroke) => format!("Reading view ({})", shortcuts::label(Some(&keystroke), platform)),
+                None => "Reading view".to_string(),
+            };
+            let card = HoverCard { title, status: None, dir: None, container: false, host: None, folder: None };
+            let tint = if on { theme.tokens.accent } else { theme.tokens.muted };
+            div()
+                .id(("Reading view", index))
+                .flex_none()
+                .size(theme.ui(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_SMALL - 2.))
+                .cursor_pointer()
+                .when(on, |button| button.bg(rgb(theme.tokens.raised)))
+                .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                .tooltip(hover_card::tooltip(card))
+                .child(svg().path(READING_ICON).size(theme.ui(14.)).text_color(rgb(tint)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.toggle_reading_leaf(leaf, window, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }),
+                )
+        });
         div()
             .absolute()
             .top(px(2.))
@@ -105,6 +137,10 @@ impl WorkspaceView {
             .bg(rgba((theme.tokens.terminal << 8) | 0xb3))
             .opacity(if focused || popup_open { 1. } else { 0. })
             .group_hover(group, |style| style.opacity(1.))
+            .children(reading_toggle)
+            .when(self.reading_available(leaf), |bar| {
+                bar.child(div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center())
+            })
             .child(button(Axis::Horizontal, "Split right", "splitRightClaude", SPLIT_RIGHT_ICON))
             .child(button(Axis::Vertical, "Split down", "splitDownClaude", SPLIT_DOWN_ICON))
             .child(div().w(px(1.)).h(theme.ui(14.)).bg(rgb(theme.tokens.line)).self_center())
@@ -452,6 +488,10 @@ impl WorkspaceView {
                                                 .flex_1()
                                                 .min_h_0()
                                                 .child(view)
+                                                // The reading view sits over the terminal, which keeps running underneath.
+                                                .children(self.reading.get(&leaf).map(|reading| {
+                                                    div().absolute().inset_0().occlude().child(reading.clone())
+                                                }))
                                                 .child(self.split_buttons(leaf, index, focused, &theme, cx)),
                                         )
                                 }),

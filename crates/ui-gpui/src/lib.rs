@@ -13,6 +13,7 @@ mod git_state;
 mod hover_card;
 pub mod launcher_view;
 mod pane_drag;
+mod reading_view;
 pub mod recents_view;
 mod release_check;
 mod settings_store;

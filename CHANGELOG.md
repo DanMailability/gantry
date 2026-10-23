@@ -5,6 +5,9 @@ and the version follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Reading view** - A local Claude pane can toggle between the terminal and a formatted-Markdown rendering of the conversation: headings, bold/italic, inline code, gray code boxes, lists, blockquotes and rules, with "You" and "Claude" labels. Toggle it with the page button in the pane's header buttons or Ctrl+Shift+M (Cmd+Shift+M on macOS), rebindable on the Shortcuts page. The terminal keeps running underneath, and the view refreshes as the conversation grows. Local Claude sessions only for now.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

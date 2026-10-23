@@ -1,7 +1,7 @@
 use super::{
     ClosePane, FindSession, FocusDown, FocusLeft, FocusRight, FocusUp, HistoryBack, HistoryForward, NewClaudeTab,
     NewShellTab, NextTab, OpenLauncher, OpenRecents, OpenSettings, PreviousTab, SplitDownClaude, SplitDownShell,
-    SplitRightClaude, SplitRightShell, ToggleGitPanel, ToggleSidebar, WorkspaceView,
+    SplitRightClaude, SplitRightShell, ToggleGitPanel, ToggleReadingView, ToggleSidebar, WorkspaceView,
 };
 
 use app_core::split_tree::{Axis, Direction};
@@ -136,6 +136,7 @@ fn workspace_binding(id: &str, key: &str) -> Option<gpui::KeyBinding> {
         "openRecents" => KeyBinding::new(key, OpenRecents, context),
         "toggleSidebar" => KeyBinding::new(key, ToggleSidebar, context),
         "toggleGitPanel" => KeyBinding::new(key, ToggleGitPanel, context),
+        "toggleReadingView" => KeyBinding::new(key, ToggleReadingView, context),
         "openSettings" => KeyBinding::new(key, OpenSettings, context),
         _ => return None,
     })
