@@ -10,14 +10,18 @@
 use app_core::markdown::{Block, Inline, parse_markdown};
 use app_core::text_field::TextField;
 use app_core::theme_colors::mix;
+use std::path::Path;
+
+use app_core::image_paste;
 use gpui::{
-    App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle,
-    IntoElement, KeyDownEvent, ScrollHandle, SharedString, StyledText, UnderlineStyle, Window, div, prelude::*, px,
-    rgb,
+    App, ClipboardEntry, ClipboardItem, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontStyle,
+    FontWeight, HighlightStyle, IntoElement, KeyDownEvent, PathPromptOptions, ScrollHandle, SharedString, StyledText,
+    UnderlineStyle, Window, div, prelude::*, px, rgb,
 };
-use protocol::message::{SessionStatus, Speaker, TranscriptMessage};
+use protocol::message::{ImageFormat, SessionStatus, Speaker, TranscriptMessage};
 
 use crate::field;
+use crate::hover_card::{self, HoverCard};
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{installed_families, installed_family};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
@@ -28,6 +32,35 @@ pub(crate) enum ReadingEvent {
     Submit(String),
     /// Switch this pane back to the terminal (e.g. to answer a prompt the reading view can't show).
     ShowTerminal,
+    /// Save this pasted/attached image on the pane's host; `id` ties the answer back to its chip.
+    SaveImage {
+        /// The composer attachment id.
+        id: u64,
+        /// The image format.
+        format: ImageFormat,
+        /// The image bytes.
+        data: Vec<u8>,
+    },
+    /// Save this attached file on the pane's host; `id` ties the answer back to its chip.
+    SaveFile {
+        /// The composer attachment id.
+        id: u64,
+        /// The file's name.
+        name: String,
+        /// The file bytes.
+        data: Vec<u8>,
+    },
+}
+
+/// A pending or saved composer attachment, shown as a chip above the input.
+struct Attachment {
+    id: u64,
+    name: String,
+    image: bool,
+    /// The host path once saved; `None` while saving.
+    path: Option<String>,
+    /// The save failed (e.g. the host's daemon is too old for files).
+    failed: bool,
 }
 
 /// One message turned into blocks, with who wrote it and its original Markdown (for "copy message").
@@ -53,6 +86,12 @@ pub struct ReadingView {
     input: TextField,
     /// Scroll to the bottom on the next append (set when the user sends, so their message comes into view).
     pending_scroll: bool,
+    /// Attachments staged in the composer (images and files), shown as chips above the input.
+    attachments: Vec<Attachment>,
+    /// Next attachment id.
+    next_attachment: u64,
+    /// Whether the pane's host daemon answers file attachments (images always work); pushed in by `WorkspaceView`.
+    can_attach_files: bool,
     scroll: ScrollHandle,
 }
 
@@ -75,6 +114,9 @@ impl ReadingView {
             status: None,
             input: TextField::default(),
             pending_scroll: false,
+            attachments: Vec::new(),
+            next_attachment: 0,
+            can_attach_files: true,
             scroll: ScrollHandle::new(),
         }
     }
@@ -127,15 +169,112 @@ impl ReadingView {
         max <= 1.0 || scrolled >= max - 8.0
     }
 
-    /// Send the box's text, if any, and clear it; sticks to the bottom so the sent message scrolls into view.
+    /// Send the box's text and any saved attachment paths, clear the composer, and stick to the bottom so the sent
+    /// message scrolls into view.
     fn submit(&mut self, cx: &mut Context<Self>) {
-        if self.input.text().trim().is_empty() {
+        let paths: Vec<String> = self.attachments.iter().filter_map(|a| a.path.clone()).collect();
+        if self.input.text().trim().is_empty() && paths.is_empty() {
             return;
         }
-        cx.emit(ReadingEvent::Submit(self.input.text().to_string()));
+        let mut full = self.input.text().to_string();
+        for path in paths {
+            if !full.is_empty() {
+                full.push('\n');
+            }
+            full.push_str(&path);
+        }
+        cx.emit(ReadingEvent::Submit(full));
         self.input.clear();
+        self.attachments.clear();
         self.pending_scroll = true;
         cx.notify();
+    }
+
+    /// Whether the host daemon can save file attachments; pushed in by `WorkspaceView`.
+    pub(crate) fn set_can_attach_files(&mut self, can: bool, cx: &mut Context<Self>) {
+        if self.can_attach_files != can {
+            self.can_attach_files = can;
+            cx.notify();
+        }
+    }
+
+    /// The resolved host path of a saved attachment arrived.
+    pub(crate) fn set_attachment_path(&mut self, id: u64, path: String, cx: &mut Context<Self>) {
+        if let Some(a) = self.attachments.iter_mut().find(|a| a.id == id) {
+            a.path = Some(path);
+            cx.notify();
+        }
+    }
+
+    /// Saving an attachment failed.
+    pub(crate) fn fail_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(a) = self.attachments.iter_mut().find(|a| a.id == id) {
+            a.failed = true;
+            cx.notify();
+        }
+    }
+
+    fn remove_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.attachments.retain(|a| a.id != id);
+        cx.notify();
+    }
+
+    /// Add a chip and return its id.
+    fn new_attachment(&mut self, name: String, image: bool) -> u64 {
+        let id = self.next_attachment;
+        self.next_attachment += 1;
+        self.attachments.push(Attachment { id, name, image, path: None, failed: false });
+        id
+    }
+
+    /// Read `path`, classify it as image or file, add a chip, and ask `WorkspaceView` to save it on the host.
+    fn attach_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Ok(data) = std::fs::read(path) else { return };
+        if !image_paste::fits(data.len()) {
+            return;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_string());
+        match image_format_from_path(path) {
+            Some(format) => {
+                let id = self.new_attachment(name, true);
+                cx.emit(ReadingEvent::SaveImage { id, format, data });
+            }
+            None if !self.can_attach_files => {
+                let id = self.new_attachment(name, false);
+                self.fail_attachment(id, cx);
+            }
+            None => {
+                let id = self.new_attachment(name.clone(), false);
+                cx.emit(ReadingEvent::SaveFile { id, name, data });
+            }
+        }
+        cx.notify();
+    }
+
+    /// If the clipboard holds an image, stage it and return true.
+    fn try_attach_clipboard_image(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((format, data)) = cx.read_from_clipboard().as_ref().and_then(clipboard_image) else {
+            return false;
+        };
+        let id = self.new_attachment("pasted image".to_string(), true);
+        cx.emit(ReadingEvent::SaveImage { id, format, data });
+        cx.notify();
+        true
+    }
+
+    /// Open a file picker and stage the chosen files.
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked =
+            cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                for path in paths {
+                    this.attach_path(&path, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -153,9 +292,13 @@ impl ReadingView {
                 cx.notify();
             }
             _ => {
-                // Editing keys and typing go to the box and stop here; anything else (e.g. Ctrl+Shift+M) bubbles up
-                // so the workspace shortcut still works.
-                if field::edit(&mut self.input, keystroke, cx) {
+                // Ctrl/Cmd+V with an image on the clipboard attaches it; otherwise editing keys and typing go to the
+                // box. Anything else (e.g. Ctrl+Shift+M) bubbles up so the workspace shortcut still works.
+                if image_paste::is_paste_key(&keystroke.key, m.control, m.alt, m.shift, m.platform)
+                    && self.try_attach_clipboard_image(cx)
+                {
+                    cx.stop_propagation();
+                } else if field::edit(&mut self.input, keystroke, cx) {
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -281,17 +424,53 @@ impl ReadingView {
         )
     }
 
-    /// The prompt box pinned at the bottom, with a "Claude is working…" line while the session is busy.
+    /// The prompt box pinned at the bottom: attachment chips, a "Claude is working…" line while busy, an attach
+    /// button, the input, and Send. Dropping files onto it attaches them.
     fn prompt_bar(&self, focused: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let working = matches!(self.status, Some(SessionStatus::Busy));
         let placeholder = "Message Claude…  (Enter to send, Shift+Enter for a newline)";
+        let attach_tip = if self.can_attach_files {
+            "Attach images or files"
+        } else {
+            "Attach images (files need a newer Gantry on this host)"
+        };
+        let attach_card = HoverCard {
+            title: attach_tip.to_string(),
+            status: None,
+            dir: None,
+            container: false,
+            host: None,
+            folder: None,
+        };
+        let attach = div()
+            .id("reading-attach")
+            .flex_none()
+            .size(theme.ui(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(RADIUS_SMALL))
+            .text_size(theme.ui(18.))
+            .text_color(rgb(theme.tokens.muted))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tokens.raised)).text_color(rgb(theme.tokens.text)))
+            .tooltip(hover_card::tooltip(attach_card))
+            .child("+")
+            .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
         div()
+            .id("reading-composer")
             .flex_none()
             .flex()
             .flex_col()
             .border_t_1()
             .border_color(rgb(theme.tokens.line))
             .bg(rgb(theme.tokens.surface))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                for path in paths.paths().to_vec() {
+                    this.attach_path(&path, cx);
+                }
+            }))
+            .when(!self.attachments.is_empty(), |bar| bar.child(self.attachment_chips(theme, cx)))
             .when(working, |bar| {
                 bar.child(
                     div()
@@ -309,6 +488,7 @@ impl ReadingView {
                     .gap(theme.ui(10.))
                     .px(theme.ui(16.))
                     .py(theme.ui(12.))
+                    .child(attach)
                     .child(div().flex_1().min_w_0().text_size(theme.ui(14.)).child(field::render(
                         &self.input,
                         placeholder,
@@ -337,6 +517,77 @@ impl ReadingView {
                     ),
             )
     }
+}
+
+impl ReadingView {
+    /// The row of attachment chips above the input; each shows its name, state, and a remove button.
+    fn attachment_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex().flex_wrap().gap(theme.ui(6.)).px(theme.ui(16.)).pt(theme.ui(10.)).children(
+            self.attachments.iter().map(|attachment| {
+                let id = attachment.id;
+                let kind = if attachment.image { "image" } else { "file" };
+                let label = if attachment.failed {
+                    format!("{} — unsupported here", attachment.name)
+                } else if attachment.path.is_none() {
+                    format!("{} — saving…", attachment.name)
+                } else {
+                    attachment.name.clone()
+                };
+                let color = if attachment.failed { theme.tokens.danger } else { theme.tokens.text };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(6.))
+                    .px(theme.ui(8.))
+                    .py(theme.ui(3.))
+                    .rounded(px(RADIUS_SMALL))
+                    .bg(rgb(theme.tokens.raised))
+                    .text_size(theme.ui(11.5))
+                    .text_color(rgb(color))
+                    .child(div().text_color(rgb(theme.tokens.muted)).child(kind))
+                    .child(div().max_w(theme.ui(220.)).truncate().child(label))
+                    .child(
+                        div()
+                            .id(("rv-chip-x", id as usize))
+                            .cursor_pointer()
+                            .text_color(rgb(theme.tokens.muted))
+                            .hover(|style| style.text_color(rgb(theme.tokens.text)))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(id, cx))),
+                    )
+            }),
+        )
+    }
+}
+
+/// The image format for an image file path by extension, or `None` for a non-image file.
+fn image_format_from_path(path: &Path) -> Option<ImageFormat> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        "gif" => Some(ImageFormat::Gif),
+        "webp" => Some(ImageFormat::Webp),
+        _ => None,
+    }
+}
+
+/// The image format and bytes on the clipboard, if it holds a supported image (and no text).
+fn clipboard_image(item: &ClipboardItem) -> Option<(ImageFormat, Vec<u8>)> {
+    if item.text().is_some() {
+        return None;
+    }
+    item.entries().iter().find_map(|entry| {
+        let ClipboardEntry::Image(image) = entry else { return None };
+        let format = match image.format {
+            gpui::ImageFormat::Png => ImageFormat::Png,
+            gpui::ImageFormat::Jpeg => ImageFormat::Jpeg,
+            gpui::ImageFormat::Gif => ImageFormat::Gif,
+            gpui::ImageFormat::Webp => ImageFormat::Webp,
+            _ => return None,
+        };
+        image_paste::fits(image.bytes.len()).then(|| (format, image.bytes.clone()))
+    })
 }
 
 /// One message: a speaker label with a copy-message button, then its blocks (each with a copy button on hover).

@@ -26,10 +26,7 @@ impl WorkspaceView {
     ) {
         for event in events {
             match &event {
-                ClientEvent::Output { pane, .. }
-                | ClientEvent::Resync { pane, .. }
-                | ClientEvent::PasteImageSaved { pane, .. }
-                | ClientEvent::PasteImageFailed { pane, .. } => {
+                ClientEvent::Output { pane, .. } | ClientEvent::Resync { pane, .. } => {
                     if let Some(slot) = self
                         .workspace
                         .leaf_for_pane(&PaneKey::new(host.clone(), *pane))
@@ -38,6 +35,32 @@ impl WorkspaceView {
                         slot.view.update(cx, |view, cx| view.on_event(&event, cx));
                     }
                 }
+                ClientEvent::PasteImageSaved { pane, path } => {
+                    let leaf = self.workspace.leaf_for_pane(&PaneKey::new(host.clone(), *pane));
+                    // While the reading composer has an image save in flight, the saved path goes to it; otherwise it
+                    // is a terminal paste, which the terminal inserts into the PTY as today.
+                    match leaf.filter(|leaf| self.has_pending_reading_image(*leaf)) {
+                        Some(leaf) => self.on_reading_image(leaf, Some(path.clone()), cx),
+                        None => {
+                            if let Some(slot) = leaf.and_then(|leaf| self.slots.get(&leaf)) {
+                                slot.view.update(cx, |view, cx| view.on_event(&event, cx));
+                            }
+                        }
+                    }
+                }
+                ClientEvent::PasteImageFailed { pane, .. } => {
+                    let leaf = self.workspace.leaf_for_pane(&PaneKey::new(host.clone(), *pane));
+                    match leaf.filter(|leaf| self.has_pending_reading_image(*leaf)) {
+                        Some(leaf) => self.on_reading_image(leaf, None, cx),
+                        None => {
+                            if let Some(slot) = leaf.and_then(|leaf| self.slots.get(&leaf)) {
+                                slot.view.update(cx, |view, cx| view.on_event(&event, cx));
+                            }
+                        }
+                    }
+                }
+                ClientEvent::AttachmentSaved { request, path } => self.on_attachment(*request, Some(path.clone()), cx),
+                ClientEvent::AttachmentFailed { request, .. } => self.on_attachment(*request, None, cx),
                 ClientEvent::Exited { pane, code } => {
                     if let Some(leaf) = self.workspace.pane_exited(&PaneKey::new(host.clone(), *pane)) {
                         self.slots[&leaf].view.update(cx, |view, cx| view.exited(Some(*code), cx));

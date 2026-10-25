@@ -19,6 +19,27 @@ pub fn file_name(format: ImageFormat) -> String {
 /// files older than `MAX_AGE` before `now` are deleted first. The bytes go to `<name>.tmp` (0600) and are renamed, so
 /// no reader sees a half file. Errors read "<what>: <io error>".
 pub fn save_local(dir: &Path, format: ImageFormat, data: &[u8], now: SystemTime) -> Result<PathBuf, String> {
+    write_new(dir, &file_name(format), data, now)
+}
+
+/// A fresh, path-safe name for an attached file: `<uuid>-<sanitised original>`, keeping a meaningful name for Claude.
+pub fn attachment_name(original: &str) -> String {
+    let base = std::path::Path::new(original).file_name().and_then(|n| n.to_str()).unwrap_or(original);
+    let safe: String =
+        base.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
+    let safe = if safe.is_empty() { "file".to_string() } else { safe };
+    format!("{}-{safe}", uuid::Uuid::new_v4())
+}
+
+/// Save an attached file's bytes in `dir` under a fresh, name-preserving file name; returns its absolute path.
+pub fn save_attachment_local(dir: &Path, name: &str, data: &[u8], now: SystemTime) -> Result<PathBuf, String> {
+    write_new(dir, &attachment_name(name), data, now)
+}
+
+/// Save `data` in `dir` under the exact file `name` and return its absolute path. The folder is created private
+/// (0700) and files older than `MAX_AGE` before `now` are deleted first. The bytes go to `<name>.tmp` (0600) and are
+/// renamed, so no reader sees a half file. Errors read "<what>: <io error>".
+fn write_new(dir: &Path, name: &str, data: &[u8], now: SystemTime) -> Result<PathBuf, String> {
     let describe = |what: &str, path: &Path, error: std::io::Error| format!("{what} {}: {error}", path.display());
     std::fs::create_dir_all(dir).map_err(|e| describe("cannot create", dir, e))?;
     #[cfg(unix)]
@@ -28,8 +49,7 @@ pub fn save_local(dir: &Path, format: ImageFormat, data: &[u8], now: SystemTime)
             .map_err(|e| describe("cannot protect", dir, e))?;
     }
     sweep(dir, now);
-    let name = file_name(format);
-    let path = dir.join(&name);
+    let path = dir.join(name);
     let tmp = dir.join(format!("{name}.tmp"));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -80,8 +100,30 @@ pub fn save_in_container(
     format: ImageFormat,
     data: &[u8],
 ) -> Result<String, String> {
-    let name = file_name(format);
-    let (program, args) = container_command(docker, container_id, remote_user, &name);
+    save_bytes_in_container(docker, container_id, remote_user, &file_name(format), data)
+}
+
+/// Save an attached file in the container's paste folder and return the path inside the container.
+pub fn save_attachment_in_container(
+    docker: &str,
+    container_id: &str,
+    remote_user: Option<&str>,
+    name: &str,
+    data: &[u8],
+) -> Result<String, String> {
+    save_bytes_in_container(docker, container_id, remote_user, &attachment_name(name), data)
+}
+
+/// Save `data` as `name` in the container's paste folder through `docker exec`; returns the path inside the
+/// container. Errors carry the last line of docker's stderr.
+fn save_bytes_in_container(
+    docker: &str,
+    container_id: &str,
+    remote_user: Option<&str>,
+    name: &str,
+    data: &[u8],
+) -> Result<String, String> {
+    let (program, args) = container_command(docker, container_id, remote_user, name);
     let mut child = claude_index::process::hide_window(&mut Command::new(program))
         .args(args)
         .stdin(Stdio::piped())
@@ -97,7 +139,7 @@ pub fn save_in_container(
         return Err(format!("docker exec failed: {last}"));
     }
     if let Some(Err(error)) = written {
-        return Err(format!("cannot send the image to the container: {error}"));
+        return Err(format!("cannot send the file to the container: {error}"));
     }
     Ok(format!("{CONTAINER_DIR}/{name}"))
 }

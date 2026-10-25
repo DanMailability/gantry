@@ -115,6 +115,8 @@ struct Reading {
     offset: u64,
     /// The in-flight `read_transcript` request id, if any.
     request: Option<u64>,
+    /// Attachment ids whose pasted-image save is in flight, oldest first (PasteImageSaved carries no request id).
+    pending_images: std::collections::VecDeque<u64>,
     /// Keeps the subscription to the view's prompt events (send / show-terminal) alive.
     _subscription: Subscription,
 }
@@ -270,6 +272,8 @@ pub struct WorkspaceView {
     reading: HashMap<NodeId, Reading>,
     /// `read_transcript` request id → the leaf whose reading view it feeds.
     reading_requests: HashMap<u64, NodeId>,
+    /// `save_attachment` request id → the (leaf, attachment id) whose chip it resolves.
+    attachment_requests: HashMap<u64, (NodeId, u64)>,
     /// The timer that re-reads shown reading views' transcripts.
     reading_task: Option<Task<()>>,
     /// Spawn request id → leaf waiting for it.
@@ -547,6 +551,7 @@ impl WorkspaceView {
             slots: HashMap::new(),
             reading: HashMap::new(),
             reading_requests: HashMap::new(),
+            attachment_requests: HashMap::new(),
             reading_task: None,
             pending: HashMap::new(),
             next_request: 0,
