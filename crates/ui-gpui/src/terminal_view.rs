@@ -408,6 +408,12 @@ impl TerminalView {
         self.title.clone().filter(|title| !title.trim().is_empty()).unwrap_or_else(|| self.launch.label())
     }
 
+    /// The visible screen as one string per row (trailing spaces trimmed), for parsing an interactive prompt.
+    pub fn visible_lines(&self) -> Vec<String> {
+        let (_, rows) = self.grid_size();
+        (0..rows).map(|row| self.term.row_text(row)).collect()
+    }
+
     /// Current grid size (columns, rows).
     pub fn grid_size(&self) -> (u16, u16) {
         self.grid_size

@@ -1,6 +1,9 @@
 use super::layout::{CARD_PAD, content_frame};
 use super::{PANE_GAP, WorkspaceView};
 
+/// Height of the live-terminal region shown below the reading view when a prompt can't be parsed into a card.
+const PROMPT_PANEL_H: f32 = 220.0;
+
 use app_core::attention::without_claude_glyph;
 use app_core::launcher::{self, LauncherItem};
 use app_core::split_tree::{self, Axis, NodeId};
@@ -404,6 +407,16 @@ impl WorkspaceView {
                 let dir = self.leaf_dir_badge(leaf, cx);
                 let project = self.leaf_project_color(leaf, cx);
                 let git_chip = self.git_chip_of(leaf, ("git-chip-pane", index), &theme, cx);
+                // The reading view overlay. In the raw-terminal prompt fallback it leaves a strip at the bottom so
+                // the pane's live terminal (rendered underneath) shows and can be answered directly.
+                let reading_overlay = self.reading.get(&leaf).map(|reading| {
+                    let overlay = div().absolute().left_0().top_0().right_0().occlude().child(reading.view.clone());
+                    if reading.terminal_prompt {
+                        overlay.bottom(px(PROMPT_PANEL_H * theme.ui_scale))
+                    } else {
+                        overlay.bottom_0()
+                    }
+                });
                 let folder = self
                     .workspace
                     .leaves
@@ -489,9 +502,7 @@ impl WorkspaceView {
                                                 .min_h_0()
                                                 .child(view)
                                                 // The reading view sits over the terminal, which keeps running underneath.
-                                                .children(self.reading.get(&leaf).map(|reading| {
-                                                    div().absolute().inset_0().occlude().child(reading.view.clone())
-                                                }))
+                                                .children(reading_overlay)
                                                 .child(self.split_buttons(leaf, index, focused, &theme, cx)),
                                         )
                                 }),

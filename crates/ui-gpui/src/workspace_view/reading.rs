@@ -80,6 +80,7 @@ impl WorkspaceView {
                 offset: 0,
                 request: None,
                 pending_images: std::collections::VecDeque::new(),
+                terminal_prompt: false,
                 _subscription: subscription,
             },
         );
@@ -97,6 +98,7 @@ impl WorkspaceView {
             ReadingEvent::SaveFile { id, name, data } => {
                 self.save_reading_file(leaf, *id, name.clone(), data.clone(), cx)
             }
+            ReadingEvent::SendKeys(bytes) => self.send_reading_keys(leaf, bytes),
             ReadingEvent::ShowTerminal => {
                 if self.reading.remove(&leaf).is_some() {
                     self.reading_requests.retain(|_, waiting| *waiting != leaf);
@@ -196,12 +198,40 @@ impl WorkspaceView {
         client.input(key.pane, &bytes);
     }
 
-    /// Push `leaf`'s current session status into its reading view (for the working indicator and needs-input banner).
+    /// Send raw `bytes` to `leaf`'s session (a parsed prompt button's keystroke).
+    fn send_reading_keys(&mut self, leaf: NodeId, bytes: &[u8]) {
+        let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
+        let host = entry.host.clone();
+        let Some(key) = entry.key() else { return };
+        if let Some(client) = self.client(&host) {
+            client.input(key.pane, bytes);
+        }
+    }
+
+    /// Push `leaf`'s status and, while it needs input, the permission prompt parsed from its live screen into its
+    /// reading view. Sets `terminal_prompt` when a prompt is active but could not be parsed, so the workspace shows
+    /// and focuses the live terminal region as the fallback.
     fn push_reading_status(&mut self, leaf: NodeId, cx: &mut Context<Self>) {
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
+        let needs_input = matches!(&status, Some(protocol::message::SessionStatus::NeedsInput { .. }));
+        let prompt = if needs_input {
+            self.slots
+                .get(&leaf)
+                .map(|slot| slot.view.read(cx).visible_lines())
+                .and_then(|lines| app_core::prompt::parse_prompt(&lines))
+        } else {
+            None
+        };
+        let terminal_prompt = needs_input && prompt.is_none();
+        if let Some(reading) = self.reading.get_mut(&leaf) {
+            reading.terminal_prompt = terminal_prompt;
+        }
         if let Some(reading) = self.reading.get(&leaf) {
             let view = reading.view.clone();
-            view.update(cx, |view, cx| view.set_status(status, cx));
+            view.update(cx, |view, cx| {
+                view.set_status(status, cx);
+                view.set_prompt(prompt, cx);
+            });
         }
     }
 

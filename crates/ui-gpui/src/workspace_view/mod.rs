@@ -115,6 +115,8 @@ struct Reading {
     request: Option<u64>,
     /// Attachment ids whose pasted-image save is in flight, oldest first (PasteImageSaved carries no request id).
     pending_images: std::collections::VecDeque<u64>,
+    /// A prompt is active but could not be parsed into a card, so the live terminal region is shown and focused.
+    terminal_prompt: bool,
     /// Keeps the subscription to the view's prompt events (send / show-terminal) alive.
     _subscription: Subscription,
 }
