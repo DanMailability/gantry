@@ -390,7 +390,14 @@ impl WorkspaceView {
         if let Some(leaf) = self.workspace.focused()
             && let Some(reading) = self.reading.get(&leaf)
         {
-            reading.view.focus_handle(cx).focus(window, cx);
+            // In the raw-terminal prompt fallback, keys answer the live terminal; otherwise they go to the composer.
+            let terminal_prompt = reading.terminal_prompt;
+            let reading_view = reading.view.clone();
+            if terminal_prompt && let Some(slot) = self.slots.get(&leaf) {
+                slot.view.focus_handle(cx).focus(window, cx);
+            } else {
+                reading_view.focus_handle(cx).focus(window, cx);
+            }
             let focused = self.workspace.focused();
             self.sidebar.update(cx, |sidebar, cx| sidebar.set_focused(focused, cx));
             self.clear_seen(window, cx);

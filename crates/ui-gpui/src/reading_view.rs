@@ -8,6 +8,7 @@
 //! input the view shows a banner with a one-click switch to the terminal ([`ReadingEvent::ShowTerminal`]).
 
 use app_core::markdown::{Block, Inline, parse_markdown};
+use app_core::prompt::Prompt;
 use app_core::text_field::TextField;
 use app_core::theme_colors::mix;
 use std::path::Path;
@@ -32,6 +33,8 @@ pub(crate) enum ReadingEvent {
     Submit(String),
     /// Switch this pane back to the terminal (e.g. to answer a prompt the reading view can't show).
     ShowTerminal,
+    /// Send these raw bytes to the pane's session (a parsed prompt button's keystroke).
+    SendKeys(Vec<u8>),
     /// Save this pasted/attached image on the pane's host; `id` ties the answer back to its chip.
     SaveImage {
         /// The composer attachment id.
@@ -82,6 +85,8 @@ pub struct ReadingView {
     found: bool,
     /// The session's status, pushed in by `WorkspaceView` (for the working indicator and needs-input banner).
     status: Option<SessionStatus>,
+    /// A permission prompt parsed from the live screen, pushed in by `WorkspaceView`; shown as a structured card.
+    prompt: Option<Prompt>,
     /// The prompt box's text.
     input: TextField,
     /// Scroll to the bottom on the next append (set when the user sends, so their message comes into view).
@@ -112,6 +117,7 @@ impl ReadingView {
             loaded: false,
             found: false,
             status: None,
+            prompt: None,
             input: TextField::default(),
             pending_scroll: false,
             attachments: Vec::new(),
@@ -133,6 +139,14 @@ impl ReadingView {
     pub(crate) fn set_status(&mut self, status: Option<SessionStatus>, cx: &mut Context<Self>) {
         if self.status != status {
             self.status = status;
+            cx.notify();
+        }
+    }
+
+    /// Set the parsed permission prompt (the structured card); redraws only when it changes.
+    pub(crate) fn set_prompt(&mut self, prompt: Option<Prompt>, cx: &mut Context<Self>) {
+        if self.prompt != prompt {
+            self.prompt = prompt;
             cx.notify();
         }
     }
@@ -378,50 +392,152 @@ impl Render for ReadingView {
                     .into_any_element()
             }
         };
-        base.child(body)
-            .children(self.needs_input_banner(&theme, cx))
-            .child(self.prompt_bar(focused, &theme, cx))
-            .into_any_element()
+        let bottom = if let Some(prompt) = self.prompt.clone() {
+            self.prompt_card(&prompt, &mono, &theme, cx).into_any_element()
+        } else if matches!(self.status, Some(SessionStatus::NeedsInput { .. })) {
+            self.needs_input_bar(&theme, cx).into_any_element()
+        } else {
+            self.prompt_bar(focused, &theme, cx).into_any_element()
+        };
+        base.child(body).child(bottom).into_any_element()
     }
 }
 
 impl ReadingView {
-    /// The banner shown while the session is blocked on the user, with a button that switches to the terminal.
-    fn needs_input_banner(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
-        let SessionStatus::NeedsInput { reason } = self.status.clone()? else { return None };
-        let text = match reason {
-            Some(reason) => format!("Claude needs a response ({reason}) — switch to the terminal."),
-            None => "Claude needs a response — switch to the terminal.".to_string(),
-        };
-        Some(
-            div()
-                .id("reading-needs-input")
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(theme.ui(10.))
-                .px(theme.ui(16.))
-                .py(theme.ui(10.))
-                .bg(rgb(mix(theme.tokens.accent, theme.tokens.surface, 0.22)))
-                .border_t_1()
-                .border_color(rgb(theme.tokens.line))
-                .child(div().flex_1().min_w_0().text_sm().text_color(rgb(theme.tokens.text)).child(text))
-                .child(
-                    div()
-                        .id("reading-to-terminal")
-                        .flex_none()
-                        .px(theme.ui(12.))
-                        .py(theme.ui(5.))
-                        .rounded(px(RADIUS_SMALL))
-                        .bg(rgb(theme.tokens.accent))
-                        .text_color(rgb(theme.tokens.on_accent))
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .cursor_pointer()
-                        .child("Open terminal")
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ReadingEvent::ShowTerminal))),
-                ),
-        )
+    /// A small "Open full terminal" button that flips the pane to the terminal view.
+    fn open_terminal_button(&self, id: &'static str, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex_none()
+            .px(theme.ui(10.))
+            .py(theme.ui(5.))
+            .rounded(px(RADIUS_SMALL))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .text_xs()
+            .text_color(rgb(theme.tokens.muted))
+            .cursor_pointer()
+            .hover(|style| style.text_color(rgb(theme.tokens.text)).border_color(rgb(theme.tokens.accent)))
+            .child("Open full terminal")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ReadingEvent::ShowTerminal)))
+    }
+
+    /// The structured permission dialog parsed from the live screen: heading, detail, and the choices as buttons.
+    fn prompt_card(
+        &self,
+        prompt: &Prompt,
+        mono: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let detail = prompt.detail.clone();
+        let options = prompt.options.clone();
+        let question = prompt.question.clone();
+        let card = div()
+            .w_full()
+            .max_w(theme.ui(760.))
+            .flex()
+            .flex_col()
+            .gap(theme.ui(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.tokens.accent))
+                            .child("Claude needs your approval"),
+                    )
+                    .child(self.open_terminal_button("reading-prompt-terminal", theme, cx)),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui(15.))
+                    .line_height(theme.ui(22.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.tokens.text))
+                    .child(question),
+            )
+            .children(detail.map(|detail| {
+                div()
+                    .id("reading-prompt-detail")
+                    .w_full()
+                    .overflow_x_scroll()
+                    .rounded(px(RADIUS_SMALL))
+                    .bg(rgb(mix(theme.tokens.text, theme.tokens.surface, 0.06)))
+                    .border_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .px(theme.ui(10.))
+                    .py(theme.ui(8.))
+                    .font_family(mono.clone())
+                    .text_size(theme.ui(12.5))
+                    .line_height(theme.ui(18.))
+                    .text_color(rgb(theme.tokens.text))
+                    .children(detail.split('\n').map(|line| {
+                        div().whitespace_nowrap().child(if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line.to_string()
+                        })
+                    }))
+            }))
+            .child(div().flex().flex_wrap().gap(theme.ui(8.)).children(options.into_iter().map(|option| {
+                let selected = option.selected;
+                let bytes = option.number.to_string().into_bytes();
+                div()
+                    .id(("reading-prompt-option", option.number as usize))
+                    .px(theme.ui(12.))
+                    .py(theme.ui(7.))
+                    .rounded(px(RADIUS_SMALL))
+                    .border_1()
+                    .border_color(rgb(if selected { theme.tokens.accent } else { theme.tokens.line }))
+                    .bg(rgb(if selected { theme.tokens.accent } else { theme.tokens.raised }))
+                    .text_color(rgb(if selected { theme.tokens.on_accent } else { theme.tokens.text }))
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(|style| style.border_color(rgb(theme.tokens.accent)))
+                    .child(format!("{}. {}", option.number, option.label))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReadingEvent::SendKeys(bytes.clone()))))
+            })));
+        div()
+            .flex_none()
+            .flex()
+            .justify_center()
+            .border_t_1()
+            .border_color(rgb(theme.tokens.line))
+            .bg(rgb(theme.tokens.surface))
+            .px(theme.ui(16.))
+            .py(theme.ui(14.))
+            .child(card)
+    }
+
+    /// The fallback bar when a prompt is active but could not be parsed: the live terminal region is shown below
+    /// (by `workspace_view`); this just explains it and offers the full terminal.
+    fn needs_input_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(theme.ui(10.))
+            .px(theme.ui(16.))
+            .py(theme.ui(10.))
+            .bg(rgb(mix(theme.tokens.accent, theme.tokens.surface, 0.22)))
+            .border_t_1()
+            .border_color(rgb(theme.tokens.line))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(rgb(theme.tokens.text))
+                    .child("Claude needs a response — answer in the terminal below."),
+            )
+            .child(self.open_terminal_button("reading-needs-input-terminal", theme, cx))
     }
 
     /// The prompt box pinned at the bottom: attachment chips, a "Claude is working…" line while busy, an attach
