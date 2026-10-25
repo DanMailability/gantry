@@ -1,33 +1,45 @@
-//! The reading view: a Claude pane's conversation drawn as formatted Markdown instead of the terminal grid. The
-//! conversation text comes from the pane's host daemon (`read_transcript` → `Transcript`), the same way the git diff
-//! view fetches remote content, so it works for local and SSH-host sessions alike. The `WorkspaceView` drives the
-//! requests and feeds answers in here through [`ReadingView::append`]; this view only renders and scrolls.
+//! The reading view: a Claude pane's conversation drawn as formatted Markdown, with a prompt box to chat back. The
+//! conversation text comes from the pane's host daemon (`read_transcript` -> `Transcript`), driven by `WorkspaceView`,
+//! which also feeds answers in here through [`ReadingView::append`] and the session status through
+//! [`ReadingView::set_status`]. Typing in the box emits [`ReadingEvent::Submit`]; `WorkspaceView` turns that into
+//! `DaemonClient::input` to the pane's session (local or SSH host, same channel).
 //!
-//! Each message's text is parsed with `app_core::markdown` and laid out with GPUI. Read-only, per completed message
-//! (no live token streaming).
+//! Interactive TUI moments (permission prompts, y/n, menus) are not in the transcript, so while the session needs
+//! input the view shows a banner with a one-click switch to the terminal ([`ReadingEvent::ShowTerminal`]).
 
 use app_core::markdown::{Block, Inline, parse_markdown};
+use app_core::text_field::TextField;
 use app_core::theme_colors::mix;
 use gpui::{
-    App, Context, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, IntoElement, ScrollHandle,
-    SharedString, StyledText, UnderlineStyle, Window, div, prelude::*, px, rgb,
+    App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle,
+    IntoElement, KeyDownEvent, ScrollHandle, SharedString, StyledText, UnderlineStyle, Window, div, prelude::*, px,
+    rgb,
 };
-use protocol::message::{Speaker, TranscriptMessage};
+use protocol::message::{SessionStatus, Speaker, TranscriptMessage};
 
+use crate::field;
 use crate::settings_store::SettingsStore;
 use crate::terminal_view::{installed_families, installed_family};
 use crate::theme::{RADIUS, RADIUS_SMALL, Theme, UI_FONT, theme};
 
-/// One message turned into blocks, with who wrote it.
+/// Something the reading view asks `WorkspaceView` to do.
+pub(crate) enum ReadingEvent {
+    /// Send this text to the pane's Claude session (submits with a carriage return).
+    Submit(String),
+    /// Switch this pane back to the terminal (e.g. to answer a prompt the reading view can't show).
+    ShowTerminal,
+}
+
+/// One message turned into blocks, with who wrote it and its original Markdown (for "copy message").
 struct Shown {
     you: bool,
+    source: String,
     blocks: Vec<Block>,
 }
 
-/// A Claude pane's conversation as formatted Markdown.
+/// A Claude pane's conversation as formatted Markdown, with a prompt box.
 pub struct ReadingView {
     focus_handle: FocusHandle,
-    /// Messages parsed so far.
     messages: Vec<Shown>,
     /// A fixed one-line notice shown instead of the conversation (e.g. the host's daemon is too old).
     notice: Option<String>,
@@ -35,6 +47,12 @@ pub struct ReadingView {
     loaded: bool,
     /// The transcript file was found on the host.
     found: bool,
+    /// The session's status, pushed in by `WorkspaceView` (for the working indicator and needs-input banner).
+    status: Option<SessionStatus>,
+    /// The prompt box's text.
+    input: TextField,
+    /// Scroll to the bottom on the next append (set when the user sends, so their message comes into view).
+    pending_scroll: bool,
     scroll: ScrollHandle,
 }
 
@@ -44,6 +62,8 @@ impl Focusable for ReadingView {
     }
 }
 
+impl EventEmitter<ReadingEvent> for ReadingView {}
+
 impl ReadingView {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         ReadingView {
@@ -52,6 +72,9 @@ impl ReadingView {
             notice: None,
             loaded: false,
             found: false,
+            status: None,
+            input: TextField::default(),
+            pending_scroll: false,
             scroll: ScrollHandle::new(),
         }
     }
@@ -64,21 +87,33 @@ impl ReadingView {
         }
     }
 
-    /// Append the messages from a `Transcript` answer. Keeps the view pinned to the bottom when it already was (so a
-    /// running session's new replies stay in view), but never scrolls on the first load.
+    /// Set the session status; redraws only when it changes.
+    pub(crate) fn set_status(&mut self, status: Option<SessionStatus>, cx: &mut Context<Self>) {
+        if self.status != status {
+            self.status = status;
+            cx.notify();
+        }
+    }
+
+    /// Append the messages from a `Transcript` answer. Keeps the view pinned to the bottom when it already was, and
+    /// forces a scroll to the bottom once if the user just sent a message.
     pub(crate) fn append(&mut self, messages: Vec<TranscriptMessage>, found: bool, cx: &mut Context<Self>) {
         let was_at_bottom = self.at_bottom();
         let added = !messages.is_empty();
         let first_load = !self.loaded;
         for message in messages {
             let you = matches!(message.speaker, Speaker::You);
-            self.messages.push(Shown { you, blocks: parse_markdown(&message.text) });
+            let blocks = parse_markdown(&message.text);
+            self.messages.push(Shown { you, source: message.text, blocks });
         }
         let found_changed = self.found != found;
         self.loaded = true;
         self.found = found;
-        if added && !first_load && was_at_bottom {
+        if added && (self.pending_scroll || (!first_load && was_at_bottom)) {
             self.scroll.scroll_to_bottom();
+        }
+        if added {
+            self.pending_scroll = false;
         }
         if added || first_load || found_changed {
             cx.notify();
@@ -92,15 +127,48 @@ impl ReadingView {
         max <= 1.0 || scrolled >= max - 8.0
     }
 
-    /// The one-line placeholder to show instead of a conversation, if there is nothing to draw yet.
-    fn placeholder(&self) -> Option<String> {
-        if let Some(notice) = &self.notice {
-            return Some(notice.clone());
+    /// Send the box's text, if any, and clear it; sticks to the bottom so the sent message scrolls into view.
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        if self.input.text().trim().is_empty() {
+            return;
         }
+        cx.emit(ReadingEvent::Submit(self.input.text().to_string()));
+        self.input.clear();
+        self.pending_scroll = true;
+        cx.notify();
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let m = &keystroke.modifiers;
+        let chord = m.control || m.platform || m.alt;
+        match keystroke.key.as_str() {
+            "enter" if !chord && !m.shift => {
+                self.submit(cx);
+                cx.stop_propagation();
+            }
+            "enter" if !chord && m.shift => {
+                self.input.insert("\n");
+                cx.stop_propagation();
+                cx.notify();
+            }
+            _ => {
+                // Editing keys and typing go to the box and stop here; anything else (e.g. Ctrl+Shift+M) bubbles up
+                // so the workspace shortcut still works.
+                if field::edit(&mut self.input, keystroke, cx) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// The one-line placeholder for the message area when there is nothing to draw yet.
+    fn placeholder(&self) -> Option<String> {
         if self.messages.is_empty() {
             return Some(
                 if self.loaded && self.found {
-                    "No messages in this conversation yet."
+                    "No messages in this conversation yet. Type below to start."
                 } else {
                     "Waiting for the conversation…"
                 }
@@ -112,17 +180,20 @@ impl ReadingView {
 }
 
 impl Render for ReadingView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx).clone();
+        let focused = self.focus_handle.is_focused(window);
         let base = div()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::on_key))
             .size_full()
+            .flex()
+            .flex_col()
             .bg(rgb(theme.tokens.ground))
             .text_color(rgb(theme.tokens.text))
             .font_family(UI_FONT);
-        if let Some(text) = self.placeholder() {
+        if let Some(text) = self.notice.clone() {
             return base
-                .flex()
                 .items_center()
                 .justify_center()
                 .p(theme.ui(24.))
@@ -135,50 +206,201 @@ impl Render for ReadingView {
         )
         .to_string()
         .into();
-        let messages = self.messages.iter().map(|message| render_message(message, &mono, &theme)).collect::<Vec<_>>();
-        base.id("reading")
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .child(
-                // A centred, comfortably wide reading column.
-                div().w_full().flex().flex_col().items_center().px(theme.ui(20.)).py(theme.ui(22.)).child(
-                    div().w_full().max_w(theme.ui(760.)).flex().flex_col().gap(theme.ui(26.)).children(messages),
-                ),
-            )
+        let body = match self.placeholder() {
+            Some(text) => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(theme.ui(24.))
+                .child(div().max_w(theme.ui(380.)).text_center().text_color(rgb(theme.tokens.muted)).child(text))
+                .into_any_element(),
+            None => {
+                let messages = self
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| render_message(i, m, &mono, &theme))
+                    .collect::<Vec<_>>();
+                div()
+                    .id("reading")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(div().w_full().flex().flex_col().items_center().px(theme.ui(20.)).py(theme.ui(22.)).child(
+                        div().w_full().max_w(theme.ui(760.)).flex().flex_col().gap(theme.ui(26.)).children(messages),
+                    ))
+                    .into_any_element()
+            }
+        };
+        base.child(body)
+            .children(self.needs_input_banner(&theme, cx))
+            .child(self.prompt_bar(focused, &theme, cx))
             .into_any_element()
     }
 }
 
-/// One message: a speaker label, then its blocks.
-fn render_message(message: &Shown, mono: &SharedString, theme: &Theme) -> impl IntoElement {
+impl ReadingView {
+    /// The banner shown while the session is blocked on the user, with a button that switches to the terminal.
+    fn needs_input_banner(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+        let SessionStatus::NeedsInput { reason } = self.status.clone()? else { return None };
+        let text = match reason {
+            Some(reason) => format!("Claude needs a response ({reason}) — switch to the terminal."),
+            None => "Claude needs a response — switch to the terminal.".to_string(),
+        };
+        Some(
+            div()
+                .id("reading-needs-input")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(theme.ui(10.))
+                .px(theme.ui(16.))
+                .py(theme.ui(10.))
+                .bg(rgb(mix(theme.tokens.accent, theme.tokens.surface, 0.22)))
+                .border_t_1()
+                .border_color(rgb(theme.tokens.line))
+                .child(div().flex_1().min_w_0().text_sm().text_color(rgb(theme.tokens.text)).child(text))
+                .child(
+                    div()
+                        .id("reading-to-terminal")
+                        .flex_none()
+                        .px(theme.ui(12.))
+                        .py(theme.ui(5.))
+                        .rounded(px(RADIUS_SMALL))
+                        .bg(rgb(theme.tokens.accent))
+                        .text_color(rgb(theme.tokens.on_accent))
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .cursor_pointer()
+                        .child("Open terminal")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ReadingEvent::ShowTerminal))),
+                ),
+        )
+    }
+
+    /// The prompt box pinned at the bottom, with a "Claude is working…" line while the session is busy.
+    fn prompt_bar(&self, focused: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let working = matches!(self.status, Some(SessionStatus::Busy));
+        let placeholder = "Message Claude…  (Enter to send, Shift+Enter for a newline)";
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(rgb(theme.tokens.line))
+            .bg(rgb(theme.tokens.surface))
+            .when(working, |bar| {
+                bar.child(
+                    div()
+                        .px(theme.ui(16.))
+                        .pt(theme.ui(8.))
+                        .text_xs()
+                        .text_color(rgb(theme.tokens.accent))
+                        .child("Claude is working…"),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(10.))
+                    .px(theme.ui(16.))
+                    .py(theme.ui(12.))
+                    .child(div().flex_1().min_w_0().text_size(theme.ui(14.)).child(field::render(
+                        &self.input,
+                        placeholder,
+                        focused,
+                        theme,
+                        field::on_press(cx, |this, offset, clicks, window, cx| {
+                            this.input.press(offset, clicks);
+                            this.focus_handle.focus(window, cx);
+                            cx.notify();
+                        }),
+                    )))
+                    .child(
+                        div()
+                            .id("reading-send")
+                            .flex_none()
+                            .px(theme.ui(12.))
+                            .py(theme.ui(6.))
+                            .rounded(px(RADIUS_SMALL))
+                            .bg(rgb(theme.tokens.accent))
+                            .text_color(rgb(theme.tokens.on_accent))
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .child("Send")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                    ),
+            )
+    }
+}
+
+/// One message: a speaker label with a copy-message button, then its blocks (each with a copy button on hover).
+fn render_message(index: usize, message: &Shown, mono: &SharedString, theme: &Theme) -> impl IntoElement {
     let (label, fill, ink) = if message.you {
         ("You", theme.tokens.accent, theme.tokens.on_accent)
     } else {
         ("Claude", theme.tokens.raised, theme.tokens.text)
     };
+    let group = SharedString::from(format!("rv-msg-{index}"));
+    let blocks = message.blocks.iter().enumerate().map(move |(bi, block)| {
+        let block_group = SharedString::from(format!("rv-blk-{index}-{bi}"));
+        div().relative().group(block_group.clone()).child(render_block(block, mono, theme)).child(copy_button(
+            format!("rv-blkcopy-{index}-{bi}"),
+            block_source(block),
+            block_group,
+            theme,
+        ))
+    });
     div()
+        .group(group.clone())
         .w_full()
         .flex()
         .flex_col()
         .gap(theme.ui(8.))
         .child(
             div()
-                .flex_none()
-                .px(theme.ui(10.))
-                .py(theme.ui(2.))
-                .rounded(px(RADIUS_SMALL))
-                .bg(rgb(fill))
-                .text_color(rgb(ink))
-                .text_size(theme.ui(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(label)
-                .self_start(),
+                .flex()
+                .items_center()
+                .gap(theme.ui(8.))
+                .child(
+                    div()
+                        .flex_none()
+                        .px(theme.ui(10.))
+                        .py(theme.ui(2.))
+                        .rounded(px(RADIUS_SMALL))
+                        .bg(rgb(fill))
+                        .text_color(rgb(ink))
+                        .text_size(theme.ui(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(label),
+                )
+                .child(copy_button(format!("rv-msgcopy-{index}"), message.source.clone(), group, theme)),
         )
-        .child(div().w_full().flex().flex_col().gap(theme.ui(10.)).children(render_blocks(
-            &message.blocks,
-            mono,
-            theme,
-        )))
+        .child(div().w_full().flex().flex_col().gap(theme.ui(10.)).children(blocks))
+}
+
+/// A small "Copy" button revealed when its `group` is hovered; copies `text` to the clipboard on click.
+fn copy_button(id: String, text: String, group: SharedString, theme: &Theme) -> impl IntoElement {
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .px(theme.ui(6.))
+        .py(theme.ui(1.))
+        .rounded(px(RADIUS_SMALL))
+        .bg(rgb(theme.tokens.raised))
+        .text_size(theme.ui(10.5))
+        .text_color(rgb(theme.tokens.muted))
+        .cursor_pointer()
+        .opacity(0.)
+        .group_hover(group, |style| style.opacity(1.))
+        .hover(|style| style.text_color(rgb(theme.tokens.text)))
+        .child("Copy")
+        .on_click(move |_, _, cx: &mut App| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
 }
 
 /// The blocks of a message (or of a list item / blockquote), in order.
@@ -190,7 +412,6 @@ fn render_blocks(blocks: &[Block], mono: &SharedString, theme: &Theme) -> Vec<gp
 fn render_block(block: &Block, mono: &SharedString, theme: &Theme) -> gpui::AnyElement {
     match block {
         Block::Heading { level, inlines } => {
-            // Size variety by level; everything bold.
             let size = match level {
                 1 => 25.,
                 2 => 21.,
@@ -280,7 +501,6 @@ fn render_code_block(lang: Option<&str>, text: &str, mono: &SharedString, theme:
         .map(|line| {
             div()
                 .whitespace_nowrap()
-                // A blank line keeps its height.
                 .child(if line.is_empty() { " ".to_string() } else { line.to_string() })
                 .into_any_element()
         })
@@ -314,7 +534,7 @@ fn render_code_block(lang: Option<&str>, text: &str, mono: &SharedString, theme:
 }
 
 /// Inline runs as one wrapping `StyledText`: bold/italic weights, a tinted box for inline code, and an accent
-/// underline for links. The runs are concatenated and each styled over its byte range.
+/// underline for links.
 fn styled_line(inlines: &[Inline], theme: &Theme) -> StyledText {
     let mut text = String::new();
     let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
@@ -343,4 +563,35 @@ fn styled_line(inlines: &[Inline], theme: &Theme) -> StyledText {
         }
     }
     StyledText::new(text).with_highlights(highlights)
+}
+
+/// The plain source text of a block, for the copy button (code verbatim; other blocks as readable text).
+fn block_source(block: &Block) -> String {
+    match block {
+        Block::Heading { inlines, .. } | Block::Paragraph { inlines } => inline_text(inlines),
+        Block::CodeBlock { text, .. } => text.clone(),
+        Block::BulletList { items } => {
+            items.iter().map(|item| format!("- {}", blocks_text(item))).collect::<Vec<_>>().join("\n")
+        }
+        Block::OrderedList { start, items } => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| format!("{}. {}", start + i as u64, blocks_text(item)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::Quote { blocks } => {
+            blocks.iter().map(|b| format!("> {}", block_source(b))).collect::<Vec<_>>().join("\n")
+        }
+        Block::Rule => "---".to_string(),
+    }
+}
+
+/// The concatenated text of inline runs.
+fn inline_text(inlines: &[Inline]) -> String {
+    inlines.iter().map(|run| run.text.as_str()).collect()
+}
+
+/// A list item's blocks as one line of text.
+fn blocks_text(blocks: &[Block]) -> String {
+    blocks.iter().map(block_source).collect::<Vec<_>>().join(" ")
 }

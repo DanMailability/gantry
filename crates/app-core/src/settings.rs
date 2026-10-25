@@ -421,6 +421,8 @@ pub struct Settings {
     pub animate_ui: bool,
     /// Whether Gantry asks GitHub once a day for a newer release.
     pub check_for_updates: bool,
+    /// Whether new Claude panes open in the reading view instead of the terminal (per-pane toggle still overrides).
+    pub reading_view_default: bool,
     /// The first-run wizard has been answered (imported or skipped), so it does not open by itself.
     pub setup_done: bool,
 }
@@ -490,6 +492,7 @@ impl Default for Settings {
             animate_working: true,
             animate_ui: true,
             check_for_updates: true,
+            reading_view_default: false,
             setup_done: false,
         }
     }
@@ -876,6 +879,7 @@ impl Reader {
         let animate_working = self.bool(raw, "", "animateWorking", true);
         let animate_ui = self.bool(raw, "", "animateUi", true);
         let check_for_updates = self.bool(raw, "", "checkForUpdates", true);
+        let reading_view_default = self.bool(raw, "", "readingViewDefault", false);
         let setup_done = self.bool(raw, "", "setupDone", false);
 
         let map = self.object(raw, "", "alerts");
@@ -994,6 +998,7 @@ impl Reader {
             animate_working,
             animate_ui,
             check_for_updates,
+            reading_view_default,
             setup_done,
         }
     }
@@ -1149,6 +1154,11 @@ fn leaves(settings: &Settings) -> Vec<(Vec<&'static str>, Value, bool)> {
         &["checkForUpdates"],
         settings.check_for_updates.into(),
         settings.check_for_updates != default.check_for_updates,
+    );
+    add(
+        &["readingViewDefault"],
+        settings.reading_view_default.into(),
+        settings.reading_view_default != default.reading_view_default,
     );
     add(&["setupDone"], settings.setup_done.into(), settings.setup_done != default.setup_done);
     out

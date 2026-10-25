@@ -471,6 +471,25 @@ impl SettingsView {
             cx,
         );
 
+        let reading_default = settings.reading_view_default;
+        let reading_switch = self.switch(
+            "reading-view-default",
+            0,
+            reading_default,
+            window,
+            cx,
+            change(move |settings| settings.reading_view_default = !reading_default),
+        );
+        let reading_reset = self.reset_slot(
+            "reset-reading-view-default",
+            0,
+            settings,
+            |s| s.reading_view_default,
+            |s, v| s.reading_view_default = v,
+            window,
+            cx,
+        );
+
         let size_control = self.stepper(&LAST_PROMPT_SIZE, settings, window, cx);
         let size_reset = self.reset_slot(
             "reset-last-prompt-size",
@@ -553,6 +572,13 @@ impl SettingsView {
                     "Show your last prompt in a card above each Claude pane.",
                     prompt_switch,
                     prompt_reset,
+                ),
+                row(
+                    theme,
+                    "Reading view by default",
+                    "Open Claude sessions as a formatted-Markdown reading view instead of the terminal. Ctrl+Shift+M (or the pane's page button) switches a pane either way.",
+                    reading_switch,
+                    reading_reset,
                 ),
                 row(theme, "Prompt text size", "Two lines at most; the card grows with it.", size_control, size_reset),
                 row(

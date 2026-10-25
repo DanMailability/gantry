@@ -31,6 +31,10 @@ impl WorkspaceView {
             this.on_pane_event(leaf, *event, window, cx)
         });
         self.slots.insert(leaf, Slot { view, _subscription: subscription });
+        // Open Claude panes in the reading view when the user set that default (the per-pane toggle still overrides).
+        if cx.global::<SettingsStore>().settings().reading_view_default {
+            self.open_reading(leaf, window, cx);
+        }
     }
 
     pub(super) fn spawn_leaf(
