@@ -330,6 +330,19 @@ pub enum ClientMessage {
         #[serde(with = "base64_bytes")]
         data: Vec<u8>,
     },
+    /// Save an attached file where `pane`'s Claude can read it (by path); answered by `AttachmentSaved` or
+    /// `AttachmentFailed`. Only sent to a daemon whose `Welcome.attachment` is true (no protocol bump).
+    SaveAttachment {
+        /// The pane the file is attached to.
+        pane: PaneId,
+        /// Client-chosen id echoed in the reply.
+        request: u64,
+        /// The file's original name (used, sanitised, in the saved path so Claude sees a meaningful name).
+        name: String,
+        /// The file's bytes (a base64 string on the wire).
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
     /// Git state of the repo containing `folder` (absolute, or starting with `~`); answered by `GitStatus` or
     /// `GitUnavailable`.
     GitStatus {
@@ -590,6 +603,9 @@ pub enum DaemonMessage {
         /// The daemon answers `ReadTranscript` (the reading view); older daemons send none.
         #[serde(default)]
         transcript: bool,
+        /// The daemon answers `SaveAttachment` (file attachments in the composer); older daemons send none.
+        #[serde(default)]
+        attachment: bool,
     },
     /// Handshake rejected; only `StopAll` is accepted afterwards.
     VersionMismatch {
@@ -712,6 +728,20 @@ pub enum DaemonMessage {
         /// Why, readable.
         reason: String,
     },
+    /// The answer to `SaveAttachment`: the file is saved at `path`, as the pane's Claude sees it.
+    AttachmentSaved {
+        /// Echoed request id.
+        request: u64,
+        /// Absolute path of the saved file on the pane's host (or inside its container).
+        path: String,
+    },
+    /// `SaveAttachment` failed.
+    AttachmentFailed {
+        /// Echoed request id.
+        request: u64,
+        /// Why, readable.
+        reason: String,
+    },
     /// The answer to `GitStatus`.
     GitStatus {
         /// Echoed request id.
@@ -825,6 +855,7 @@ mod tests {
                 app_commit: Some("a1b2c3d".into()),
                 paste_image: true,
                 transcript: true,
+                attachment: true,
             },
             DaemonMessage::Welcome {
                 protocol: PROTOCOL_VERSION,
@@ -834,6 +865,7 @@ mod tests {
                 app_commit: None,
                 paste_image: false,
                 transcript: false,
+                attachment: false,
             },
             DaemonMessage::Spawned { request: 3, pane: 9, cwd: "/srv".into() },
         ] {
@@ -965,7 +997,8 @@ mod tests {
                 app_version: None,
                 app_commit: None,
                 paste_image: false,
-                transcript: false
+                transcript: false,
+                attachment: false
             }
         );
         let new = DaemonMessage::Welcome {
@@ -976,6 +1009,7 @@ mod tests {
             app_commit: Some("a1b2c3d".into()),
             paste_image: true,
             transcript: false,
+            attachment: false,
         };
         let json = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), new);
@@ -997,7 +1031,8 @@ mod tests {
                 app_version: None,
                 app_commit: None,
                 paste_image: false,
-                transcript: false
+                transcript: false,
+                attachment: false
             }
         );
         let spawn = r#"{"program":"sh","args":[],"cwd":"/","cols":80,"rows":24}"#;
@@ -1205,6 +1240,31 @@ mod tests {
         let old_welcome = r#"{"type":"welcome","protocol":10,"instance":"x"}"#;
         match serde_json::from_str::<DaemonMessage>(old_welcome).unwrap() {
             DaemonMessage::Welcome { transcript, .. } => assert!(!transcript),
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attachment_messages_round_trip_and_capability_defaults_off() {
+        let request = ClientMessage::SaveAttachment {
+            pane: 4,
+            request: 9,
+            name: "notes.pdf".into(),
+            data: vec![0x25, b'P', b'D', b'F'],
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.starts_with(r#"{"type":"save_attachment","#), "{json}");
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), request);
+        for reply in [
+            DaemonMessage::AttachmentSaved { request: 9, path: "/tmp/gantry-paste/ab/notes.pdf".into() },
+            DaemonMessage::AttachmentFailed { request: 9, reason: "disk full".into() },
+        ] {
+            let json = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<DaemonMessage>(&json).unwrap(), reply);
+        }
+        let old_welcome = r#"{"type":"welcome","protocol":10,"instance":"x"}"#;
+        match serde_json::from_str::<DaemonMessage>(old_welcome).unwrap() {
+            DaemonMessage::Welcome { attachment, .. } => assert!(!attachment),
             other => panic!("expected Welcome, got {other:?}"),
         }
     }

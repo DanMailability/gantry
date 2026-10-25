@@ -453,6 +453,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: Stream) {
             app_commit: Some(protocol::build::COMMIT.into()),
             paste_image: shared.paste_dir.is_some(),
             transcript: true,
+            attachment: shared.paste_dir.is_some(),
         }));
         state.client = Some(Client { id, outbox: outbox.clone(), attached: HashSet::new(), kicked: kicked.clone() });
         id
@@ -708,6 +709,9 @@ fn handle_message(shared: &Arc<Shared>, client_id: u64, message: ClientMessage) 
         }
         ClientMessage::ListDir { request, path } => list_dir_request(shared, request, path),
         ClientMessage::SavePasteImage { pane, format, data } => paste_image_request(shared, pane, format, data),
+        ClientMessage::SaveAttachment { pane, request, name, data } => {
+            save_attachment_request(shared, pane, request, name, data)
+        }
         ClientMessage::GitStatus { request, folder, known_head } => {
             git_status_request(shared, request, folder, known_head)
         }
@@ -894,6 +898,40 @@ fn paste_image_request(shared: &Arc<Shared>, pane: PaneId, format: ImageFormat, 
             Err(reason) => {
                 tracing::warn!(pane, "pasted image not saved: {reason}");
                 DaemonMessage::PasteImageFailed { pane, reason }
+            }
+        };
+        shared.lock().control(&reply);
+    });
+}
+
+/// Answer `SaveAttachment` off the async threads: save the file where the pane's Claude can read it (same place as
+/// pasted images) and return its path. A container pane's file goes into its container, any other into the paste
+/// folder beside the socket.
+fn save_attachment_request(shared: &Arc<Shared>, pane: PaneId, request: u64, name: String, data: Vec<u8>) {
+    let target = shared
+        .lock()
+        .panes
+        .get(&pane)
+        .map(|p| p.container_id.as_ref().map(|id| (id.clone(), p.container_user.clone())));
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || {
+        let saved = match (target, &shared.paste_dir, &shared.docker) {
+            (None, _, _) => Err("no such pane".to_string()),
+            (_, None, _) => Err("attachments are off".to_string()),
+            (Some(Some(_)), _, None) => Err("dev containers are off".to_string()),
+            (Some(Some((id, user))), _, Some(docker)) => {
+                paste_image::save_attachment_in_container(docker, &id, user.as_deref(), &name, &data)
+            }
+            (Some(None), Some(dir), _) => {
+                paste_image::save_attachment_local(dir, &name, &data, std::time::SystemTime::now())
+                    .map(|path| path.to_string_lossy().into_owned())
+            }
+        };
+        let reply = match saved {
+            Ok(path) => DaemonMessage::AttachmentSaved { request, path },
+            Err(reason) => {
+                tracing::warn!(pane, "attachment not saved: {reason}");
+                DaemonMessage::AttachmentFailed { request, reason }
             }
         };
         shared.lock().control(&reply);

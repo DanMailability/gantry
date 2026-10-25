@@ -166,6 +166,20 @@ pub enum ClientEvent {
         /// Whether the transcript file was found on the host.
         found: bool,
     },
+    /// The answer to `save_attachment`: the file is at `path`, as the pane's Claude sees it.
+    AttachmentSaved {
+        /// Echoed request id.
+        request: u64,
+        /// Absolute path of the saved file.
+        path: String,
+    },
+    /// `save_attachment` failed.
+    AttachmentFailed {
+        /// Echoed request id.
+        request: u64,
+        /// Why.
+        reason: String,
+    },
     /// The answer to `save_paste_image`: the image is at `path`, as the pane's Claude sees it.
     PasteImageSaved {
         /// The pane that asked.
@@ -224,6 +238,8 @@ pub struct DaemonClient {
     paste_image: bool,
     /// Whether the daemon's `Welcome` said it answers `read_transcript` (the reading view).
     transcript: bool,
+    /// Whether the daemon's `Welcome` said it answers `save_attachment` (file attachments).
+    attachment: bool,
 }
 
 /// What the handshake returned.
@@ -234,6 +250,7 @@ pub(crate) struct Hello {
     pub(crate) daemon_commit: Option<String>,
     pub(crate) paste_image: bool,
     pub(crate) transcript: bool,
+    pub(crate) attachment: bool,
     pub(crate) panes: Vec<PaneInfo>,
 }
 
@@ -367,6 +384,17 @@ impl DaemonClient {
         self.paste_image
     }
 
+    /// Whether this daemon answers `save_attachment` (file attachments); false for a daemon from before the feature.
+    pub fn attachment(&self) -> bool {
+        self.attachment
+    }
+
+    /// Save an attached file where `pane`'s Claude can read it; answered by `AttachmentSaved`/`AttachmentFailed` with
+    /// the same `request`. Only for a daemon whose `attachment` is true.
+    pub fn save_attachment(&self, pane: PaneId, request: u64, name: &str, data: &[u8]) {
+        self.send(&ClientMessage::SaveAttachment { pane, request, name: name.into(), data: data.to_vec() });
+    }
+
     /// Save an image where `pane`'s Claude can read it; answered by `PasteImageSaved` or `PasteImageFailed`. Only for
     /// a daemon whose `paste_image` is true.
     pub fn save_paste_image(&self, pane: PaneId, format: ImageFormat, data: Vec<u8>) {
@@ -425,7 +453,7 @@ impl Link {
         let (outgoing_tx, outgoing) = mpsc::unbounded_channel();
         let (events_tx, events) = async_channel::bounded(EVENT_QUEUE);
         Link {
-            client: DaemonClient { outgoing: outgoing_tx, paste_image: false, transcript: false },
+            client: DaemonClient { outgoing: outgoing_tx, paste_image: false, transcript: false, attachment: false },
             outgoing,
             events_tx,
             events,
@@ -439,9 +467,11 @@ pub(crate) fn connection(
     hello: Hello,
     events: async_channel::Receiver<ClientEvent>,
 ) -> Connection {
-    let Hello { instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript, panes } = hello;
+    let Hello { instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript, attachment, panes } =
+        hello;
     client.paste_image = paste_image;
     client.transcript = transcript;
+    client.attachment = attachment;
     Connection { client, instance, claude_dir, daemon_version, daemon_commit, panes, events }
 }
 
@@ -514,6 +544,12 @@ where
                 Some(Ok(DaemonMessage::Transcript { request, messages, offset, found })) => {
                     ClientEvent::Transcript { request, messages, offset, found }
                 }
+                Some(Ok(DaemonMessage::AttachmentSaved { request, path })) => {
+                    ClientEvent::AttachmentSaved { request, path }
+                }
+                Some(Ok(DaemonMessage::AttachmentFailed { request, reason })) => {
+                    ClientEvent::AttachmentFailed { request, reason }
+                }
                 Some(Ok(DaemonMessage::PasteImageSaved { pane, path })) => ClientEvent::PasteImageSaved { pane, path },
                 Some(Ok(DaemonMessage::PasteImageFailed { pane, reason })) => {
                     ClientEvent::PasteImageFailed { pane, reason }
@@ -569,11 +605,18 @@ where
 {
     let io = |err: io::Error| StartError::Io(err.into());
     write_frame(send, &Frame::control(&ClientMessage::Hello { protocol: PROTOCOL_VERSION })).await.map_err(io)?;
-    let (instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript) =
+    let (instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript, attachment) =
         match next_message(recv).await? {
             DaemonMessage::Welcome {
-                instance, claude_dir, app_version, app_commit, paste_image, transcript, ..
-            } => (instance, claude_dir, app_version, app_commit, paste_image, transcript),
+                instance,
+                claude_dir,
+                app_version,
+                app_commit,
+                paste_image,
+                transcript,
+                attachment,
+                ..
+            } => (instance, claude_dir, app_version, app_commit, paste_image, transcript, attachment),
             DaemonMessage::VersionMismatch { daemon_protocol } => {
                 return Err(StartError::VersionMismatch { daemon_protocol });
             }
@@ -582,7 +625,16 @@ where
     write_frame(send, &Frame::control(&ClientMessage::ListPanes)).await.map_err(io)?;
     loop {
         if let DaemonMessage::Panes { panes } = next_message(recv).await? {
-            return Ok(Hello { instance, claude_dir, daemon_version, daemon_commit, paste_image, transcript, panes });
+            return Ok(Hello {
+                instance,
+                claude_dir,
+                daemon_version,
+                daemon_commit,
+                paste_image,
+                transcript,
+                attachment,
+                panes,
+            });
         }
     }
 }

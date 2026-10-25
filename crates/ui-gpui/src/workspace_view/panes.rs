@@ -330,6 +330,7 @@ impl WorkspaceView {
         self.slots.remove(&leaf);
         self.reading.remove(&leaf);
         self.reading_requests.retain(|_, waiting| *waiting != leaf);
+        self.attachment_requests.retain(|_, (l, _)| *l != leaf);
         self.marked_unread.remove(&leaf);
         if self.unseen.remove(&leaf).is_some() {
             self.sync_unseen(cx);

@@ -14,6 +14,8 @@ use std::time::Duration;
 use app_core::split_tree::NodeId;
 use gpui::{Context, Task, Window, prelude::*};
 
+use protocol::message::ImageFormat;
+
 use crate::reading_view::{ReadingEvent, ReadingView};
 
 /// How often each shown reading view re-requests its transcript.
@@ -71,7 +73,16 @@ impl WorkspaceView {
         let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ReadingEvent, window, cx| {
             this.on_reading_event(leaf, event, window, cx)
         });
-        self.reading.insert(leaf, Reading { view, offset: 0, request: None, _subscription: subscription });
+        self.reading.insert(
+            leaf,
+            Reading {
+                view,
+                offset: 0,
+                request: None,
+                pending_images: std::collections::VecDeque::new(),
+                _subscription: subscription,
+            },
+        );
         self.send_reading_request(leaf, cx);
         self.push_reading_status(leaf, cx);
     }
@@ -80,13 +91,96 @@ impl WorkspaceView {
     fn on_reading_event(&mut self, leaf: NodeId, event: &ReadingEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             ReadingEvent::Submit(text) => self.send_reading_input(leaf, text, cx),
+            ReadingEvent::SaveImage { id, format, data } => {
+                self.save_reading_image(leaf, *id, *format, data.clone(), cx)
+            }
+            ReadingEvent::SaveFile { id, name, data } => {
+                self.save_reading_file(leaf, *id, name.clone(), data.clone(), cx)
+            }
             ReadingEvent::ShowTerminal => {
                 if self.reading.remove(&leaf).is_some() {
                     self.reading_requests.retain(|_, waiting| *waiting != leaf);
+                    self.attachment_requests.retain(|_, (l, _)| *l != leaf);
                     self.focus_current(window, cx);
                     cx.notify();
                 }
             }
+        }
+    }
+
+    /// The pane's host and live pane key, and the reading view, for an attachment save (all `Some` only when the
+    /// pane is live and showing the reading view).
+    fn reading_target(
+        &self,
+        leaf: NodeId,
+    ) -> Option<(protocol::host::HostId, protocol::host::PaneKey, gpui::Entity<ReadingView>)> {
+        let entry = self.workspace.leaves.get(&leaf)?;
+        let key = entry.key()?;
+        let view = self.reading.get(&leaf)?.view.clone();
+        Some((entry.host.clone(), key, view))
+    }
+
+    /// Save a composer image on the pane's host (same path as a terminal paste); the chip resolves via PasteImageSaved.
+    fn save_reading_image(
+        &mut self,
+        leaf: NodeId,
+        id: u64,
+        format: ImageFormat,
+        data: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((host, key, view)) = self.reading_target(leaf) else { return };
+        let Some(client) = self.client(&host).cloned() else { return };
+        if !client.paste_image() {
+            view.update(cx, |view, cx| view.fail_attachment(id, cx));
+            return;
+        }
+        client.save_paste_image(key.pane, format, data);
+        if let Some(reading) = self.reading.get_mut(&leaf) {
+            reading.pending_images.push_back(id);
+        }
+    }
+
+    /// Save a composer file on the pane's host; the chip resolves via AttachmentSaved/AttachmentFailed.
+    fn save_reading_file(&mut self, leaf: NodeId, id: u64, name: String, data: Vec<u8>, cx: &mut Context<Self>) {
+        let Some((host, key, view)) = self.reading_target(leaf) else { return };
+        let Some(client) = self.client(&host).cloned() else { return };
+        if !client.attachment() {
+            view.update(cx, |view, cx| view.fail_attachment(id, cx));
+            return;
+        }
+        self.next_request += 1;
+        let request = self.next_request;
+        self.attachment_requests.insert(request, (leaf, id));
+        client.save_attachment(key.pane, request, &name, &data);
+    }
+
+    /// Whether `leaf`'s reading view has a pasted-image save in flight (so a PasteImageSaved belongs to it).
+    pub(super) fn has_pending_reading_image(&self, leaf: NodeId) -> bool {
+        self.reading.get(&leaf).is_some_and(|reading| !reading.pending_images.is_empty())
+    }
+
+    /// Resolve the oldest in-flight composer image for `leaf` with its host `path` (`None` = the save failed).
+    pub(super) fn on_reading_image(&mut self, leaf: NodeId, path: Option<String>, cx: &mut Context<Self>) {
+        let Some(id) = self.reading.get_mut(&leaf).and_then(|reading| reading.pending_images.pop_front()) else {
+            return;
+        };
+        let Some(reading) = self.reading.get(&leaf) else { return };
+        let view = reading.view.clone();
+        match path {
+            Some(path) => view.update(cx, |view, cx| view.set_attachment_path(id, path, cx)),
+            None => view.update(cx, |view, cx| view.fail_attachment(id, cx)),
+        }
+    }
+
+    /// Resolve a composer file attachment by its request with its host `path` (`None` = the save failed).
+    pub(super) fn on_attachment(&mut self, request: u64, path: Option<String>, cx: &mut Context<Self>) {
+        let Some((leaf, id)) = self.attachment_requests.remove(&request) else { return };
+        let Some(reading) = self.reading.get(&leaf) else { return };
+        let view = reading.view.clone();
+        match path {
+            Some(path) => view.update(cx, |view, cx| view.set_attachment_path(id, path, cx)),
+            None => view.update(cx, |view, cx| view.fail_attachment(id, cx)),
         }
     }
 
@@ -154,6 +248,7 @@ impl WorkspaceView {
         if in_flight.is_some() {
             return;
         }
+        view.update(cx, |view, cx| view.set_can_attach_files(client.attachment(), cx));
         if !client.transcript() {
             view.update(cx, |view, cx| {
                 view.set_notice(
