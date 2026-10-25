@@ -592,11 +592,77 @@ impl Render for ReadingView {
         } else {
             self.prompt_bar(focused, &theme, cx).into_any_element()
         };
-        base.child(body).child(bottom).into_any_element()
+        base.child(self.toolbar(&theme, cx)).child(body).child(bottom).into_any_element()
     }
 }
 
 impl ReadingView {
+    /// The toolbar: controls that drive the Claude Code TUI through the input path. Mode cycles with Shift+Tab;
+    /// Model and Effort open their slash-command menus, which render as the structured prompt card.
+    fn toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(theme.ui(6.))
+            .px(theme.ui(16.))
+            .py(theme.ui(6.))
+            .border_b_1()
+            .border_color(rgb(theme.tokens.line))
+            .child(self.tool_button(
+                "reading-mode",
+                "Mode ⇧⇥",
+                b"\x1b[Z".to_vec(),
+                "Cycle the mode (Shift+Tab)",
+                theme,
+                cx,
+            ))
+            .child(self.tool_button(
+                "reading-model",
+                "Model",
+                b"/model\r".to_vec(),
+                "Choose the model (/model)",
+                theme,
+                cx,
+            ))
+            .child(self.tool_button(
+                "reading-effort",
+                "Effort",
+                b"/effort\r".to_vec(),
+                "Choose the effort level (/effort)",
+                theme,
+                cx,
+            ))
+    }
+
+    /// One toolbar button that sends `bytes` to the pane when clicked.
+    fn tool_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        bytes: Vec<u8>,
+        tip: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let card =
+            HoverCard { title: tip.to_string(), status: None, dir: None, container: false, host: None, folder: None };
+        div()
+            .id(id)
+            .flex_none()
+            .px(theme.ui(8.))
+            .py(theme.ui(3.))
+            .rounded(px(RADIUS_SMALL))
+            .bg(rgb(theme.tokens.raised))
+            .text_xs()
+            .text_color(rgb(theme.tokens.text))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(mix(theme.tokens.accent, theme.tokens.raised, 0.25))))
+            .tooltip(hover_card::tooltip(card))
+            .child(label)
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReadingEvent::SendKeys(bytes.clone()))))
+    }
+
     /// A small "Open full terminal" button that flips the pane to the terminal view.
     fn open_terminal_button(&self, id: &'static str, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
