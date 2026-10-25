@@ -14,7 +14,7 @@ use std::time::Duration;
 use app_core::split_tree::NodeId;
 use gpui::{Context, Task, Window, prelude::*};
 
-use crate::reading_view::ReadingView;
+use crate::reading_view::{ReadingEvent, ReadingView};
 
 /// How often each shown reading view re-requests its transcript.
 const REFRESH: Duration = Duration::from_millis(1500);
@@ -56,11 +56,59 @@ impl WorkspaceView {
             cx.notify();
             return;
         }
-        let view = cx.new(ReadingView::new);
-        self.reading.insert(leaf, Reading { view, offset: 0, request: None });
-        self.send_reading_request(leaf, cx);
+        self.open_reading(leaf, window, cx);
         self.focus_current(window, cx);
         cx.notify();
+    }
+
+    /// Open a reading view for `leaf` (no focus change): create the view, subscribe to its prompt events, and start
+    /// fetching. Does nothing for a pane that cannot show it, or one already showing the reading view.
+    pub(super) fn open_reading(&mut self, leaf: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.reading_available(leaf) || self.reading.contains_key(&leaf) {
+            return;
+        }
+        let view = cx.new(ReadingView::new);
+        let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ReadingEvent, window, cx| {
+            this.on_reading_event(leaf, event, window, cx)
+        });
+        self.reading.insert(leaf, Reading { view, offset: 0, request: None, _subscription: subscription });
+        self.send_reading_request(leaf, cx);
+        self.push_reading_status(leaf, cx);
+    }
+
+    /// Handle a reading view's prompt event: send the typed text to the pane, or switch back to the terminal.
+    fn on_reading_event(&mut self, leaf: NodeId, event: &ReadingEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            ReadingEvent::Submit(text) => self.send_reading_input(leaf, text, cx),
+            ReadingEvent::ShowTerminal => {
+                if self.reading.remove(&leaf).is_some() {
+                    self.reading_requests.retain(|_, waiting| *waiting != leaf);
+                    self.focus_current(window, cx);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Send `text` to `leaf`'s Claude session over the daemon's input channel (local or SSH host). Multiline text is
+    /// wrapped in a bracketed paste; a carriage return submits it.
+    fn send_reading_input(&mut self, leaf: NodeId, text: &str, _cx: &mut Context<Self>) {
+        let Some(entry) = self.workspace.leaves.get(&leaf) else { return };
+        let host = entry.host.clone();
+        let Some(key) = entry.key() else { return };
+        let Some(client) = self.client(&host) else { return };
+        let mut bytes = app_core::paste::encode_paste(text, text.contains('\n'));
+        bytes.push(b'\r');
+        client.input(key.pane, &bytes);
+    }
+
+    /// Push `leaf`'s current session status into its reading view (for the working indicator and needs-input banner).
+    fn push_reading_status(&mut self, leaf: NodeId, cx: &mut Context<Self>) {
+        let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
+        if let Some(reading) = self.reading.get(&leaf) {
+            let view = reading.view.clone();
+            view.update(cx, |view, cx| view.set_status(status, cx));
+        }
     }
 
     /// The reading views' refresh timer: re-request each shown view's transcript from its last offset.
@@ -79,6 +127,7 @@ impl WorkspaceView {
     fn reading_tick(&mut self, cx: &mut Context<Self>) {
         let leaves: Vec<NodeId> = self.reading.keys().copied().collect();
         for leaf in leaves {
+            self.push_reading_status(leaf, cx);
             self.send_reading_request(leaf, cx);
         }
     }

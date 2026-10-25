@@ -115,6 +115,8 @@ struct Reading {
     offset: u64,
     /// The in-flight `read_transcript` request id, if any.
     request: Option<u64>,
+    /// Keeps the subscription to the view's prompt events (send / show-terminal) alive.
+    _subscription: Subscription,
 }
 
 /// Where a taken-over session is resumed.
