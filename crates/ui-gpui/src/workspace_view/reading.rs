@@ -217,12 +217,13 @@ impl WorkspaceView {
         // Parse the live screen into a prompt card. While waiting on input any parseable prompt counts; otherwise
         // (e.g. a /model or /effort menu that isn't a blocking prompt) only an actively selected menu counts, so
         // normal numbered output never pops a card.
-        let prompt = self
-            .slots
-            .get(&leaf)
-            .map(|slot| slot.view.read(cx).visible_lines())
-            .and_then(|lines| app_core::prompt::parse_prompt(&lines))
+        let lines = self.slots.get(&leaf).map(|slot| slot.view.read(cx).visible_lines());
+        let prompt = lines
+            .as_deref()
+            .and_then(app_core::prompt::parse_prompt)
             .filter(|prompt| needs_input || prompt.options.iter().any(|option| option.selected));
+        let status_line = lines.as_deref().map(app_core::status_line::parse_status).unwrap_or_default();
+        let tasks = lines.as_deref().map(app_core::status_line::parse_tasks).unwrap_or_default();
         let terminal_prompt = needs_input && prompt.is_none();
         if let Some(reading) = self.reading.get_mut(&leaf) {
             reading.terminal_prompt = terminal_prompt;
@@ -232,6 +233,8 @@ impl WorkspaceView {
             view.update(cx, |view, cx| {
                 view.set_status(status, cx);
                 view.set_prompt(prompt, cx);
+                view.set_status_line(status_line, cx);
+                view.set_tasks(tasks, cx);
             });
         }
     }

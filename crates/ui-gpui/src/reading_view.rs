@@ -9,6 +9,8 @@
 
 use app_core::markdown::{Block, Inline, parse_markdown};
 use app_core::prompt::Prompt;
+use app_core::session_tree::Tone;
+use app_core::status_line::{BackgroundTask, StatusLine};
 use app_core::text_field::TextField;
 use app_core::theme_colors::mix;
 use std::path::Path;
@@ -106,6 +108,14 @@ pub struct ReadingView {
     busy_since: Option<Instant>,
     /// While the scrollbar thumb is dragged: the pointer offset within the thumb, in pixels.
     bar_drag: Option<f32>,
+    /// Status chips parsed from the live footer; a chip shows only for a value that parsed.
+    status_line: StatusLine,
+    /// Background tasks parsed from the live screen; the chip/panel show only when non-empty.
+    tasks: Vec<BackgroundTask>,
+    /// Whether the background-tasks panel is open.
+    tasks_open: bool,
+    /// Which task row is expanded (to reveal the open-terminal note).
+    expanded_task: Option<usize>,
     /// A one-second ticker that redraws the working timer while Busy.
     _tick: Task<()>,
 }
@@ -137,6 +147,10 @@ impl ReadingView {
             scroll_focus: cx.focus_handle(),
             busy_since: None,
             bar_drag: None,
+            status_line: StatusLine::default(),
+            tasks: Vec::new(),
+            tasks_open: false,
+            expanded_task: None,
             _tick: cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -183,6 +197,26 @@ impl ReadingView {
     pub(crate) fn set_prompt(&mut self, prompt: Option<Prompt>, cx: &mut Context<Self>) {
         if self.prompt != prompt {
             self.prompt = prompt;
+            cx.notify();
+        }
+    }
+
+    /// Set the parsed status-line chips; redraws only when they change.
+    pub(crate) fn set_status_line(&mut self, status_line: StatusLine, cx: &mut Context<Self>) {
+        if self.status_line != status_line {
+            self.status_line = status_line;
+            cx.notify();
+        }
+    }
+
+    /// Set the parsed background tasks; closes the panel if the list becomes empty.
+    pub(crate) fn set_tasks(&mut self, tasks: Vec<BackgroundTask>, cx: &mut Context<Self>) {
+        if self.tasks != tasks {
+            self.tasks = tasks;
+            if self.tasks.is_empty() {
+                self.tasks_open = false;
+                self.expanded_task = None;
+            }
             cx.notify();
         }
     }
@@ -592,7 +626,11 @@ impl Render for ReadingView {
         } else {
             self.prompt_bar(focused, &theme, cx).into_any_element()
         };
-        base.child(self.toolbar(&theme, cx)).child(body).child(bottom).into_any_element()
+        base.child(self.toolbar(&theme, cx))
+            .child(body)
+            .child(bottom)
+            .children((self.tasks_open && !self.tasks.is_empty()).then(|| self.tasks_panel(&theme, cx)))
+            .into_any_element()
     }
 }
 
@@ -633,6 +671,112 @@ impl ReadingView {
                 theme,
                 cx,
             ))
+            // Current values read from the live footer; each shows only when it parsed.
+            .children(self.status_line.mode.as_ref().map(|v| value_chip("Mode", v, theme)))
+            .children(self.status_line.model.as_ref().map(|v| value_chip("Model", v, theme)))
+            .children(self.status_line.effort.as_ref().map(|v| value_chip("Effort", v, theme)))
+            .children(self.status_line.context.as_ref().map(|v| value_chip("", v, theme)))
+            .child(div().flex_1().min_w_0())
+            .children((!self.tasks.is_empty()).then(|| {
+                let running = self.tasks.iter().filter(|t| t.running).count().max(1);
+                div()
+                    .id("reading-tasks-chip")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(theme.ui(5.))
+                    .px(theme.ui(9.))
+                    .py(theme.ui(3.))
+                    .rounded(px(RADIUS_SMALL))
+                    .bg(rgb(mix(theme.tokens.accent, theme.tokens.surface, 0.28)))
+                    .text_xs()
+                    .text_color(rgb(theme.tokens.text))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(mix(theme.tokens.accent, theme.tokens.surface, 0.42))))
+                    .child(div().size(theme.ui(6.)).rounded_full().bg(rgb(theme.tone(Tone::Done).dot)))
+                    .child(format!("{running} task{} running", if running == 1 { "" } else { "s" }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.tasks_open = !this.tasks_open;
+                        cx.notify();
+                    }))
+            }))
+    }
+
+    /// The background-tasks panel (a dropdown card under the toolbar): one row per task with a status dot, name and
+    /// elapsed; a row expands to a note that per-task output opens in the terminal, with an "Open terminal" action.
+    fn tasks_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows =
+            self.tasks.iter().enumerate().map(|(index, task)| {
+                let expanded = self.expanded_task == Some(index);
+                let dot = if task.running { theme.tone(Tone::Done).dot } else { theme.tokens.muted };
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id(("reading-task-row", index))
+                            .flex()
+                            .items_center()
+                            .gap(theme.ui(8.))
+                            .px(theme.ui(12.))
+                            .py(theme.ui(8.))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme.tokens.raised)))
+                            .child(div().flex_none().size(theme.ui(7.)).rounded_full().bg(rgb(dot)))
+                            .child(div().flex_1().min_w_0().truncate().text_sm().child(task.name.clone()))
+                            .children(task.elapsed.as_ref().map(|e| {
+                                div().flex_none().text_xs().text_color(rgb(theme.tokens.muted)).child(e.clone())
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.expanded_task = if this.expanded_task == Some(index) { None } else { Some(index) };
+                                cx.notify();
+                            })),
+                    )
+                    .children(expanded.then(|| {
+                        div()
+                            .px(theme.ui(12.))
+                            .pb(theme.ui(8.))
+                            .flex()
+                            .flex_col()
+                            .gap(theme.ui(6.))
+                            .child(
+                                div().text_xs().text_color(rgb(theme.tokens.muted)).child(
+                                    "This task's live output isn't available here — open the terminal to see it.",
+                                ),
+                            )
+                            .child(self.open_terminal_button("reading-task-terminal", theme, cx))
+                    }))
+            });
+        div()
+            .id("reading-tasks-panel")
+            .occlude()
+            .absolute()
+            .top(theme.ui(38.))
+            .right(theme.ui(12.))
+            .w(theme.ui(320.))
+            .max_h(theme.ui(320.))
+            .overflow_y_scroll()
+            .rounded(px(RADIUS))
+            .bg(rgb(theme.tokens.raised))
+            .border_1()
+            .border_color(rgb(theme.tokens.line))
+            .child(
+                div()
+                    .px(theme.ui(12.))
+                    .py(theme.ui(8.))
+                    .border_b_1()
+                    .border_color(rgb(theme.tokens.line))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.tokens.muted))
+                    .child("Background tasks"),
+            )
+            .children(rows)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.tasks_open = false;
+                cx.notify();
+            }))
     }
 
     /// One toolbar button that sends `bytes` to the pane when clicked.
@@ -1189,6 +1333,20 @@ fn styled_line(inlines: &[Inline], theme: &Theme) -> StyledText {
         }
     }
     StyledText::new(text).with_highlights(highlights)
+}
+
+/// A small read-only status chip; with an empty `label` it shows just the value.
+fn value_chip(label: &str, value: &str, theme: &Theme) -> impl IntoElement {
+    let text = if label.is_empty() { value.to_string() } else { format!("{label}: {value}") };
+    div()
+        .flex_none()
+        .px(theme.ui(8.))
+        .py(theme.ui(3.))
+        .rounded(px(RADIUS_SMALL))
+        .bg(rgb(mix(theme.tokens.text, theme.tokens.surface, 0.06)))
+        .text_xs()
+        .text_color(rgb(theme.tokens.muted))
+        .child(text)
 }
 
 /// Seconds as `M:SS` (or `H:MM:SS` past an hour).
