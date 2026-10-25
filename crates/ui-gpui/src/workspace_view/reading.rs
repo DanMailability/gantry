@@ -214,14 +214,15 @@ impl WorkspaceView {
     fn push_reading_status(&mut self, leaf: NodeId, cx: &mut Context<Self>) {
         let status = self.workspace.leaf_status(leaf, self.sidebar.read(cx).sessions()).cloned();
         let needs_input = matches!(&status, Some(protocol::message::SessionStatus::NeedsInput { .. }));
-        let prompt = if needs_input {
-            self.slots
-                .get(&leaf)
-                .map(|slot| slot.view.read(cx).visible_lines())
-                .and_then(|lines| app_core::prompt::parse_prompt(&lines))
-        } else {
-            None
-        };
+        // Parse the live screen into a prompt card. While waiting on input any parseable prompt counts; otherwise
+        // (e.g. a /model or /effort menu that isn't a blocking prompt) only an actively selected menu counts, so
+        // normal numbered output never pops a card.
+        let prompt = self
+            .slots
+            .get(&leaf)
+            .map(|slot| slot.view.read(cx).visible_lines())
+            .and_then(|lines| app_core::prompt::parse_prompt(&lines))
+            .filter(|prompt| needs_input || prompt.options.iter().any(|option| option.selected));
         let terminal_prompt = needs_input && prompt.is_none();
         if let Some(reading) = self.reading.get_mut(&leaf) {
             reading.terminal_prompt = terminal_prompt;
