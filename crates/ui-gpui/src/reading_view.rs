@@ -12,12 +12,13 @@ use app_core::prompt::Prompt;
 use app_core::text_field::TextField;
 use app_core::theme_colors::mix;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use app_core::image_paste;
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontStyle,
-    FontWeight, HighlightStyle, IntoElement, KeyDownEvent, PathPromptOptions, ScrollHandle, SharedString, StyledText,
-    UnderlineStyle, Window, div, prelude::*, px, rgb,
+    FontWeight, HighlightStyle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, ScrollHandle, SharedString, StyledText, Task, UnderlineStyle, Window, div, prelude::*, px, rgb,
 };
 use protocol::message::{ImageFormat, SessionStatus, Speaker, TranscriptMessage};
 
@@ -98,6 +99,15 @@ pub struct ReadingView {
     /// Whether the pane's host daemon answers file attachments (images always work); pushed in by `WorkspaceView`.
     can_attach_files: bool,
     scroll: ScrollHandle,
+    /// Focus for the conversation area: when it has focus, PageUp/Down/arrows/Home/End scroll it (the composer, with
+    /// the main focus handle, types instead).
+    scroll_focus: FocusHandle,
+    /// When the session entered Busy (for the "Claude is working · M:SS" timer); reset each time Busy begins.
+    busy_since: Option<Instant>,
+    /// While the scrollbar thumb is dragged: the pointer offset within the thumb, in pixels.
+    bar_drag: Option<f32>,
+    /// A one-second ticker that redraws the working timer while Busy.
+    _tick: Task<()>,
 }
 
 impl Focusable for ReadingView {
@@ -124,6 +134,24 @@ impl ReadingView {
             next_attachment: 0,
             can_attach_files: true,
             scroll: ScrollHandle::new(),
+            scroll_focus: cx.focus_handle(),
+            busy_since: None,
+            bar_drag: None,
+            _tick: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this
+                        .update(cx, |view, cx| {
+                            if view.busy_since.is_some() {
+                                cx.notify();
+                            }
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }),
         }
     }
 
@@ -135,9 +163,17 @@ impl ReadingView {
         }
     }
 
-    /// Set the session status; redraws only when it changes.
+    /// Set the session status; redraws only when it changes. Starts the working timer when Busy begins and clears it
+    /// when Busy ends.
     pub(crate) fn set_status(&mut self, status: Option<SessionStatus>, cx: &mut Context<Self>) {
         if self.status != status {
+            let now_busy = matches!(&status, Some(SessionStatus::Busy));
+            let was_busy = matches!(&self.status, Some(SessionStatus::Busy));
+            if now_busy && !was_busy {
+                self.busy_since = Some(Instant::now());
+            } else if !now_busy {
+                self.busy_since = None;
+            }
             self.status = status;
             cx.notify();
         }
@@ -165,7 +201,7 @@ impl ReadingView {
         let found_changed = self.found != found;
         self.loaded = true;
         self.found = found;
-        if added && (self.pending_scroll || (!first_load && was_at_bottom)) {
+        if added && (self.pending_scroll || first_load || was_at_bottom) {
             self.scroll.scroll_to_bottom();
         }
         if added {
@@ -334,6 +370,142 @@ impl ReadingView {
         }
         None
     }
+
+    /// (scrolled px from top, max scroll px, viewport height px) for the conversation.
+    fn scroll_metrics(&self) -> (f32, f32, f32) {
+        let max = f32::from(self.scroll.max_offset().y).max(0.0);
+        let scrolled = (-f32::from(self.scroll.offset().y)).clamp(0.0, max);
+        let viewport = f32::from(self.scroll.bounds().size.height).max(1.0);
+        (scrolled, max, viewport)
+    }
+
+    /// Scroll so `scrolled` px sit above the top (clamped to the content).
+    fn scroll_to_px(&self, scrolled: f32) {
+        let max = f32::from(self.scroll.max_offset().y).max(0.0);
+        let x = self.scroll.offset().x;
+        self.scroll.set_offset(gpui::point(x, px(-scrolled.clamp(0.0, max))));
+    }
+
+    /// Scroll keys when the conversation area (not the composer) has focus.
+    fn on_scroll_keys(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let m = &event.keystroke.modifiers;
+        let (scrolled, max, viewport) = self.scroll_metrics();
+        let target = match event.keystroke.key.as_str() {
+            "pageup" => scrolled - viewport * 0.9,
+            "pagedown" | "space" => scrolled + viewport * 0.9,
+            "up" => scrolled - 60.0,
+            "down" => scrolled + 60.0,
+            "home" => 0.0,
+            "end" => max,
+            _ => {
+                // Swallow plain keys so they don't leak into the composer; let modifier chords (e.g. Ctrl+Shift+M)
+                // bubble up to the workspace shortcut.
+                if !(m.control || m.platform || m.alt) {
+                    cx.stop_propagation();
+                }
+                return;
+            }
+        };
+        self.scroll_to_px(target);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Press on the scrollbar track/thumb: grab the thumb (or jump it under the pointer) and start dragging.
+    fn press_bar(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
+        let (scrolled, max, viewport) = self.scroll_metrics();
+        if max <= 0.0 {
+            return;
+        }
+        let track_top = f32::from(self.scroll.bounds().origin.y);
+        let thumb_h = (viewport / (max + viewport) * viewport).clamp(24.0, viewport);
+        let thumb_top = track_top + (scrolled / max) * (viewport - thumb_h);
+        let grab =
+            if (thumb_top..=thumb_top + thumb_h).contains(&pointer_y) { pointer_y - thumb_top } else { thumb_h / 2.0 };
+        self.bar_drag = Some(grab);
+        self.drag_bar_to(pointer_y, grab);
+        cx.notify();
+    }
+
+    /// Move the scroll so the dragged thumb follows the pointer.
+    fn drag_bar_to(&self, pointer_y: f32, grab: f32) {
+        let (_, max, viewport) = self.scroll_metrics();
+        if max <= 0.0 {
+            return;
+        }
+        let track_top = f32::from(self.scroll.bounds().origin.y);
+        let thumb_h = (viewport / (max + viewport) * viewport).clamp(24.0, viewport);
+        let span = (viewport - thumb_h).max(0.0);
+        let thumb_top = (pointer_y - grab - track_top).clamp(0.0, span);
+        let frac = if span > 0.0 { thumb_top / span } else { 0.0 };
+        self.scroll_to_px(frac * max);
+    }
+
+    /// The always-visible scrollbar thumb, drawn over the right edge of the conversation; `None` when it all fits.
+    fn scrollbar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (scrolled, max, viewport) = self.scroll_metrics();
+        if max <= 1.0 {
+            return None;
+        }
+        let thumb_h = (viewport / (max + viewport) * viewport).clamp(24.0, viewport);
+        let thumb_top = (scrolled / max) * (viewport - thumb_h);
+        Some(
+            div()
+                .id("reading-scrollbar")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(10.))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.press_bar(f32::from(event.position.y), cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(thumb_top))
+                        .right(px(2.))
+                        .w(px(6.))
+                        .h(px(thumb_h))
+                        .rounded_full()
+                        .bg(rgb(mix(theme.tokens.text, theme.tokens.ground, 0.35))),
+                ),
+        )
+    }
+
+    /// The "Jump to latest" pill shown when the user has scrolled up.
+    fn jump_button(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("reading-jump")
+            .absolute()
+            .bottom(theme.ui(12.))
+            .right(theme.ui(18.))
+            .px(theme.ui(12.))
+            .py(theme.ui(6.))
+            .rounded_full()
+            .bg(rgb(theme.tokens.accent))
+            .text_color(rgb(theme.tokens.on_accent))
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .child("↓ Jump to latest")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.scroll.scroll_to_bottom();
+                cx.notify();
+            }))
+    }
+
+    /// The working line with an elapsed timer while Busy.
+    fn working_text(&self) -> String {
+        match self.busy_since {
+            Some(since) => format!("Claude is working · {}", elapsed(since.elapsed().as_secs())),
+            None => "Claude is working…".to_string(),
+        }
+    }
 }
 
 impl Render for ReadingView {
@@ -380,15 +552,36 @@ impl Render for ReadingView {
                     .enumerate()
                     .map(|(i, m)| render_message(i, m, &mono, &theme))
                     .collect::<Vec<_>>();
-                div()
+                let area = div()
                     .id("reading")
-                    .flex_1()
-                    .min_h_0()
+                    .track_focus(&self.scroll_focus)
+                    .on_key_down(cx.listener(Self::on_scroll_keys))
+                    .on_click(cx.listener(|this, _, window, cx| this.scroll_focus.focus(window, cx)))
+                    .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .child(div().w_full().flex().flex_col().items_center().px(theme.ui(20.)).py(theme.ui(22.)).child(
                         div().w_full().max_w(theme.ui(760.)).flex().flex_col().gap(theme.ui(26.)).children(messages),
-                    ))
+                    ));
+                let show_jump = !self.at_bottom() && !self.messages.is_empty();
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(area)
+                    .children(self.scrollbar(&theme, cx))
+                    .children(show_jump.then(|| self.jump_button(&theme, cx)))
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        if let Some(grab) = this.bar_drag {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                this.drag_bar_to(f32::from(event.position.y), grab);
+                                cx.notify();
+                            } else {
+                                this.bar_drag = None;
+                            }
+                        }
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.bar_drag = None))
                     .into_any_element()
             }
         };
@@ -594,7 +787,7 @@ impl ReadingView {
                         .pt(theme.ui(8.))
                         .text_xs()
                         .text_color(rgb(theme.tokens.accent))
-                        .child("Claude is working…"),
+                        .child(self.working_text()),
                 )
             })
             .child(
@@ -930,6 +1123,12 @@ fn styled_line(inlines: &[Inline], theme: &Theme) -> StyledText {
         }
     }
     StyledText::new(text).with_highlights(highlights)
+}
+
+/// Seconds as `M:SS` (or `H:MM:SS` past an hour).
+fn elapsed(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
 
 /// The plain source text of a block, for the copy button (code verbatim; other blocks as readable text).
